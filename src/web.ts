@@ -634,6 +634,16 @@ function setupWebSocket(server: any): WebSocketServer {
             attachments: msg.attachments,
           });
           if (!wsValidation.success) {
+            const errMsg: WsMessageOut = {
+              type: 'ws_error',
+              error: '消息格式无效',
+              chatJid: msg.chatJid,
+            };
+            ws.send(JSON.stringify(errMsg));
+            logger.warn(
+              { chatJid: msg.chatJid, issues: wsValidation.error.issues.map(i => i.message) },
+              'WebSocket send_message validation failed',
+            );
             return;
           }
           const { chatJid, content, attachments } = wsValidation.data;
@@ -648,6 +658,12 @@ function setupWebSocket(server: any): WebSocketServer {
                 targetGroup,
               )
             ) {
+              const accessDeniedMsg: WsMessageOut = {
+                type: 'ws_error',
+                error: '无权访问该群组',
+                chatJid,
+              };
+              ws.send(JSON.stringify(accessDeniedMsg));
               logger.warn(
                 { chatJid, userId: session.user_id },
                 'WebSocket send_message blocked: access denied',
@@ -656,6 +672,12 @@ function setupWebSocket(server: any): WebSocketServer {
             }
             if (isHostExecutionGroup(targetGroup)) {
               if (session.role !== 'admin') {
+                const hostModeMsg: WsMessageOut = {
+                  type: 'ws_error',
+                  error: '宿主机模式需要管理员权限',
+                  chatJid,
+                };
+                ws.send(JSON.stringify(hostModeMsg));
                 logger.warn(
                   { chatJid, userId: session.user_id },
                   'WebSocket send_message blocked: host mode requires admin',

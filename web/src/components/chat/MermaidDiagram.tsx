@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy, Check, Maximize2, X } from 'lucide-react';
+import DOMPurify from 'dompurify';
+
+/** 对 mermaid 渲染的 SVG 进行消毒，防止 XSS */
+function sanitizeSvg(raw: string): string {
+  return DOMPurify.sanitize(raw, {
+    USE_PROFILES: { svg: true, svgFilters: true },
+    ADD_TAGS: ['foreignObject'],
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed'],
+  });
+}
 
 let mermaidPromise: Promise<typeof import('mermaid')> | null = null;
 let idCounter = 0;
@@ -79,7 +89,7 @@ export function MermaidDiagram({ code }: MermaidDiagramProps) {
       try {
         const rendered = await renderWithRetry(currentCode, 0);
         if (!disposed && codeRef.current === currentCode) {
-          setSvg(rendered);
+          setSvg(sanitizeSvg(rendered));
           setError(null);
           setLoading(false);
         }
