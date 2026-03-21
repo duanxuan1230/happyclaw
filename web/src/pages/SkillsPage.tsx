@@ -1,10 +1,12 @@
 import { useEffect, useState, useMemo } from 'react';
-import { Plus, RefreshCw, Puzzle, Download } from 'lucide-react';
+import { Plus, RefreshCw, Puzzle, Download, Timer } from 'lucide-react';
 import { SearchInput } from '@/components/common';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonCardList } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 import { Button } from '@/components/ui/button';
+import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { Input } from '@/components/ui/input';
 import { useSkillsStore } from '../stores/skills';
 import { useAuthStore } from '../stores/auth';
 import { SkillCard } from '../components/skills/SkillCard';
@@ -18,9 +20,12 @@ export function SkillsPage() {
     error,
     installing,
     syncing,
+    syncStatus,
     loadSkills,
+    loadSyncStatus,
     installSkill,
     syncHostSkills,
+    setAutoSync,
   } = useSkillsStore();
 
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
@@ -29,10 +34,20 @@ export function SkillsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showInstallDialog, setShowInstallDialog] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [intervalInput, setIntervalInput] = useState<number>(syncStatus?.autoSyncIntervalMinutes ?? 10);
+  const [savingInterval, setSavingInterval] = useState(false);
 
   useEffect(() => {
     loadSkills();
-  }, [loadSkills]);
+    loadSyncStatus();
+  }, [loadSkills, loadSyncStatus]);
+
+  // Sync interval input when status loads
+  useEffect(() => {
+    if (syncStatus) {
+      setIntervalInput(syncStatus.autoSyncIntervalMinutes);
+    }
+  }, [syncStatus?.autoSyncIntervalMinutes]);
 
   const filtered = useMemo(() => {
     const q = searchQuery.toLowerCase();
@@ -78,12 +93,6 @@ export function SkillsPage() {
             subtitle={`用户级 ${manualUserSkills.length + syncedUserSkills.length}${syncedUserSkills.length > 0 ? `（含同步 ${syncedUserSkills.length}）` : ''} · 项目级 ${projectSkills.length} · 启用 ${enabledCount}`}
             actions={
               <div className="flex items-center gap-3">
-                {isAdmin && (
-                  <Button variant="outline" onClick={handleSync} disabled={syncing}>
-                    <Download size={18} className={syncing ? 'animate-pulse' : ''} />
-                    {syncing ? '同步中...' : '同步宿主机技能'}
-                  </Button>
-                )}
                 <Button variant="outline" onClick={loadSkills} disabled={loading}>
                   <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
                   刷新
@@ -96,6 +105,79 @@ export function SkillsPage() {
             }
           />
         </div>
+
+        {/* Admin sync panel */}
+        {isAdmin && syncStatus && (
+          <div className="mx-6 mt-4 p-4 bg-card border border-border rounded-lg space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Timer size={16} className="text-muted-foreground" />
+                <span className="text-sm font-medium text-foreground">宿主机技能同步</span>
+                {syncStatus.lastSyncAt && (
+                  <span className="text-xs text-muted-foreground">
+                    （上次：{new Date(syncStatus.lastSyncAt).toLocaleString()}）
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing}>
+                  <Download size={14} className={syncing ? 'animate-pulse' : ''} />
+                  {syncing ? '同步中...' : '立即同步'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">自动同步</span>
+                {syncStatus.autoSyncEnabled && (
+                  <span className="text-xs text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
+                    每 {syncStatus.autoSyncIntervalMinutes} 分钟
+                  </span>
+                )}
+              </div>
+              <ToggleSwitch
+                checked={syncStatus.autoSyncEnabled}
+                onChange={(enabled) => setAutoSync(enabled)}
+                aria-label="自动同步开关"
+              />
+            </div>
+
+            {syncStatus.autoSyncEnabled && (
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs text-muted-foreground shrink-0">同步间隔</span>
+                <Input
+                  type="number"
+                  value={intervalInput}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setIntervalInput(Number.isFinite(val) ? val : 10);
+                  }}
+                  min={1}
+                  max={1440}
+                  step={1}
+                  className="max-w-20 h-7 text-xs"
+                />
+                <span className="text-xs text-muted-foreground">分钟</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs px-2"
+                  disabled={savingInterval || intervalInput === syncStatus.autoSyncIntervalMinutes}
+                  onClick={async () => {
+                    setSavingInterval(true);
+                    try {
+                      await setAutoSync(true, intervalInput);
+                    } catch { /* handled by store */ }
+                    setSavingInterval(false);
+                  }}
+                >
+                  保存
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Sync message toast */}
         {syncMessage && (

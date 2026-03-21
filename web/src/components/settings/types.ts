@@ -102,6 +102,8 @@ export interface SystemSettings {
   loginLockoutMinutes: number;
   maxConcurrentScripts: number;
   scriptTimeout: number;
+  skillAutoSyncEnabled: boolean;
+  skillAutoSyncIntervalMinutes: number;
   billingEnabled: boolean;
   billingMode: 'wallet_first';
   billingMinStartBalanceUsd: number;

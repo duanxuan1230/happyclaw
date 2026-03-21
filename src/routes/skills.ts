@@ -10,6 +10,7 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
+import { getSystemSettings, saveSystemSettings, type SystemSettings } from '../runtime-config.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -602,6 +603,40 @@ skillsRoutes.get('/search/detail', authMiddleware, async (c) => {
   return c.json({ detail: null });
 });
 
+// Get sync status (last sync time + auto-sync config)
+skillsRoutes.get('/sync-status', authMiddleware, (c) => {
+  const authUser = c.get('user') as AuthUser;
+  const manifest = readHostSyncManifest(authUser.id);
+  const settings = getSystemSettings();
+  return c.json({
+    lastSyncAt: manifest.lastSyncAt || null,
+    syncedCount: manifest.syncedSkills.length,
+    autoSyncEnabled: settings.skillAutoSyncEnabled,
+    autoSyncIntervalMinutes: settings.skillAutoSyncIntervalMinutes,
+  });
+});
+
+// Toggle auto-sync on/off (admin only)
+skillsRoutes.put('/sync-settings', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  if (authUser.role !== 'admin') {
+    return c.json({ error: 'Only admin can change sync settings' }, 403);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const updates: Partial<SystemSettings> = {};
+  if (typeof body.autoSyncEnabled === 'boolean') {
+    updates.skillAutoSyncEnabled = body.autoSyncEnabled;
+  }
+  if (typeof body.autoSyncIntervalMinutes === 'number' && body.autoSyncIntervalMinutes >= 1) {
+    updates.skillAutoSyncIntervalMinutes = body.autoSyncIntervalMinutes;
+  }
+  const saved = saveSystemSettings(updates);
+  return c.json({
+    autoSyncEnabled: saved.skillAutoSyncEnabled,
+    autoSyncIntervalMinutes: saved.skillAutoSyncIntervalMinutes,
+  });
+});
+
 skillsRoutes.get('/:id', authMiddleware, (c) => {
   const id = c.req.param('id');
   const authUser = c.get('user') as AuthUser;
@@ -798,17 +833,16 @@ async function installSkillForUser(
   }
 }
 
-// Sync host-level skills (~/.claude/skills/) to admin's user-level directory.
-// Only admin can use this endpoint.
-skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
-  const authUser = c.get('user') as AuthUser;
-  if (authUser.role !== 'admin') {
-    return c.json({ error: 'Only admin can sync host skills' }, 403);
-  }
-
+/**
+ * Sync host-level skills (~/.claude/skills/) to a user's directory.
+ * Standalone function usable from both the API route and the auto-sync timer.
+ */
+async function syncHostSkillsForUser(
+  userId: string,
+): Promise<{ stats: { added: number; updated: number; deleted: number; skipped: number }; total: number }> {
   return withSkillInstallLock(async () => {
     const hostDir = getGlobalSkillsDir();
-    const userDir = getUserSkillsDir(authUser.id);
+    const userDir = getUserSkillsDir(userId);
     fs.mkdirSync(userDir, { recursive: true });
 
     // 1. 扫描宿主机 skills
@@ -817,7 +851,6 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
       for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
         const skillDir = path.join(hostDir, entry.name);
-        // 验证包含 SKILL.md 或 SKILL.md.disabled
         try {
           const realPath = fs.realpathSync(skillDir);
           if (
@@ -833,7 +866,7 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
     }
 
     // 2. 读取 manifest
-    const manifest = readHostSyncManifest(authUser.id);
+    const manifest = readHostSyncManifest(userId);
     const previouslySynced = new Set(manifest.syncedSkills);
 
     // 3. 检测用户目录中手动安装的 skills
@@ -852,7 +885,6 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
       const isManuallyInstalled =
         existingUserSkills.has(name) && !previouslySynced.has(name);
       if (isManuallyInstalled) {
-        // 手动安装的 skill，跳过不覆盖
         stats.skipped++;
         continue;
       }
@@ -861,12 +893,10 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
       const dest = path.join(userDir, name);
 
       if (existingUserSkills.has(name)) {
-        // 已存在且之前是同步来的 → 更新
         fs.rmSync(dest, { recursive: true, force: true });
         copySkillToUser(src, dest);
         stats.updated++;
       } else {
-        // 全新的 → 新增
         copySkillToUser(src, dest);
         stats.added++;
       }
@@ -884,14 +914,24 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
     }
 
     // 6. 更新 manifest
-    writeHostSyncManifest(authUser.id, {
+    writeHostSyncManifest(userId, {
       syncedSkills: newSyncedList,
       lastSyncAt: new Date().toISOString(),
     });
 
-    const total = hostSkillNames.length;
-    return c.json({ stats, total });
+    return { stats, total: hostSkillNames.length };
   });
+}
+
+// Sync host-level skills — API endpoint (admin only).
+skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
+  const authUser = c.get('user') as AuthUser;
+  if (authUser.role !== 'admin') {
+    return c.json({ error: 'Only admin can sync host skills' }, 403);
+  }
+
+  const result = await syncHostSkillsForUser(authUser.id);
+  return c.json(result);
 });
 
 skillsRoutes.post('/install', authMiddleware, async (c) => {
@@ -956,5 +996,5 @@ skillsRoutes.post('/:id/reinstall', authMiddleware, async (c) => {
   return c.json({ success: true, installed: installResult.installed });
 });
 
-export { getUserSkillsDir, installSkillForUser, deleteSkillForUser };
+export { getUserSkillsDir, installSkillForUser, deleteSkillForUser, syncHostSkillsForUser };
 export default skillsRoutes;
