@@ -16,7 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput, createSdkMcpServer, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { getChannelFromJid } from './channel-prefixes.js';
 
@@ -53,7 +53,6 @@ const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事
 
 let needsMemoryFlush = false;
 let hadCompaction = false;
-let currentPermissionMode: PermissionMode = 'bypassPermissions';
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
@@ -694,7 +693,6 @@ function shouldDrain(): boolean {
  */
 interface IpcDrainResult {
   messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }>;
-  modeChange?: string; // 'plan' | 'bypassPermissions'
 }
 
 function drainIpcInput(): IpcDrainResult {
@@ -714,8 +712,6 @@ function drainIpcInput(): IpcDrainResult {
             text: data.text,
             images: data.images,
           });
-        } else if (data.type === 'set_mode' && data.mode) {
-          result.modeChange = data.mode;
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -812,11 +808,7 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
         clearInterruptRequested();
       }
 
-      const { messages, modeChange } = drainIpcInput();
-      if (modeChange) {
-        currentPermissionMode = modeChange as PermissionMode;
-        log(`Mode change during idle: ${modeChange}`);
-      }
+      const { messages } = drainIpcInput();
 
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
@@ -980,7 +972,7 @@ async function runQuery(
   let resultReceivedAt: number | null = null;
   const POST_RESULT_TIMEOUT_MS = 5_000;
   // queryRef is set just before the for-await loop so pollIpcDuringQuery can call interrupt()
-  let queryRef: { interrupt(): Promise<void>; setPermissionMode(mode: PermissionMode): Promise<void> } | null = null;
+  let queryRef: { interrupt(): Promise<void> } | null = null;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -1039,14 +1031,7 @@ async function runQuery(
       return; // No setTimeout needed — watcher will trigger next check on file change
     }
 
-    const { messages, modeChange } = drainIpcInput();
-    if (modeChange) {
-      currentPermissionMode = modeChange as PermissionMode;
-      log(`Mode change via IPC: ${modeChange}`);
-      queryRef?.setPermissionMode(modeChange as PermissionMode).catch((err: unknown) =>
-        log(`setPermissionMode failed: ${err}`),
-      );
-    }
+    const { messages } = drainIpcInput();
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
       const rejected = stream.push(msg.text, msg.images);
@@ -1064,14 +1049,7 @@ async function runQuery(
   // Initial drain to process any pre-existing files
   pollIpcDuringQuery();
 
-  // Create the StreamEventProcessor with mode change callback
-  const processor = new StreamEventProcessor(emit, log, (newMode) => {
-    currentPermissionMode = newMode as PermissionMode;
-    log(`Auto mode switch on ${newMode === 'plan' ? 'EnterPlanMode' : 'ExitPlanMode'} detection`);
-    queryRef?.setPermissionMode(newMode as PermissionMode).catch((err: unknown) =>
-      log(`setPermissionMode failed: ${err}`),
-    );
-  });
+  const processor = new StreamEventProcessor(emit, log);
 
   // Build system prompt: memory recall guidance + global CLAUDE.md (for non-admin-home)
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
@@ -1232,7 +1210,7 @@ async function runQuery(
       allowedTools,
       ...(disallowedTools && { disallowedTools }),
       thinking: { type: 'adaptive' as const },
-      permissionMode: currentPermissionMode,
+      permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       agentProgressSummaries: true,
       settingSources: ['project', 'user'],
@@ -1627,10 +1605,6 @@ async function main(): Promise<void> {
     prompt = `[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]\n\n${prompt}`;
   }
   const pendingDrain = drainIpcInput();
-  if (pendingDrain.modeChange) {
-    currentPermissionMode = pendingDrain.modeChange as PermissionMode;
-    log(`Initial mode change via IPC: ${pendingDrain.modeChange}`);
-  }
   if (pendingDrain.messages.length > 0) {
     log(`Draining ${pendingDrain.messages.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pendingDrain.messages.map((m) => m.text).join('\n');

@@ -17,12 +17,9 @@ const SPECIAL_TOOLS = ['Skill', 'Task', 'Agent', 'AskUserQuestion', 'TodoWrite']
 
 type EmitFn = (output: ContainerOutput) => void;
 type LogFn = (message: string) => void;
-type ModeChangeRequestFn = (mode: string) => void;
-
 export class StreamEventProcessor {
   private readonly emit: EmitFn;
   private readonly log: LogFn;
-  private readonly onModeChangeRequest: ModeChangeRequestFn | null;
 
   // Text aggregation buffers — keyed by parentToolUseId (BUF_MAIN for top-level)
   private readonly BUF_MAIN = '__main__';
@@ -93,10 +90,9 @@ export class StreamEventProcessor {
   // Sub-agent active tools per parent task ID
   private readonly activeSubAgentToolsByTask = new Map<string, Set<string>>();
 
-  constructor(emit: EmitFn, log: LogFn, onModeChangeRequest?: ModeChangeRequestFn) {
+  constructor(emit: EmitFn, log: LogFn) {
     this.emit = emit;
     this.log = log;
-    this.onModeChangeRequest = onModeChangeRequest ?? null;
   }
 
   /** Get or create a buffer for a given key. */
@@ -241,19 +237,6 @@ export class StreamEventProcessor {
         toolInputSummary: summarizeToolInput(block.input),
       },
     });
-
-    // Detect ExitPlanMode/EnterPlanMode — auto-switch permission mode and notify frontend
-    if (block.name === 'ExitPlanMode' || block.name === 'EnterPlanMode') {
-      const newMode = block.name === 'ExitPlanMode' ? 'bypassPermissions' : 'plan';
-      this.log(`Detected ${block.name}, auto-switching to ${newMode}`);
-      if (this.onModeChangeRequest) {
-        this.onModeChangeRequest(newMode);
-      }
-      this.emit({
-        status: 'stream', result: null,
-        streamEvent: { eventType: 'mode_change', permissionMode: newMode },
-      });
-    }
 
     // Track Skill tool_use block
     if (block.name === 'Skill' && block.id) {
