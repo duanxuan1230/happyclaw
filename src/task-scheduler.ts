@@ -39,7 +39,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
-import { removeFlowArtifacts } from './routes/groups.js';
+import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
 import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';

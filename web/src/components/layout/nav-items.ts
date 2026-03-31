@@ -7,3 +7,10 @@ export const baseNavItems = [
   { path: '/billing', icon: Wallet, label: '账单', requiresBilling: true },
   { path: '/settings', icon: User, label: '设置' },
 ];
+
+export function filterNavItems(billingEnabled: boolean) {
+  return baseNavItems.filter((item) => {
+    if (item.requiresBilling && !billingEnabled) return false;
+    return true;
+  });
+}

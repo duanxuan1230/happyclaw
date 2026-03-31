@@ -5,6 +5,7 @@ import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useBillingStore } from '../../stores/billing';
 import { useGroupsStore } from '../../stores/groups';
+import { useClearWorkspace } from '../../hooks/useClearWorkspace';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/common';
 import { EmojiAvatar } from '../common/EmojiAvatar';
@@ -16,29 +17,8 @@ import { CreateContainerDialog } from '../chat/CreateContainerDialog';
 import { RenameDialog } from '../chat/RenameDialog';
 import { SkeletonCardList } from '@/components/common/Skeletons';
 import { cn } from '@/lib/utils';
-import { baseNavItems } from './nav-items';
-import type { GroupInfo } from '../../types';
-
-type GroupEntry = GroupInfo & { jid: string };
-type DateSection = { label: string; items: GroupEntry[] };
-
-function groupByDate(items: GroupEntry[]): DateSection[] {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const weekAgo = new Date(today.getTime() - 7 * 86400000);
-  const sections: DateSection[] = [
-    { label: '今天', items: [] },
-    { label: '最近 7 天', items: [] },
-    { label: '更早', items: [] },
-  ];
-  items.forEach((g) => {
-    const time = new Date(g.lastMessageTime || g.added_at);
-    if (time >= today) sections[0].items.push(g);
-    else if (time >= weekAgo) sections[1].items.push(g);
-    else sections[2].items.push(g);
-  });
-  return sections.filter((s) => s.items.length > 0);
-}
+import { filterNavItems } from './nav-items';
+import { type GroupEntry, type DateSection, groupByDate, compareByLastActivity } from '../../utils/group-utils';
 
 interface UnifiedSidebarProps {
   collapsed: boolean;
@@ -58,26 +38,19 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
   const userInitial = (user?.display_name || user?.username || '?')[0].toUpperCase();
 
   const navItems = useMemo(
-    () =>
-      baseNavItems.filter((item) => {
-        if (item.requiresBilling && !billingEnabled) return false;
-        if ('requireAdmin' in item && item.requireAdmin && user?.role !== 'admin') return false;
-        return true;
-      }),
-    [billingEnabled, user?.role],
+    () => filterNavItems(billingEnabled),
+    [billingEnabled],
   );
 
-  // ── Chat sidebar state ──
   const [createOpen, setCreateOpen] = useState(false);
   const [renameState, setRenameState] = useState({ open: false, jid: '', name: '' });
   const [deleteState, setDeleteState] = useState({ open: false, jid: '', name: '' });
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const [clearState, setClearState] = useState({ open: false, jid: '', name: '' });
-  const [clearLoading, setClearLoading] = useState(false);
+  const { clearState, clearLoading, openClear, closeClear, handleClearConfirm } = useClearWorkspace();
 
   const {
     groups, currentGroup, selectGroup, loadGroups, loading,
-    deleteFlow, clearHistory, togglePin,
+    deleteFlow, togglePin,
   } = useChatStore();
   const runnerStates = useGroupsStore((s) => s.runnerStates);
 
@@ -93,7 +66,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       if (info.is_my_home) main = entry;
       else others.push(entry);
     }
-    others.sort((a, b) => new Date(b.lastMessageTime || b.added_at).getTime() - new Date(a.lastMessageTime || a.added_at).getTime());
+    others.sort(compareByLastActivity);
     return { mainGroup: main, otherGroups: others };
   }, [groups]);
 
@@ -133,24 +106,6 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
     } finally { setDeleteLoading(false); }
   };
 
-  const handleClearConfirm = async () => {
-    setClearLoading(true);
-    try {
-      const ok = await clearHistory(clearState.jid);
-      if (ok) {
-        setClearState({ open: false, jid: '', name: '' });
-      } else {
-        alert('重建工作区失败，请稍后重试');
-        setClearState({ open: false, jid: '', name: '' });
-      }
-    } catch {
-      alert('重建工作区失败，请稍后重试');
-      setClearState({ open: false, jid: '', name: '' });
-    } finally {
-      setClearLoading(false);
-    }
-  };
-
   const renderSections = (sections: DateSection[], showCollabBadge: boolean) =>
     sections.map((section) => (
       <div key={section.label} className="mb-1">
@@ -168,7 +123,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
             editable={g.editable} deletable={g.deletable}
             onSelect={handleGroupSelect}
             onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-            onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
+            onClearHistory={openClear}
             onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
             onTogglePin={(jid) => togglePin(jid)}
           />
@@ -176,20 +131,16 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       </div>
     ));
 
-  // Panel width: 0 when collapsed, 16.5rem when expanded on chat
   const panelWidth = showWorkspaceList ? '16.5rem' : '0';
 
   return (
     <TooltipProvider delayDuration={200}>
     <div className="h-full flex flex-shrink-0">
-      {/* ═══ Left column: nav icons (FIXED, never animates) ═══ */}
       <nav className="w-[4.5rem] h-full bg-muted/30 flex flex-col items-center py-3 gap-1 flex-shrink-0">
-        {/* Logo — purely decorative, no click action */}
         <div className="w-11 h-11 rounded-xl overflow-hidden mb-3 flex-shrink-0">
           <img src={`${import.meta.env.BASE_URL}icons/icon-192.png`} alt="HappyClaw" className="w-full h-full object-cover" />
         </div>
 
-        {/* Nav items */}
         {navItems.map(({ path, icon: Icon, label }) => {
           const isChatItem = path === '/chat';
           const isActive = location.pathname.startsWith(path);
@@ -248,14 +199,11 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
         </Popover>
       </nav>
 
-      {/* ═══ Right column: workspace panel (ONLY this animates) ═══ */}
       <div
         className="h-full overflow-hidden transition-[width] duration-200 ease-linear"
         style={{ width: panelWidth }}
       >
-        {/* Fixed-width inner — never shrinks, just gets clipped */}
         <div className="w-[16.5rem] h-full flex flex-col bg-muted/30">
-          {/* Panel header — vertically aligned with left column logo */}
           <div className="flex items-center gap-2 px-4 pt-6 pb-3 mb-3 flex-shrink-0">
             <img src={`${import.meta.env.BASE_URL}icons/logo-text.svg`} alt={appearance?.appName || 'HappyClaw'} className="h-10" />
             <div className="flex-1" />
@@ -293,7 +241,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                           isRunning={runnerStates[mainGroup.jid] === 'running'} editable
                           onSelect={handleGroupSelect}
                           onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-                          onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
+                          onClearHistory={openClear}
                         />
                       </div>
                     )}
@@ -313,7 +261,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                             editable={g.editable} deletable={g.deletable}
                             onSelect={handleGroupSelect}
                             onRename={(jid, name) => setRenameState({ open: true, jid, name })}
-                            onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
+                            onClearHistory={openClear}
                             onDelete={(jid, name) => setDeleteState({ open: true, jid, name })}
                             onTogglePin={(jid) => togglePin(jid)}
                           />
@@ -349,15 +297,15 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                     )}
                   </>
                 )}
-          </div>{/* workspace scroll */}
-        </div>{/* w-[16.5rem] inner */}
-      </div>{/* panel transition */}
-    </div>{/* h-full flex container */}
+          </div>
+        </div>
+      </div>
+    </div>
 
         <BugReportDialog open={showBugReport} onClose={() => setShowBugReport(false)} />
         <CreateContainerDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
         <RenameDialog open={renameState.open} jid={renameState.jid} currentName={renameState.name} onClose={() => setRenameState({ open: false, jid: '', name: '' })} />
-        <ConfirmDialog open={clearState.open} onClose={() => setClearState({ open: false, jid: '', name: '' })} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading} />
+        <ConfirmDialog open={clearState.open} onClose={closeClear} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading} />
         <ConfirmDialog open={deleteState.open} onClose={() => setDeleteState({ open: false, jid: '', name: '' })} onConfirm={handleDeleteConfirm} title="删除工作区" message={`确认删除「${deleteState.name}」？不可撤销。`} confirmText="删除" confirmVariant="danger" loading={deleteLoading} />
     </TooltipProvider>
   );

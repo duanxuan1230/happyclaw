@@ -7,7 +7,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import { sdkQuery } from '../sdk-query.js';
 import { GROUPS_DIR } from '../config.js';
-import { removeFlowArtifacts } from './groups.js';
+import { removeFlowArtifacts } from '../file-manager.js';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { TaskCreateSchema, TaskPatchSchema } from '../schemas.js';

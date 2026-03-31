@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
@@ -7,35 +7,15 @@ import { ChatView } from '../components/chat/ChatView';
 import { ChatGroupItem } from '../components/chat/ChatGroupItem';
 import { ConfirmDialog } from '../components/common';
 import { useSwipeBack } from '../hooks/useSwipeBack';
+import { useClearWorkspace } from '../hooks/useClearWorkspace';
+import { compareByLastActivity } from '../utils/group-utils';
 
 export function ChatPage() {
   const { groupFolder } = useParams<{ groupFolder?: string }>();
   const navigate = useNavigate();
-  const { groups, currentGroup, selectGroup, loadGroups, clearHistory } = useChatStore();
+  const { groups, currentGroup, selectGroup, loadGroups } = useChatStore();
+  const { clearState, clearLoading, openClear, closeClear, handleClearConfirm } = useClearWorkspace();
 
-  const [clearState, setClearState] = useState({ open: false, jid: '', name: '' });
-  const [clearLoading, setClearLoading] = useState(false);
-
-  const handleClearConfirm = async () => {
-    setClearLoading(true);
-    try {
-      const ok = await clearHistory(clearState.jid);
-      if (ok) {
-        setClearState({ open: false, jid: '', name: '' });
-      } else {
-        alert('重建工作区失败，请稍后重试');
-        setClearState({ open: false, jid: '', name: '' });
-      }
-    } catch {
-      alert('重建工作区失败，请稍后重试');
-      setClearState({ open: false, jid: '', name: '' });
-    } finally {
-      setClearLoading(false);
-    }
-  };
-
-  // Load groups on mount (needed for mobile workspace list)
-  useEffect(() => { loadGroups(); }, [loadGroups]);
   const routeGroupJid = useMemo(() => {
     if (!groupFolder) return null;
     const entry =
@@ -58,7 +38,7 @@ export function ChatPage() {
     const entries = Object.entries(groups).map(([jid, info]) => ({ jid, ...info }));
     const home = entries.filter((g) => g.is_my_home);
     const rest = entries.filter((g) => !g.is_my_home);
-    rest.sort((a, b) => new Date(b.lastMessageTime || b.added_at).getTime() - new Date(a.lastMessageTime || a.added_at).getTime());
+    rest.sort(compareByLastActivity);
     return [...home, ...rest];
   }, [groups]);
 
@@ -118,7 +98,7 @@ export function ChatPage() {
                   isRunning={runnerStates[g.jid] === 'running'}
                   editable={g.editable}
                   onSelect={(jid, folder) => { selectGroup(jid); navigate(`/chat/${folder}`); }}
-                  onClearHistory={(jid, name) => setClearState({ open: true, jid, name })}
+                  onClearHistory={openClear}
                 />
               ))}
             </div>
@@ -142,7 +122,6 @@ export function ChatPage() {
           <ChatView
             groupJid={activeGroupJid}
             onBack={handleBackToList}
-            headerLeft={undefined}
           />
         </div>
       ) : (
@@ -163,7 +142,7 @@ export function ChatPage() {
       )}
       <ConfirmDialog
         open={clearState.open}
-        onClose={() => setClearState({ open: false, jid: '', name: '' })}
+        onClose={closeClear}
         onConfirm={handleClearConfirm}
         title="重建工作区"
         message={`确认重建工作区「${clearState.name}」吗？这会清除全部聊天记录、上下文，并删除工作目录中的所有文件。此操作不可撤销。`}
