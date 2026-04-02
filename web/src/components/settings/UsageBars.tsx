@@ -97,11 +97,18 @@ export function UsageBars({ providerId }: { providerId: string }) {
 
   if (loading || !usage?.data) return null;
 
+  const USAGE_BUCKET_LABELS = {
+    five_hour: '5h',
+    seven_day: '7d',
+    seven_day_opus: '7dO',
+    seven_day_sonnet: '7dS',
+  } as const;
+
   const buckets: { label: string; bucket: OAuthUsageBucket }[] = [];
-  if (usage.data.five_hour) buckets.push({ label: '5h', bucket: usage.data.five_hour });
-  if (usage.data.seven_day) buckets.push({ label: '7d', bucket: usage.data.seven_day });
-  if (usage.data.seven_day_opus) buckets.push({ label: '7dO', bucket: usage.data.seven_day_opus });
-  if (usage.data.seven_day_sonnet) buckets.push({ label: '7dS', bucket: usage.data.seven_day_sonnet });
+  if (usage.data.five_hour) buckets.push({ label: USAGE_BUCKET_LABELS.five_hour, bucket: usage.data.five_hour });
+  if (usage.data.seven_day) buckets.push({ label: USAGE_BUCKET_LABELS.seven_day, bucket: usage.data.seven_day });
+  if (usage.data.seven_day_opus) buckets.push({ label: USAGE_BUCKET_LABELS.seven_day_opus, bucket: usage.data.seven_day_opus });
+  if (usage.data.seven_day_sonnet) buckets.push({ label: USAGE_BUCKET_LABELS.seven_day_sonnet, bucket: usage.data.seven_day_sonnet });
 
   if (buckets.length === 0) return null;
 

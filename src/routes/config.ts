@@ -74,6 +74,7 @@ import {
   updateAllSessionCredentials,
 } from '../runtime-config.js';
 import type { ClaudeOAuthCredentials, CachedOAuthUsage, OAuthUsageResponse, OAuthUsageBucket } from '../runtime-config.js';
+import { parseOAuthUsageBucket } from '../runtime-config.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { hasPermission } from '../permissions.js';
 import { logger } from '../logger.js';
@@ -202,7 +203,6 @@ const USAGE_CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
 const usageCache = new Map<string, CachedOAuthUsage>();
 const inFlightUsageRequests = new Map<string, Promise<CachedOAuthUsage>>();
 
-// Periodic cleanup of stale usage cache entries
 setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of usageCache) {
@@ -210,7 +210,7 @@ setInterval(() => {
       usageCache.delete(key);
     }
   }
-}, 60_000);
+}, 5 * 60_000);
 
 async function fetchOAuthUsage(providerId: string): Promise<CachedOAuthUsage> {
   const cached = usageCache.get(providerId);
@@ -251,17 +251,11 @@ async function fetchOAuthUsage(providerId: string): Promise<CachedOAuthUsage> {
       }
 
       const raw = (await resp.json()) as Record<string, unknown>;
-      const parseBucket = (v: unknown): OAuthUsageBucket | null => {
-        if (!v || typeof v !== 'object') return null;
-        const obj = v as Record<string, unknown>;
-        if (typeof obj.utilization !== 'number' || typeof obj.resets_at !== 'string') return null;
-        return { utilization: obj.utilization, resets_at: obj.resets_at };
-      };
       const data: OAuthUsageResponse = {
-        five_hour: parseBucket(raw.five_hour),
-        seven_day: parseBucket(raw.seven_day),
-        seven_day_opus: parseBucket(raw.seven_day_opus),
-        seven_day_sonnet: parseBucket(raw.seven_day_sonnet),
+        five_hour: parseOAuthUsageBucket(raw.five_hour),
+        seven_day: parseOAuthUsageBucket(raw.seven_day),
+        seven_day_opus: parseOAuthUsageBucket(raw.seven_day_opus),
+        seven_day_sonnet: parseOAuthUsageBucket(raw.seven_day_sonnet),
       };
 
       const result: CachedOAuthUsage = { data, fetchedAt: Date.now() };

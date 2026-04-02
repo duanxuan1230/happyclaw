@@ -3656,3 +3656,23 @@ export function saveSystemSettings(
 
   return merged;
 }
+
+// ─── OAuth Usage Types ─────────────────────────────────────────────────────
+
+export interface OAuthUsageBucket {
+  utilization: number;
+  resets_at: string;
+}
+
+/**
+ * 解析 OAuth usage bucket 对象
+ * 运行时类型守卫，验证 API 响应结构
+ */
+export function parseOAuthUsageBucket(v: unknown): OAuthUsageBucket | null {
+  if (!v || typeof v !== "object") return null;
+  const obj = v as Record<string, unknown>;
+  if (typeof obj.utilization !== "number" || typeof obj.resets_at !== "string")
+    return null;
+  return { utilization: obj.utilization, resets_at: obj.resets_at };
+}
+

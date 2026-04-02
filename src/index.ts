@@ -147,6 +147,7 @@ import {
   SubAgent,
 } from './types.js';
 import { logger } from './logger.js';
+import { resolveTaskOwner } from './task-utils.js';
 import {
   ensureAgentDirectories,
   isSystemMaintenanceNoise,
@@ -4472,15 +4473,11 @@ async function processTaskIpc(
             : data.execution_mode === 'container'
               ? 'container'
               : null;
-        // Resolve task owner: prefer the source group's owner (the user whose
-        // workspace made the MCP call).  If that is absent (e.g. a shared or
-        // admin-home group has no created_by), fall back to the target group's
-        // owner so the resulting isolated workspace is always attributable to
-        // someone and remains visible / deletable by that user.
-        const taskCreatedBy =
-          sourceGroupEntry?.created_by ||
-          targetGroupEntry?.created_by ||
-          undefined;
+        const taskCreatedBy = resolveTaskOwner(
+          {},
+          sourceGroupEntry,
+          targetGroupEntry,
+        );
 
         createTask({
           id: taskId,

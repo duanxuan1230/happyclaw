@@ -39,6 +39,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
+import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
 import type { StreamEvent } from './stream-event.types.js';
@@ -115,23 +116,16 @@ function ensureTaskWorkspace(
 
   const executionMode = resolveTaskExecutionMode(task, deps);
 
-  // Resolve owner before creating the group so created_by is always populated.
-  // Prefer task.created_by; fall back to the source group's owner so that
-  // tasks scheduled via MCP from a workspace whose created_by is null still
-  // get a valid owner (fixes: task-* workspaces invisible / undeletable).
-  const ownerId =
-    task.created_by ||
-    Object.values(deps.registeredGroups()).find((g) => g.folder === task.group_folder)
-      ?.created_by ||
-    undefined;
+  const sourceGroup = Object.values(deps.registeredGroups()).find(
+    (g) => g.folder === task.group_folder,
+  );
+  const ownerId = resolveTaskOwner(task, sourceGroup);
 
   const group: RegisteredGroup = {
     name,
     folder,
     added_at: new Date().toISOString(),
     executionMode,
-    // Use resolved ownerId so the workspace is always owned, even when
-    // the raw task.created_by was null.
     created_by: ownerId,
   };
 
