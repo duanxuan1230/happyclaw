@@ -379,6 +379,9 @@ export function createDingTalkConnection(
 
   const ACK_REACTION_ATTACH_DELAYS = [0, 400, 1200];
 
+  /** Track in-flight attach promises so clearAckReaction can await them. */
+  const pendingAttaches = new Map<string, Promise<void>>();
+
   /**
    * Attach "🤔思考中" emoji reaction to user's message as ack confirmation.
    * Retries up to 3 times with backoff for transient failures.
@@ -1584,7 +1587,16 @@ export function createDingTalkConnection(
       );
 
       // ── Ack Reaction：确认已收到消息 ──
-      attachAckReaction(msgId, conversationId, jid).catch(() => {});
+      const chatId = jid.startsWith('dingtalk:')
+        ? jid.slice('dingtalk:'.length)
+        : jid;
+      const attachPromise = attachAckReaction(
+        msgId,
+        conversationId,
+        jid,
+      ).catch(() => {});
+      pendingAttaches.set(chatId, attachPromise);
+      attachPromise.finally(() => pendingAttaches.delete(chatId));
 
       notifyNewImMessage();
 
@@ -2017,7 +2029,14 @@ export function createDingTalkConnection(
     },
 
     clearAckReaction(chatId: string): void {
-      recallAckReaction(chatId).catch(() => {});
+      const pending = pendingAttaches.get(chatId);
+      if (pending) {
+        pending
+          .then(() => recallAckReaction(chatId).catch(() => {}))
+          .catch(() => {});
+      } else {
+        recallAckReaction(chatId).catch(() => {});
+      }
     },
 
     isConnected(): boolean {
