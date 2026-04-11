@@ -110,6 +110,9 @@ const SECURITY_RULES_PATH = path.join(
 );
 const SECURITY_RULES = fs.readFileSync(SECURITY_RULES_PATH, 'utf-8');
 
+// HEARTBEAT.md 截断上限（仅作用于 fresh session 的近期工作提示）
+const HEARTBEAT_MAX_CHARS = 2048;
+
 /** 按渠道生成格式指南（仅 IM 渠道需要，Web 前端原生支持 Markdown + Mermaid） */
 function buildChannelGuidelines(channel: string): string {
   switch (channel) {
@@ -1091,17 +1094,19 @@ async function runQuery(
     'Web 界面会自动将 Mermaid 代码渲染为可视化图表。',
   ].join('\n');
 
-  // Read HEARTBEAT.md (recent work summary) — only for home containers.
-  // Non-home containers are task-isolated and should not see unrelated work history,
-  // which can mislead the agent into "continuing" previous tasks instead of
-  // focusing on the user's current message.
+  // Read HEARTBEAT.md (recent work summary) — only for home containers on a FRESH
+  // session. Resumed sessions already carry the prior conversation history, so the
+  // heartbeat summary is redundant and wastes cache tokens on every turn.
+  // Non-home containers are task-isolated and should not see unrelated work history.
   let heartbeatContent = '';
-  if (isHome) {
+  if (isHome && !sessionId) {
     const heartbeatPath = path.join(WORKSPACE_GLOBAL, 'HEARTBEAT.md');
     if (fs.existsSync(heartbeatPath)) {
       try {
         const raw = fs.readFileSync(heartbeatPath, 'utf-8');
-        const truncated = raw.length > 2048 ? raw.slice(0, 2048) + '\n\n[...截断]' : raw;
+        const truncated = raw.length > HEARTBEAT_MAX_CHARS
+          ? raw.slice(0, HEARTBEAT_MAX_CHARS) + '\n\n[...截断]'
+          : raw;
         heartbeatContent = [
           '',
           '## 近期工作参考（仅供背景了解）',
