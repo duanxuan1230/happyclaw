@@ -306,7 +306,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     // --- send_file ---
     tool(
       'send_file',
-      `Send a file to the current chat (the user you're talking to) via IM (Feishu/Telegram/DingTalk). The file path is relative to the workspace/group directory.
+      `Send a file to the current chat (the user you're talking to) via IM (Feishu/Telegram/DingTalk/QQ). The file path is relative to the workspace/group directory.
 Supports: PDF, DOC, XLS, PPT, MP4, ZIP, SO, etc. Max file size: 30MB.`,
       {
         filePath: z
