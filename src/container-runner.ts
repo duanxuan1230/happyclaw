@@ -1234,17 +1234,21 @@ export async function runHostAgent(
       hostEnv['AUTO_COMPACT_WINDOW'] = String(hostAutoCompact);
     }
 
-    // admin host 模式 + 系统设置 disableMemoryLayerForAdminHost 时启用原生 Claude Code 模式：
-    // 不注入 HappyClaw 的 memory 抽象，Agent 完全按用户本机 ~/.claude/ 的 Playbook 工作
+    // admin 主容器 + 系统设置 disableMemoryLayerForAdminHost 时禁用 HappyClaw 记忆层：
+    // 不注入 memory MCP 工具 / WORKSPACE_GLOBAL/MEMORY env / 记忆提示，
+    // 让 Agent 完全按用户本机 ~/.claude/ 的 Playbook 工作。
+    // 仅作用于 admin 主容器（is_home=1, folder=main），不影响 admin 创建的其他子群组。
     const isCreatorAdmin = ownerHomeFolder === 'main';
-    const nativeClaudeMode =
-      isCreatorAdmin && getSystemSettings().disableMemoryLayerForAdminHost;
+    const disableMemoryLayer =
+      isCreatorAdmin &&
+      !!group.is_home &&
+      getSystemSettings().disableMemoryLayerForAdminHost;
 
     // 路径映射
     hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
     hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
 
-    if (!nativeClaudeMode) {
+    if (!disableMemoryLayer) {
       // Per-user global memory（HappyClaw 自带 memory 层）
       const ownerId = group.created_by;
       if (ownerId) {
@@ -1266,14 +1270,14 @@ export async function runHostAgent(
       );
     }
 
-    // 原生模式且配置了 customCwd 时不覆盖 CLAUDE_CONFIG_DIR，让 SDK 使用用户真实 $HOME/.claude/
+    // 禁用记忆层且配置了 customCwd 时不覆盖 CLAUDE_CONFIG_DIR，让 SDK 使用用户真实 $HOME/.claude/
     // 未配 customCwd 时保留 override，避免 HappyClaw 的 cwd 污染 ~/.claude/projects/
-    if (!nativeClaudeMode || !group.customCwd) {
+    if (!disableMemoryLayer || !group.customCwd) {
       hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
     }
 
-    if (nativeClaudeMode) {
-      hostEnv['HAPPYCLAW_NATIVE_CLAUDE_MODE'] = 'true';
+    if (disableMemoryLayer) {
+      hostEnv['HAPPYCLAW_DISABLE_MEMORY_LAYER'] = 'true';
     }
     // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
     hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';

@@ -423,25 +423,35 @@ export function SystemSettingsSection() {
         )}
       </div>
 
-      {/* 原生 Claude Code 模式（admin 宿主机专用） */}
+      {/* 禁用 HappyClaw 记忆层（admin 主容器专用） */}
       <div className="border-t border-border pt-6 space-y-5">
-        <h3 className="text-sm font-semibold text-foreground">原生 Claude Code 模式</h3>
+        <h3 className="text-sm font-semibold text-foreground">禁用 HappyClaw 记忆层（admin 主容器）</h3>
 
         <div className="flex items-center justify-between">
           <div className="flex-1 pr-4">
-            <Label>admin 宿主机关闭 HappyClaw 记忆层</Label>
+            <Label>禁用后按本机 ~/.claude/ Playbook 运行</Label>
             <p className="text-xs text-muted-foreground mt-0.5">
-              启用后 admin 的 host 模式容器不再注入 memory_append/search/get MCP 工具、
-              不注入 WORKSPACE_GLOBAL/MEMORY 环境变量、不强制注入记忆系统提示，
-              让 Agent 完全按本机 ~/.claude/ 下的 Playbook（CLAUDE.md + rules/ + memory/）行事。
-              建议配合群组的 customCwd 使用，让 Agent cwd 指向真实项目目录。
-              仅影响 admin 的 host 模式；member 容器和非 admin 场景不受影响。
+              启用后 admin 主容器（folder=main）不再注入 memory_append/search/get MCP 工具、
+              不注入 WORKSPACE_GLOBAL/MEMORY 环境变量、不注入 HappyClaw 记忆系统提示、
+              PreCompact 钩子不触发 memory flush，让 Agent 完全按本机
+              ~/.claude/ 下的 Playbook（CLAUDE.md + rules/ + memory/）行事。
+              建议配合主容器的 customCwd 使用，让 Agent cwd 指向真实项目目录，
+              使 SDK auto-memory 与原生 Claude Code 共用 ~/.claude/projects/。
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              <strong>仅作用范围</strong>：admin 的主容器（is_home=1，folder=main）。admin
+              创建的其他 host 子群组、member 容器、Docker 容器模式均不受影响。
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              <strong>数据迁移提示</strong>：启用后 Agent 不再读取 data/groups/user-global/
+              下的模板 CLAUDE.md 和 data/memory/ 下 memory_append 累积的日记。
+              若有有价值的内容，建议迁移到 ~/.claude/memory/ 下再启用。
             </p>
           </div>
           <Switch
             checked={disableMemoryLayerForAdminHost}
             onCheckedChange={setDisableMemoryLayerForAdminHost}
-            aria-label="admin 宿主机关闭 HappyClaw 记忆层"
+            aria-label="禁用 HappyClaw 记忆层"
           />
         </div>
       </div>
