@@ -42,7 +42,13 @@ export type SendStreamChunkFn = (
 /** Callback to send a plain message (fallback) */
 export type FallbackSendFn = (text: string) => Promise<void>;
 
-type StreamingState = 'idle' | 'streaming' | 'completed' | 'aborted';
+type StreamingState =
+  | 'idle'
+  | 'streaming'
+  | 'completing' // complete() in progress, awaiting in-flight flush
+  | 'aborting' // abort() in progress, awaiting in-flight flush
+  | 'completed'
+  | 'aborted';
 
 // ─── Controller ──────────────────────────────────────────────
 
@@ -113,6 +119,8 @@ export class QQStreamingController {
   // ─── StreamingSession interface ─────────────────────────────
 
   isActive(): boolean {
+    // Only idle/streaming accept new content. Once complete/abort starts,
+    // late-arriving append()s are ignored to keep the QQ baseline monotonic.
     return this.state === 'idle' || this.state === 'streaming';
   }
 
@@ -132,14 +140,44 @@ export class QQStreamingController {
   }
 
   async complete(finalText: string): Promise<void> {
-    if (this.state === 'completed' || this.state === 'aborted') return;
-    this.accumulatedText = finalText;
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'completing' ||
+      this.state === 'aborting'
+    ) {
+      return;
+    }
+    // Enter terminal-pending state IMMEDIATELY so any text_delta arriving
+    // during the awaits below is dropped by isActive(). Otherwise it would
+    // overwrite accumulatedText and schedule a flush that races the DONE
+    // chunk, breaking QQ's strict prefix-stability requirement.
+    this.state = 'completing';
     this.clearTimers();
 
     // Wait for any in-flight flush to settle so we don't race the DONE chunk
     if (this.currentFlushPromise) {
       await this.currentFlushPromise.catch(() => {});
     }
+
+    // Now safe to set baseline. accumulatedText is whatever the last
+    // successful flush sent (or finalText if none flushed yet).
+    const baseline = this.accumulatedText;
+    // DONE text must be an extension of the QQ baseline. If finalText
+    // diverges from what we've already streamed, fall back to baseline
+    // for the DONE chunk and let fallback path handle the difference.
+    const safeFinal = finalText.startsWith(baseline) ? finalText : baseline;
+    if (safeFinal !== finalText) {
+      logger.warn(
+        {
+          openid: this.openid,
+          baselineLen: baseline.length,
+          finalLen: finalText.length,
+        },
+        'QQ streaming finalText diverges from streamed baseline, using baseline for DONE',
+      );
+    }
+    this.accumulatedText = safeFinal;
 
     logger.info(
       {
@@ -156,9 +194,9 @@ export class QQStreamingController {
       return;
     }
 
-    // If we never managed to start a stream, use fallback
-    if (this.state === 'idle' || this.sentChunkCount === 0) {
-      await this.tryStartStream(finalText);
+    // If we never managed to start a stream, use fallback for the full text
+    if (this.sentChunkCount === 0) {
+      await this.tryStartStream(safeFinal);
       if (!this.streamMsgId) {
         logger.warn(
           { openid: this.openid },
@@ -171,7 +209,11 @@ export class QQStreamingController {
     }
 
     try {
-      await this.doSendChunk(finalText, 10); // DONE — raw text, monotonic with prior chunks
+      // Send DONE with the prefix-safe text. In the rare divergent case,
+      // safeFinal is the streamed baseline (a prefix of what we'd ideally
+      // send) — DONE succeeds and the user sees a slightly truncated final.
+      // Logged above; investigate via logs if it ever appears in production.
+      await this.doSendChunk(safeFinal, 10); // DONE
       this.state = 'completed';
       logger.info(
         { openid: this.openid, chunks: this.sentChunkCount },
@@ -188,7 +230,16 @@ export class QQStreamingController {
   }
 
   async abort(reason?: string): Promise<void> {
-    if (this.state === 'completed' || this.state === 'aborted') return;
+    if (
+      this.state === 'completed' ||
+      this.state === 'aborted' ||
+      this.state === 'completing' ||
+      this.state === 'aborting'
+    ) {
+      return;
+    }
+    // Same reasoning as complete(): block late append() during awaits below.
+    this.state = 'aborting';
     this.clearTimers();
 
     if (this.currentFlushPromise) {
@@ -196,6 +247,8 @@ export class QQStreamingController {
     }
 
     if (this.streamMsgId) {
+      // accumulatedText here reflects the last successfully-streamed baseline,
+      // so appending the abort notice keeps prefix stability.
       const abortText = this.accumulatedText
         ? this.accumulatedText + `\n\n⚠️ 已中断: ${reason ?? '用户取消'}`
         : `⚠️ 已中断: ${reason ?? '用户取消'}`;
@@ -426,7 +479,12 @@ export class QQStreamingController {
 
       if (resp.id) {
         this.streamMsgId = resp.id;
-        this.state = 'streaming';
+        // Only transition to 'streaming' from idle. If we're already in a
+        // terminal-pending state (completing/aborting), preserve it so late
+        // append() events stay blocked.
+        if (this.state === 'idle') {
+          this.state = 'streaming';
+        }
         this.sentChunkCount++;
         this.lastUpdateTime = Date.now();
         logger.info(
