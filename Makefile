@@ -154,7 +154,7 @@ typecheck-agent-runner:
 
 test: ## 运行单元测试
 ifeq ($(HAS_BUN),1)
-	bun test
+	bun vitest run
 else
 	$(RUN) vitest run
 endif
