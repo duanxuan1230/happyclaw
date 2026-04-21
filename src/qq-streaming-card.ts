@@ -13,6 +13,28 @@
  *
  * Lifecycle: idle → streaming → completed / aborted
  * Fallback: if stream API fails, falls back to plain sendQQMessage()
+ *
+ * ─── Inactive aux-surface scaffolding (INTENTIONALLY UNUSED) ────
+ *
+ * The following members are reserved for a future auxiliary-display surface
+ * (thinking stream / tool activity / recent events / system status) but are
+ * currently NOT surfaced to the user during streaming:
+ *
+ *   - thinking / thinkingText
+ *   - systemStatus
+ *   - tools (Map) + purgeOldTools()
+ *   - recentEvents
+ *   - auxFlushTimer / lastAuxFlushTime / AUX_FLUSH_INTERVAL
+ *   - buildAuxPrefix() / formatElapsed()
+ *   - setThinking() / appendThinking() / setSystemStatus()
+ *   - startTool() / endTool() / updateToolSummary() / pushRecentEvent()
+ *
+ * Rationale for keeping this dormant: QQ's stream_messages endpoint enforces
+ * strict prefix stability across chunks — any mutation of an aux prefix
+ * mid-stream would break the protocol. These hooks are preserved so that a
+ * future out-of-band aux channel (e.g. a secondary message or sidebar card)
+ * can be wired in without reconstructing the tracking logic. `scheduleAuxFlush`
+ * is deliberately a no-op; see the comment at its definition.
  */
 
 import { logger } from './logger.js';
@@ -20,6 +42,7 @@ import { logger } from './logger.js';
 // ─── Constants ───────────────────────────────────────────────
 
 const STREAM_UPDATE_INTERVAL = 500; // ms — throttle between API calls
+const MAX_STREAM_CONTENT = 4500; // QQ content_raw conservative upper bound (leave small buffer under ~5000)
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -435,14 +458,37 @@ export class QQStreamingController {
   }
 
   private scheduleAuxFlush(): void {
-    // Disabled: aux prefix (thinking/tools) mutates during stream, which
-    // breaks QQ's strict prefix-stability requirement. Aux state is tracked
-    // internally only; not surfaced to user during streaming.
+    // intentionally no-op: aux surface disabled to protect prefix stability invariant; see comments at top of file.
+    // Aux state (thinking/tools/recentEvents/systemStatus) is still tracked
+    // internally via setThinking/startTool/etc so a future out-of-band surface
+    // can consume it without reconstructing tracking logic.
   }
 
   private async doFlush(): Promise<void> {
     const rawText = this.accumulatedText;
     if (!rawText.trim()) return;
+
+    // Length guard: QQ stream_messages caps content_raw (~5000 chars). Once we
+    // cross the conservative threshold, every subsequent chunk would hit the
+    // same upper-bound and fail in a tight loop. Switch to fallback once and
+    // stop streaming — fallbackUsed guard ensures only one plain message is
+    // sent even if this path is hit repeatedly before complete() fires.
+    if (rawText.length > MAX_STREAM_CONTENT) {
+      logger.warn(
+        {
+          openid: this.openid,
+          contentLen: rawText.length,
+          limit: MAX_STREAM_CONTENT,
+        },
+        'QQ streaming accumulated text exceeds per-chunk cap, switching to fallback',
+      );
+      this.clearTimers();
+      this.flushPending = false;
+      // Aborted (not completed) so complete() early-returns without sending DONE.
+      this.state = 'aborted';
+      await this.tryFallback(rawText);
+      return;
+    }
 
     // CRITICAL: QQ stream API requires strict prefix stability across chunks.
     // - Never transform markdown (markdownToPlainText is non-monotonic:
