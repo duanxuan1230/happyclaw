@@ -7,6 +7,7 @@ import type { Variables, WebDeps } from '../web-context.js';
 import { getWebDeps } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
+  AGENT_NAME_MAX_CHARS,
   AGENT_PROMPT_MAX_CHARS,
   AgentProfileCreateSchema,
   AgentProfileGenerateSchema,
@@ -62,8 +63,6 @@ import {
 import {
   buildAgentProfileExport,
   dropMissingReferences,
-  hasMissingReferences,
-  importedRuntimePolicy,
   parseAgentProfileExport,
   stripHostGrants,
 } from '../agent-profile-transfer.js';
@@ -105,9 +104,18 @@ const AVATAR_EXTENSIONS: Record<string, string> = {
   'image/webp': '.webp',
 };
 
+const AVATAR_URL_PREFIX = '/api/auth/avatars/';
+const avatarFilePrefix = (profileId: string) => `agent-profile-${profileId}-`;
+
+/** A fresh file name for a profile's avatar and the URL that serves it. */
+function newProfileAvatarFile(profileId: string, extension: string) {
+  const filename = `${avatarFilePrefix(profileId)}${randomBytes(4).toString('hex')}${extension}`;
+  return { filename, url: `${AVATAR_URL_PREFIX}${filename}` };
+}
+
 function removeProfileAvatarFiles(profileId: string, keep?: string): void {
   if (!fs.existsSync(AVATARS_DIR)) return;
-  const prefix = `agent-profile-${profileId}-`;
+  const prefix = avatarFilePrefix(profileId);
   for (const filename of fs.readdirSync(AVATARS_DIR)) {
     if (!filename.startsWith(prefix) || filename === keep) continue;
     fs.rmSync(path.join(AVATARS_DIR, filename), { force: true });
@@ -196,7 +204,6 @@ const AGENT_PROMPT_FIELD_LABELS: Record<string, string> = {
   agents_prompt: '行为规则（AGENTS）',
   tools_prompt: '工具说明（TOOLS）',
 };
-const AGENT_NAME_MAX_CHARS = 80;
 
 /** Say which field failed instead of a bare "Invalid request body". */
 function invalidAgentProfileBody(
@@ -320,17 +327,9 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
   if (!parsed.success) {
     return c.json(invalidAgentProfileBody(parsed.error, body), 400);
   }
-  // Authorization is judged on the request as sent, before normalization.
-  if (isUnauthorizedHostClaudeContext(user, parsed.data.runtime_policy)) {
-    return c.json({ error: 'host_claude context requires an admin role' }, 403);
-  }
-  if (isUnauthorizedHostSkills(user, parsed.data.runtime_policy)) {
-    return c.json({ error: 'host skills require an admin role' }, 403);
-  }
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(
     parsed.data.runtime_policy,
   );
-  runtimePolicy.skills.host ??= { mode: 'disabled', ids: [] };
   return withCapabilityScopeLocks(
     [SYSTEM_CAPABILITY_LOCK_KEY, userCapabilityLockKey(user.id)],
     () => {
@@ -377,17 +376,17 @@ function copyProfileAvatarFile(
   source: AgentProfile,
   targetProfileId: string,
 ): string | null {
-  const filename = source.avatar_url?.startsWith('/api/auth/avatars/')
+  const filename = source.avatar_url?.startsWith(AVATAR_URL_PREFIX)
     ? path.basename(source.avatar_url)
     : null;
-  if (!filename?.startsWith(`agent-profile-${source.id}-`)) return null;
+  if (!filename?.startsWith(avatarFilePrefix(source.id))) return null;
   try {
-    const copy = `agent-profile-${targetProfileId}-${randomBytes(4).toString('hex')}${path.extname(filename)}`;
+    const copy = newProfileAvatarFile(targetProfileId, path.extname(filename));
     fs.copyFileSync(
       path.join(AVATARS_DIR, filename),
-      path.join(AVATARS_DIR, copy),
+      path.join(AVATARS_DIR, copy.filename),
     );
-    return `/api/auth/avatars/${copy}`;
+    return copy.url;
   } catch (err) {
     logger.warn(
       { err, agentProfileId: source.id },
@@ -419,7 +418,7 @@ agentProfileRoutes.post('/:id/duplicate', authMiddleware, async (c) => {
       });
       if (rejection) return c.json(rejection.body, rejection.status);
       const profileId = randomUUID();
-      createAgentProfile({
+      const profile = createAgentProfile({
         profileId,
         ownerUserId: user.id,
         name: nextCopyName(user.id, source.name),
@@ -430,14 +429,11 @@ agentProfileRoutes.post('/:id/duplicate', authMiddleware, async (c) => {
         promptMode: source.prompt_mode,
         avatarEmoji: source.avatar_emoji,
         avatarColor: source.avatar_color,
+        avatarUrl: copyProfileAvatarFile(source, profileId),
         modelConfigId: source.model_config_id,
         model: source.model,
         runtimePolicy: policy,
       });
-      const avatarUrl = copyProfileAvatarFile(source, profileId);
-      const profile = avatarUrl
-        ? updateAgentProfile(profileId, user.id, { avatarUrl })!
-        : getAgentProfileForUser(profileId, user.id)!;
       return c.json({ profile, stripped }, 201);
     },
   );
@@ -466,23 +462,23 @@ agentProfileRoutes.post('/import', authMiddleware, async (c) => {
   }
   const { agent } = parsed;
   const name = parsedBody.data.name ?? agent.name;
-  const imported = importedRuntimePolicy(agent, user.role === 'admin');
+  const imported = stripHostGrants(
+    normalizeAgentProfileRuntimePolicy(agent.runtime_policy),
+    user.role === 'admin',
+  );
   return withCapabilityScopeLocks(
     [SYSTEM_CAPABILITY_LOCK_KEY, userCapabilityLockKey(user.id)],
     () => {
       const conflict = findAgentProfileNameConflict(user.id, name);
       if (conflict) return c.json(agentNameTaken(conflict), 409);
-      const invalid = validateRuntimePolicyReferences(
-        user.id,
-        imported.policy,
-        user.role === 'admin',
-      );
-      const missing = {
-        skills: invalid.skills,
-        host_skills: invalid.host_skills,
-        mcp: invalid.mcp,
-      };
-      const dropped = hasMissingReferences(missing);
+      // Restricted system MCP already shows up as missing for a member.
+      const { restricted_system_mcp: _restricted, ...missing } =
+        validateRuntimePolicyReferences(
+          user.id,
+          imported.policy,
+          user.role === 'admin',
+        );
+      const dropped = hasInvalidRuntimePolicyReferences(missing);
       if (dropped && !parsedBody.data.drop_missing) {
         return c.json(
           {
@@ -515,7 +511,7 @@ agentProfileRoutes.post('/import', authMiddleware, async (c) => {
         {
           profile,
           stripped: imported.stripped,
-          dropped: dropped ? missing : { skills: [], host_skills: [], mcp: [] },
+          dropped: missing,
         },
         201,
       );
@@ -720,12 +716,11 @@ agentProfileRoutes.post(
     }
 
     fs.mkdirSync(AVATARS_DIR, { recursive: true });
-    const filename = `agent-profile-${id}-${randomBytes(4).toString('hex')}${extension}`;
+    const { filename, url: avatarUrl } = newProfileAvatarFile(id, extension);
     const destination = path.join(AVATARS_DIR, filename);
     const temporary = `${destination}.tmp`;
     fs.writeFileSync(temporary, Buffer.from(await file.arrayBuffer()));
     fs.renameSync(temporary, destination);
-    const avatarUrl = `/api/auth/avatars/${filename}`;
     const updated = updateAgentProfile(id, user.id, { avatarUrl });
     removeProfileAvatarFiles(id, filename);
     return c.json({ profile: updated, avatarUrl });
@@ -1044,6 +1039,19 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
   );
 });
 
+const ARCHIVE_REFUSALS = {
+  not_found: { status: 404, error: '智能体配置不存在' },
+  is_default: { status: 400, error: '不能删除内置的 HappyClaw 智能体' },
+  has_workspaces: {
+    status: 409,
+    error: '该智能体仍拥有工作区；请先迁移或删除这些工作区',
+  },
+  has_mounts: {
+    status: 409,
+    error: '该智能体仍有消息渠道挂载；请先解绑',
+  },
+} as const;
+
 agentProfileRoutes.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
@@ -1052,44 +1060,13 @@ agentProfileRoutes.delete('/:id', authMiddleware, async (c) => {
     // lock, so either archive wins and publication is rejected, or membership
     // wins and archive observes the mapping and returns 409.
     const result = archiveAgentProfile(id, user.id);
-    if (result === 'not_found') {
-      return c.json({ error: '智能体配置不存在' }, 404);
-    }
-    if (result === 'is_default') {
-      return c.json({ error: '不能删除内置的 HappyClaw 智能体' }, 400);
-    }
-    if (result === 'has_workspaces') {
-      return c.json(
-        {
-          error: '该智能体仍拥有工作区；请先迁移或删除这些工作区',
-        },
-        409,
-      );
-    }
-    if (result === 'has_mounts') {
-      return c.json(
-        {
-          error: '该智能体仍有消息渠道挂载；请先解绑',
-        },
-        409,
-      );
+    if (result !== 'ok') {
+      const refusal = ARCHIVE_REFUSALS[result];
+      return c.json({ error: refusal.error }, refusal.status);
     }
     return c.json({ success: true });
   });
 });
-
-const ARCHIVE_REFUSALS = {
-  not_found: { status: 404, error: '智能体配置不存在' },
-  is_default: { status: 400, error: '不能删除内置的 HappyClaw 智能体' },
-  has_workspaces: {
-    status: 409,
-    error: '迁移期间该智能体又有了新的工作区；请重试',
-  },
-  has_mounts: {
-    status: 409,
-    error: '该智能体仍有消息渠道挂载；请先解绑',
-  },
-} as const;
 
 /**
  * Move every Workspace of an Agent to another Agent and archive it, all or
@@ -1118,8 +1095,8 @@ agentProfileRoutes.post(
       if (!getAgentProfileForUser(targetId, user.id)) {
         return c.json({ error: '目标智能体不存在' }, 404);
       }
-      // Membership changes for both Agents hold these locks, so the
-      // Workspace list cannot grow before the commit re-reads it.
+      // Membership changes for both Agents hold these locks, so the list
+      // cannot grow; Workspace deletion does not, so the commit re-reads it.
       const workspaces = listWorkspaceGroupsForAgentProfile(user.id, id);
       const commit = () =>
         migrateAgentProfileWorkspacesAndArchive(
@@ -1175,6 +1152,13 @@ agentProfileRoutes.post(
             503,
           );
         }
+      }
+      if (result === 'has_workspaces') {
+        // A mapping the owner cannot see (e.g. another user's Workspace).
+        return c.json(
+          { error: '该智能体还有无法迁移的工作区归属；没有迁移任何工作区' },
+          409,
+        );
       }
       if (result !== 'ok') {
         const refusal = ARCHIVE_REFUSALS[result];
@@ -1262,12 +1246,12 @@ agentProfileRoutes.post('/:id/runtime-cleanup', authMiddleware, async (c) => {
 });
 
 /**
- * How many of a Workspace's runtimes are mid-turn or have queued input: what
- * a save that restarts the Agent's runners would interrupt. A warm runner
- * that is only waiting for input is not counted.
+ * Runtimes mid-turn or with queued input: what a save that restarts the
+ * Agent's runners would interrupt. A warm runner only waiting for input is
+ * not counted.
  */
-function countActiveConversations(deps: WebDeps) {
-  const busy = new Set(
+function busyRuntimeJids(deps: WebDeps): Set<string> {
+  return new Set(
     deps.queue
       .getStatus()
       .groups.filter(
@@ -1278,12 +1262,6 @@ function countActiveConversations(deps: WebDeps) {
       )
       .map((group) => group.jid),
   );
-  return (folder: string, jid: string): number =>
-    busy.size === 0
-      ? 0
-      : getWorkspaceRuntimeJids(deps, folder, jid).filter((runtimeJid) =>
-          busy.has(runtimeJid),
-        ).length;
 }
 
 agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
@@ -1294,10 +1272,9 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
     if (!profile) return c.json({ error: '智能体配置不存在' }, 404);
 
     const defaultProfile = getOrCreateDefaultAgentProfile(user.id);
-    const groups = getAllRegisteredGroups();
     const deps = getWebDeps();
-    const activeConversations = deps ? countActiveConversations(deps) : () => 0;
-    const workspaces = Object.entries(groups)
+    const busy = deps ? busyRuntimeJids(deps) : new Set<string>();
+    const owned = Object.entries(getAllRegisteredGroups())
       .filter(([jid, group]) => {
         if (!jid.startsWith('web:')) return false;
         if (group.created_by !== user.id) return false;
@@ -1307,24 +1284,33 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
       })
       .map(([jid, group]) => ({
         jid,
-        name: group.name,
-        folder: group.folder,
-        is_home: !!group.is_home,
-        execution_mode: group.executionMode ?? 'container',
-        added_at: group.added_at,
-        active_conversations: activeConversations(group.folder, jid),
-        runtime_sessions: listWorkspaceRuntimeSessionsByWorkspace(jid).map(
-          (session) => ({
-            runtime_agent_id: session.runtime_agent_id,
-            sdk_session_id: session.sdk_session_id,
-            provider_id: session.provider_id,
-            agent_profile_id: session.agent_profile_id,
-            agent_profile_version: session.agent_profile_version,
-            identity_hash: session.identity_hash,
-            updated_at: session.updated_at,
-          }),
-        ),
+        group,
+        runtimeJids: deps
+          ? getWorkspaceRuntimeJids(deps, group.folder, jid)
+          : [],
       }));
+    const workspaces = owned.map(({ jid, group, runtimeJids }) => ({
+      jid,
+      name: group.name,
+      folder: group.folder,
+      is_home: !!group.is_home,
+      execution_mode: group.executionMode ?? 'container',
+      added_at: group.added_at,
+      active_conversations: runtimeJids.filter((runtimeJid) =>
+        busy.has(runtimeJid),
+      ).length,
+      runtime_sessions: listWorkspaceRuntimeSessionsByWorkspace(jid).map(
+        (session) => ({
+          runtime_agent_id: session.runtime_agent_id,
+          sdk_session_id: session.sdk_session_id,
+          provider_id: session.provider_id,
+          agent_profile_id: session.agent_profile_id,
+          agent_profile_version: session.agent_profile_version,
+          identity_hash: session.identity_hash,
+          updated_at: session.updated_at,
+        }),
+      ),
+    }));
     const workspaceJids = new Set(workspaces.map((workspace) => workspace.jid));
     const channelMounts = listAgentChannelMountsForProfile(id)
       .filter((mount) => workspaceJids.has(mount.workspace_jid))
@@ -1344,12 +1330,10 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
       }));
     const runtimeCleanupPending =
       deps != null &&
-      listWorkspaceGroupsForAgentProfile(user.id, id).some((workspace) =>
-        getWorkspaceRuntimeJids(
-          deps,
-          workspace.group.folder,
-          workspace.jid,
-        ).some((jid) => deps.queue.isGroupRuntimeSafetyBlocked?.(jid) ?? false),
+      owned.some(({ runtimeJids }) =>
+        runtimeJids.some(
+          (jid) => deps.queue.isGroupRuntimeSafetyBlocked?.(jid) ?? false,
+        ),
       );
 
     return c.json({

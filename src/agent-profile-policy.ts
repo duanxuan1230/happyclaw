@@ -129,7 +129,10 @@ export function validateRuntimePolicyReferences(
 }
 
 export function hasInvalidRuntimePolicyReferences(
-  invalid: ReturnType<typeof validateRuntimePolicyReferences>,
+  invalid: Pick<
+    ReturnType<typeof validateRuntimePolicyReferences>,
+    'skills' | 'host_skills' | 'mcp'
+  >,
 ): boolean {
   return (
     invalid.skills.length + invalid.host_skills.length + invalid.mcp.length > 0

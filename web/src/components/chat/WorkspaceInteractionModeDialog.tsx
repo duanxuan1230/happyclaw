@@ -17,6 +17,7 @@ import {
   useWorkspaceAgentId,
   WorkspaceAgentField,
 } from '../agents/WorkspaceAgentField';
+import { getErrorMessage } from '../settings/types';
 import { InteractionModeSelector } from './InteractionModeSelector';
 import { ProcessVisibilitySelector } from './ProcessVisibilitySelector';
 
@@ -82,13 +83,7 @@ export function WorkspaceInteractionModeDialog({
         try {
           await setWorkspaceAgentProfile(workspaceJid, draftAgentId);
         } catch (err) {
-          const message =
-            err && typeof err === 'object' && 'message' in err
-              ? String((err as { message: unknown }).message)
-              : '';
-          toast.error(
-            message ? `更换智能体失败：${message}` : '更换智能体失败，请重试',
-          );
+          toast.error(`更换智能体失败：${getErrorMessage(err, '请重试')}`);
           return;
         }
       }

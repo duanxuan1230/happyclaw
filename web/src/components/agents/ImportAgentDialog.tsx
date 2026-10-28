@@ -11,6 +11,8 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { SettingsField } from '@/components/settings/SettingsLayout';
+import { getErrorMessage } from '@/components/settings/types';
+import { apiErrorBody } from '@/utils/error';
 import {
   useAgentProfilesStore,
   type AgentCapabilityReferences,
@@ -23,20 +25,6 @@ interface ParsedFile {
     string,
     unknown
   >;
-}
-
-function apiBody(err: unknown): Record<string, unknown> | undefined {
-  return err && typeof err === 'object' && 'body' in err
-    ? (err as { body?: Record<string, unknown> }).body
-    : undefined;
-}
-
-function errorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message) return message;
-  }
-  return fallback;
 }
 
 export function describeReferences(refs: AgentCapabilityReferences): string {
@@ -119,13 +107,13 @@ export function ImportAgentDialog({
       });
       onImported(result);
     } catch (err) {
-      const body = apiBody(err);
+      const body = apiErrorBody(err);
       if (body?.code === 'AGENT_NAME_TAKEN') {
-        setNameError(errorMessage(err, '名称已被使用'));
+        setNameError(getErrorMessage(err, '名称已被使用'));
       } else if (body?.code === 'AGENT_IMPORT_MISSING_REFERENCES') {
         setMissing(body.missing as AgentCapabilityReferences);
       } else {
-        setError(errorMessage(err, '导入失败'));
+        setError(getErrorMessage(err, '导入失败'));
       }
     } finally {
       setImporting(false);

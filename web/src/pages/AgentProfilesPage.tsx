@@ -50,6 +50,7 @@ import {
   SettingsRow,
 } from '@/components/settings/SettingsLayout';
 import { modelBindingErrorMessage } from '@/components/settings/model-connections';
+import { getErrorMessage } from '@/components/settings/types';
 import { cn } from '@/lib/utils';
 import { confirmDialog } from '@/stores/confirm';
 import { AgentSection } from '../components/agents/AgentSection';
@@ -63,7 +64,6 @@ import {
   capabilityFormFromProfile,
   capabilityFormModelChanges,
   capabilityFormPolicy,
-  capabilityFormBinding,
   type AgentCapabilityFormValue,
 } from '../components/agents/AgentCapabilityForm';
 import { CreateAgentDialog } from '../components/agents/CreateAgentDialog';
@@ -82,7 +82,6 @@ import {
 import { useAuthStore, type AppearanceConfig } from '../stores/auth';
 import { useSkillsStore } from '../stores/skills';
 import { useMcpServersStore } from '../stores/mcp-servers';
-import type { ApiError } from '../api/client';
 import {
   getAgentContextSource,
   type AgentProfile,
@@ -100,6 +99,8 @@ import {
 import { countActiveConversations } from '../utils/agent-runtime-policy';
 import { confirmRunnerRestart } from '../utils/agent-save-confirm';
 import { createUnsavedNavigationGuard } from '../utils/unsaved-navigation';
+import { downloadTextFile } from '../utils/download';
+import { apiErrorBody } from '../utils/error';
 
 const EMPTY_PROMPTS: AgentPromptParts = {
   identity_prompt: '',
@@ -107,6 +108,15 @@ const EMPTY_PROMPTS: AgentPromptParts = {
   agents_prompt: '',
   tools_prompt: '',
 };
+
+function promptsOf(profile: AgentProfile): AgentPromptParts {
+  return {
+    identity_prompt: profile.identity_prompt,
+    soul_prompt: profile.soul_prompt,
+    agents_prompt: profile.agents_prompt,
+    tools_prompt: profile.tools_prompt,
+  };
+}
 
 /** A profile's own avatar, falling back to the main HappyClaw appearance. */
 function resolveAgentAvatar(
@@ -153,24 +163,8 @@ function comparablePolicy(profile: AgentProfile): AgentProfileRuntimePolicy {
   };
 }
 
-function asApiError(error: unknown): ApiError | null {
-  if (!error || typeof error !== 'object' || !('status' in error)) return null;
-  const candidate = error as Partial<ApiError>;
-  return typeof candidate.status === 'number' &&
-    typeof candidate.message === 'string'
-    ? (candidate as ApiError)
-    : null;
-}
-
-function getErrorMessage(err: unknown, fallback: string): string {
-  const modelError = modelBindingErrorMessage(err);
-  if (modelError) return modelError;
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message) return message;
-  }
-  return fallback;
+function errorText(err: unknown, fallback: string): string {
+  return modelBindingErrorMessage(err) ?? getErrorMessage(err, fallback);
 }
 
 function strippedHostNotice(stripped: AgentHostGrant[]): string | null {
@@ -179,20 +173,6 @@ function strippedHostNotice(stripped: AgentHostGrant[]): string | null {
     grant === 'host_context' ? '宿主机 Claude Code 配置' : '宿主机 Skills',
   );
   return `只有管理员能使用${parts.join('和')}，新智能体已去掉这些设置`;
-}
-
-/** Save an exported Agent as a file the user can import elsewhere. */
-function downloadJson(fileName: string, data: unknown) {
-  const url = URL.createObjectURL(
-    new Blob([`${JSON.stringify(data, null, 2)}\n`], {
-      type: 'application/json',
-    }),
-  );
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = fileName;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function AgentProfilesPage() {
@@ -359,12 +339,7 @@ export function AgentProfilesPage() {
       return;
     }
     setName(selected.name);
-    setCurrentPrompts({
-      identity_prompt: selected.identity_prompt,
-      soul_prompt: selected.soul_prompt,
-      agents_prompt: selected.agents_prompt,
-      tools_prompt: selected.tools_prompt,
-    });
+    setCurrentPrompts(promptsOf(selected));
     setPromptMode(selected.prompt_mode);
     setAvatarEmoji(selected.avatar_emoji);
     setAvatarColor(selected.avatar_color);
@@ -389,7 +364,7 @@ export function AgentProfilesPage() {
   useEffect(() => {
     if (!selected) return;
     void loadProfileGovernance(selected.id).catch((err) => {
-      toast.error(getErrorMessage(err, '加载智能体治理数据失败'));
+      toast.error(errorText(err, '加载智能体治理数据失败'));
     });
   }, [loadProfileGovernance, selected?.id]);
 
@@ -431,26 +406,43 @@ export function AgentProfilesPage() {
     ],
   );
 
-  const policyChanged =
-    !!selected &&
-    !!currentRuntimePolicy &&
-    JSON.stringify(currentRuntimePolicy) !==
-      JSON.stringify(comparablePolicy(selected));
-  const binding = capabilities ? capabilityFormBinding(capabilities) : null;
-  const dirty =
-    !!selected &&
-    !!binding &&
-    (name.trim() !== selected.name ||
-      currentPrompts.identity_prompt !== selected.identity_prompt ||
-      currentPrompts.soul_prompt !== selected.soul_prompt ||
-      currentPrompts.agents_prompt !== selected.agents_prompt ||
-      currentPrompts.tools_prompt !== selected.tools_prompt ||
-      promptMode !== selected.prompt_mode ||
-      binding.model_config_id !== selected.model_config_id ||
-      binding.model !== (selected.model ?? null) ||
-      avatarEmoji !== selected.avatar_emoji ||
-      avatarColor !== selected.avatar_color ||
-      policyChanged);
+  // What a save would send; the editor is dirty exactly when it is not empty.
+  const pendingSave = useMemo(() => {
+    if (!selected || !capabilities || !currentRuntimePolicy) return null;
+    const changes: Parameters<typeof updateProfile>[1] = {};
+    if (name.trim() !== selected.name) changes.name = name.trim();
+    const promptPatch = buildAgentPromptPatch(currentPrompts, promptMode, {
+      ...promptsOf(selected),
+      prompt_mode: selected.prompt_mode,
+    });
+    if (promptPatch) Object.assign(changes, promptPatch);
+    Object.assign(changes, capabilityFormModelChanges(selected, capabilities));
+    if (
+      JSON.stringify(currentRuntimePolicy) !==
+      JSON.stringify(comparablePolicy(selected))
+    ) {
+      changes.runtime_policy = currentRuntimePolicy;
+    }
+    // Anything but the avatar restarts the Agent's runners.
+    const restartsRunners = Object.keys(changes).length > 0;
+    if (avatarEmoji !== selected.avatar_emoji) {
+      changes.avatar_emoji = avatarEmoji;
+    }
+    if (avatarColor !== selected.avatar_color) {
+      changes.avatar_color = avatarColor;
+    }
+    return { changes, restartsRunners };
+  }, [
+    avatarColor,
+    avatarEmoji,
+    capabilities,
+    currentPrompts,
+    currentRuntimePolicy,
+    name,
+    promptMode,
+    selected,
+  ]);
+  const dirty = !!pendingSave && Object.keys(pendingSave.changes).length > 0;
   const formError =
     promptLengthError(currentPrompts) ??
     (capabilities ? capabilityFormError(capabilities) : null) ??
@@ -537,30 +529,10 @@ export function AgentProfilesPage() {
   };
 
   const handleSave = async () => {
-    if (!selected || !capabilities || !name.trim() || formError) return;
-    const changes: Parameters<typeof updateProfile>[1] = {};
-    if (name.trim() !== selected.name) changes.name = name.trim();
-    const promptPatch = buildAgentPromptPatch(currentPrompts, promptMode, {
-      identity_prompt: selected.identity_prompt,
-      soul_prompt: selected.soul_prompt,
-      agents_prompt: selected.agents_prompt,
-      tools_prompt: selected.tools_prompt,
-      prompt_mode: selected.prompt_mode,
-    });
-    if (promptPatch) Object.assign(changes, promptPatch);
-    Object.assign(changes, capabilityFormModelChanges(selected, capabilities));
-    if (policyChanged && currentRuntimePolicy) {
-      changes.runtime_policy = currentRuntimePolicy;
+    if (!selected || !pendingSave || !dirty || !name.trim() || formError) {
+      return;
     }
-    // Anything but the avatar restarts the Agent's runners.
-    const restartsRunners = Object.keys(changes).length > 0;
-    if (avatarEmoji !== selected.avatar_emoji) {
-      changes.avatar_emoji = avatarEmoji;
-    }
-    if (avatarColor !== selected.avatar_color) {
-      changes.avatar_color = avatarColor;
-    }
-    if (Object.keys(changes).length === 0) return;
+    const { changes, restartsRunners } = pendingSave;
     if (
       restartsRunners &&
       !(await confirmRunnerRestart(selected.id, loadProfileGovernance))
@@ -573,10 +545,10 @@ export function AgentProfilesPage() {
       setCapabilities(capabilityFormFromProfile(profile));
       toast.success('已保存');
     } catch (err) {
-      if (asApiError(err)?.body?.persisted === true) {
+      if (apiErrorBody(err)?.persisted === true) {
         void loadProfileGovernance(selected.id).catch(() => undefined);
       }
-      toast.error(getErrorMessage(err, '保存失败'));
+      toast.error(errorText(err, '保存失败'));
     } finally {
       setSaving(false);
     }
@@ -589,7 +561,7 @@ export function AgentProfilesPage() {
       await retryRuntimeCleanup(selected.id);
       toast.success('工作区运行时清理已完成');
     } catch (err) {
-      toast.error(getErrorMessage(err, '工作区运行时清理失败'));
+      toast.error(errorText(err, '工作区运行时清理失败'));
     } finally {
       setRuntimeCleanupRepairing(false);
     }
@@ -619,7 +591,7 @@ export function AgentProfilesPage() {
       setAvatarUrl(profile.avatar_url);
       toast.success('智能体头像已更新');
     } catch (error) {
-      toast.error(getErrorMessage(error, '上传头像失败'));
+      toast.error(errorText(error, '上传头像失败'));
     } finally {
       setUploadingAvatar(false);
     }
@@ -640,7 +612,7 @@ export function AgentProfilesPage() {
       setAvatarStyleOpen(false);
       toast.success('已改为继承主 HappyClaw 头像');
     } catch (error) {
-      toast.error(getErrorMessage(error, '恢复主头像失败'));
+      toast.error(errorText(error, '恢复主头像失败'));
     } finally {
       setUploadingAvatar(false);
     }
@@ -657,7 +629,7 @@ export function AgentProfilesPage() {
       const notice = strippedHostNotice(stripped);
       if (notice) toast.warning(notice);
     } catch (err) {
-      toast.error(getErrorMessage(err, '复制失败'));
+      toast.error(errorText(err, '复制失败'));
     } finally {
       setDuplicating(false);
     }
@@ -668,14 +640,18 @@ export function AgentProfilesPage() {
     try {
       const exported = await exportProfile(selected.id);
       const fileName = `${selected.name.replace(/[\\/:*?"<>|\s]+/g, '-')}.happyclaw-agent.json`;
-      downloadJson(fileName, exported);
+      downloadTextFile(
+        `${JSON.stringify(exported, null, 2)}\n`,
+        fileName,
+        'application/json',
+      );
       toast.success(
         dirty
           ? '已导出已保存的配置；未保存的修改不在文件里'
           : '已导出；模型配置不随文件导出',
       );
     } catch (err) {
-      toast.error(getErrorMessage(err, '导出失败'));
+      toast.error(errorText(err, '导出失败'));
     }
   };
 
@@ -713,7 +689,7 @@ export function AgentProfilesPage() {
         return next;
       });
     } catch (err) {
-      toast.error(getErrorMessage(err, '迁移工作区失败'));
+      toast.error(errorText(err, '迁移工作区失败'));
     } finally {
       setMovingWorkspaceJid(null);
     }
@@ -762,7 +738,7 @@ export function AgentProfilesPage() {
       selectAfterDelete(selected.id);
       toast.success('已删除');
     } catch (err) {
-      toast.error(getErrorMessage(err, '删除失败'));
+      toast.error(errorText(err, '删除失败'));
     } finally {
       setDeleting(false);
     }
@@ -778,7 +754,7 @@ export function AgentProfilesPage() {
       toast.success('工作区已迁移，智能体已删除');
     } catch (err) {
       // The server moved nothing unless it says it persisted.
-      toast.error(getErrorMessage(err, '迁移并删除失败，没有工作区被迁移'));
+      toast.error(errorText(err, '迁移并删除失败，没有工作区被迁移'));
     } finally {
       setDeleting(false);
     }

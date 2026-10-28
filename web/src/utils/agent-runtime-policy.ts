@@ -72,15 +72,6 @@ export function hostSkillPolicyForMode(
   };
 }
 
-export function skillPolicySummary(
-  policy: SkillSourcePolicy,
-  allLabel = '全部已启用',
-): string {
-  if (policy.mode === 'disabled') return '不使用';
-  if (policy.mode === 'inherit') return allLabel;
-  return `选择 ${policy.ids.length} 项`;
-}
-
 export const AGENT_EFFORT_OPTIONS: Array<{
   value: AgentEffortLevel;
   label: string;

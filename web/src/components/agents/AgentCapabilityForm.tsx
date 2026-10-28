@@ -87,13 +87,18 @@ export function capabilityFormPolicy(
   };
 }
 
+function capabilityFormErrors(value: AgentCapabilityFormValue) {
+  return {
+    managed: skillSelectionError(' HappyClaw Skill', value.skills),
+    host: skillSelectionError('宿主机 Skill', value.hostSkills),
+  };
+}
+
 export function capabilityFormError(
   value: AgentCapabilityFormValue,
 ): string | null {
-  return (
-    skillSelectionError(' HappyClaw Skill', value.skills) ??
-    skillSelectionError('宿主机 Skill', value.hostSkills)
-  );
+  const errors = capabilityFormErrors(value);
+  return errors.managed ?? errors.host;
 }
 
 /** The (configuration, model) part of a save; see modelBindingChanges. */
@@ -103,7 +108,7 @@ export function capabilityFormModelChanges(
 ) {
   return modelBindingChanges(
     saved,
-    value.modelConfigId === 'inherit' ? null : value.modelConfigId,
+    capabilityFormBinding(value).model_config_id,
     value.model,
   );
 }
@@ -170,6 +175,7 @@ export function AgentCapabilityForm({
     () => buildMcpSelectionOptions(mcpServers, value.mcp.ids),
     [mcpServers, value.mcp.ids],
   );
+  const errors = capabilityFormErrors(value);
   const update = (patch: Partial<AgentCapabilityFormValue>) =>
     onChange({ ...value, ...patch });
   const defaultModel = modelConfigs.find((item) => item.is_default);
@@ -284,8 +290,8 @@ export function AgentCapabilityForm({
             loading={skillsLoading}
             error={skillsError}
             hostAvailable={hostAvailable}
-            managedError={skillSelectionError(' HappyClaw Skill', value.skills)}
-            hostError={skillSelectionError('宿主机 Skill', value.hostSkills)}
+            managedError={errors.managed}
+            hostError={errors.host}
           />
         </div>
 

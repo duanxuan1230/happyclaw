@@ -88,7 +88,6 @@ export function MainAgentCapabilitiesSection() {
         ...capabilityFormModelChanges(profile, form),
         ...(policyChanged ? { runtime_policy: policy } : {}),
       });
-      await loadProfiles();
       toast.success('主 HappyClaw 模型、推理档位与能力已保存');
     } catch (error) {
       toast.error(

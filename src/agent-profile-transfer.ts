@@ -1,6 +1,5 @@
 import type { z } from 'zod';
 
-import { normalizeAgentProfileRuntimePolicy } from './db.js';
 import { parseManagedMcpReference } from './mcp-utils.js';
 import { AgentProfileExportAgentSchema } from './schemas.js';
 import type { AgentProfile, AgentProfileRuntimePolicy } from './types.js';
@@ -144,38 +143,13 @@ export function stripHostGrants(
   return { policy, stripped };
 }
 
-/** An imported policy, normalized and fitted to this account. */
-export function importedRuntimePolicy(
-  agent: AgentProfileExportAgent,
-  isAdmin: boolean,
-): { policy: AgentProfileRuntimePolicy; stripped: HostGrant[] } {
-  return stripHostGrants(
-    normalizeAgentProfileRuntimePolicy(agent.runtime_policy),
-    isAdmin,
-  );
-}
-
-export interface MissingCapabilityReferences {
-  skills: string[];
-  host_skills: string[];
-  mcp: string[];
-}
-
-export function hasMissingReferences(
-  missing: MissingCapabilityReferences,
-): boolean {
-  return (
-    missing.skills.length + missing.host_skills.length + missing.mcp.length > 0
-  );
-}
-
 /**
  * Remove references this account cannot resolve. A custom selection left
  * with nothing selected turns the source off instead of widening it.
  */
 export function dropMissingReferences(
   policy: AgentProfileRuntimePolicy,
-  missing: MissingCapabilityReferences,
+  missing: { skills: string[]; host_skills: string[]; mcp: string[] },
 ): AgentProfileRuntimePolicy {
   const keep = <
     T extends { mode: 'inherit' | 'custom' | 'disabled'; ids: string[] },

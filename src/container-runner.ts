@@ -1321,8 +1321,10 @@ export function resolvePinnedModelConfig(
   if (modelConfigId) return { id: modelConfigId, source: 'agent' };
   // The global default is the weakest explicit choice: a Workspace that
   // carries its own provider environment keeps it.
+  // Read the Workspace environment file at most once, and only if asked.
+  let ownEnv: boolean | undefined;
   const ownProviderEnv = () =>
-    !!session && workspaceHasProviderEnv(session.groupFolder);
+    (ownEnv ??= !!session && workspaceHasProviderEnv(session.groupFolder));
   const defaultProvider = getUsableDefaultProvider();
   if (defaultProvider && !ownProviderEnv()) {
     return { id: defaultProvider.id, source: 'default' };

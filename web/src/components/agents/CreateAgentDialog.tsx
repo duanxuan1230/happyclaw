@@ -13,9 +13,11 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { SegmentedControl } from '@/components/common/SegmentedControl';
 import { SettingsField } from '@/components/settings/SettingsLayout';
+import { getErrorMessage } from '@/components/settings/types';
 import { useAgentProfilesStore } from '@/stores/agent-profiles';
 import type { AgentProfile } from '@/types';
 import { AGENT_TEMPLATES } from '@/utils/agent-templates';
+import { apiErrorBody } from '@/utils/error';
 import { ChoiceCardBody, choiceCardClassName } from './AgentSection';
 
 type Start = 'blank' | 'ai' | 'template';
@@ -29,22 +31,6 @@ const START_OPTIONS: Array<{
   { value: 'ai', label: 'AI 写提示词', icon: Wand2 },
   { value: 'template', label: '内置模板', icon: LayoutTemplate },
 ];
-
-function errorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message) return message;
-  }
-  return fallback;
-}
-
-function isNameTaken(err: unknown): boolean {
-  return (
-    !!err &&
-    typeof err === 'object' &&
-    (err as { body?: { code?: unknown } }).body?.code === 'AGENT_NAME_TAKEN'
-  );
-}
 
 /**
  * New Agents start from a name and, optionally, prompts written by AI from a
@@ -127,10 +113,10 @@ export function CreateAgentDialog({
       }
       onCreated(profile);
     } catch (err) {
-      if (isNameTaken(err)) {
-        setNameError(errorMessage(err, '名称已被使用'));
+      if (apiErrorBody(err)?.code === 'AGENT_NAME_TAKEN') {
+        setNameError(getErrorMessage(err, '名称已被使用'));
       } else {
-        setError(errorMessage(err, '创建失败，请重试'));
+        setError(getErrorMessage(err, '创建失败，请重试'));
       }
     } finally {
       setSubmitting(false);

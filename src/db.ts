@@ -9591,10 +9591,14 @@ function effectiveLegacyHostSkillPolicy(
  * the new one and the revision stays, so no conversation restarts.
  */
 export function pinAgentProfileHostSkillPolicies(): number {
+  // Runs on every start; once pinned, the scan decodes nothing. Malformed
+  // JSON is decoded like the runner decodes it (to the default policy).
   const pending = (
-    prepareCached(
-      "SELECT * FROM agent_profiles WHERE status = 'active'",
-    ).all() as Array<Record<string, unknown>>
+    prepareCached(`SELECT * FROM agent_profiles
+       WHERE status = 'active'
+         AND CASE WHEN json_valid(runtime_policy)
+           THEN json_extract(runtime_policy, '$.skills.host') IS NULL
+           ELSE 1 END`).all() as Array<Record<string, unknown>>
   )
     .map(mapAgentProfileRow)
     .filter((profile) => !profile.runtime_policy.skills.host);
@@ -10024,6 +10028,7 @@ export function createAgentProfile(input: {
   includeClaudePreset?: boolean;
   avatarEmoji?: string | null;
   avatarColor?: string | null;
+  avatarUrl?: string | null;
   modelConfigId?: string | null;
   /** A model of `modelConfigId`'s list; ignored without a configuration. */
   model?: string | null;
@@ -10052,9 +10057,9 @@ export function createAgentProfile(input: {
   prepareCached(`INSERT INTO agent_profiles (
       id, owner_user_id, name,
       identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-      include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
+      include_claude_preset, avatar_emoji, avatar_color, avatar_url, model_config_id, model, runtime_policy, identity_hash, version,
       is_default, status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
     id,
     input.ownerUserId,
     input.name,
@@ -10066,6 +10071,7 @@ export function createAgentProfile(input: {
     includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
     input.avatarEmoji ?? null,
     input.avatarColor ?? null,
+    input.avatarUrl ?? null,
     input.modelConfigId ?? null,
     (input.modelConfigId && input.model) || null,
     runtimePolicyJson,
