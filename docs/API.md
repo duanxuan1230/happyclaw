@@ -1015,8 +1015,8 @@ POST、PATCH 和 DELETE 均返回
 `{ storeRevision, item, replayed }`；GET item 返回相同 wrapper，但不含
 `replayed`。`replayed` 表示服务端按相同 idempotency key 返回了已有写入结果。
 
-`canonicalKey` 规范化后（忽略大小写、全半角和空格/`_`/`-`）已被另一条 active 或
-proposed 条目使用时，创建或改 key 返回 409：
+`canonicalKey` 规范化后（忽略大小写、全半角和空格/`_`/`-`）已被另一条 active 条目
+使用时（Agent 提议还包括另一条 proposed 条目），创建或改 key 返回 409：
 
 ```json
 {
@@ -1042,7 +1042,10 @@ proposed 条目使用时，创建或改 key 返回 409：
 
 请求体 `{ expectedRevision, idempotencyKey?, reason?, provenance? }`（`reason` 只用于
 reject），返回 `{ storeRevision, item, replayed }`。confirm 把条目改为 active，
-reject 写入 tombstone；审计事件分别记为 `confirm`、`reject`。条目已不是 proposed 时
+reject 写入 tombstone；审计事件分别记为 `confirm`、`reject`。带相同
+`idempotencyKey` 重发返回已有结果（`replayed: true`）。owner 用 PATCH 编辑一条提议
+也会把它变为 active；创建和 PATCH 都不接受 `status: "proposed"`（400）。条目已不是
+proposed 时
 返回 409 `not_proposed`，revision 过期返回 409 `revision_conflict`，确认时同一
 canonical key 已有 active 条目返回 409 `memory_duplicate`。
 
