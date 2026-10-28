@@ -1665,6 +1665,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       {interactionModeDialogMounted && (
         <WorkspaceInteractionModeDialog
           open={showInteractionModeDialog}
+          groupJid={groupJid}
           workspaceName={workspaceDisplayName}
           currentMode={interactionMode}
           currentVisibility={processVisibility}

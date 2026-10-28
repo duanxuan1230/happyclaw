@@ -65,6 +65,19 @@ export const AGENT_PROMPT_SECTIONS: Array<{
   },
 ];
 
+/** The server's per-section limit, counted like String#length. */
+export const AGENT_PROMPT_MAX_CHARS = 20000;
+
+/** The first section over the limit, as a message naming it. */
+export function promptLengthError(parts: AgentPromptParts): string | null {
+  const over = AGENT_PROMPT_SECTIONS.find(
+    (section) => parts[section.field].length > AGENT_PROMPT_MAX_CHARS,
+  );
+  return over
+    ? `${over.title}（${over.eyebrow}）超过 ${AGENT_PROMPT_MAX_CHARS} 字上限（当前 ${parts[over.field].length} 字）`
+    : null;
+}
+
 export function estimatePromptTokens(value: string): number {
   if (!value.trim()) return 0;
   // Chinese text is commonly close to one token per character, while Latin

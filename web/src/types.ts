@@ -196,6 +196,8 @@ export interface AgentProfileWorkspace {
   is_home: boolean;
   execution_mode: 'container' | 'host';
   added_at: string;
+  /** Runtimes mid-turn or with queued input; older servers do not send it. */
+  active_conversations?: number;
   runtime_sessions: AgentProfileWorkspaceRuntimeSession[];
 }
 
@@ -242,6 +244,24 @@ export interface EffectiveCapabilityEntry {
   overrides: CapabilityLayerSource[];
   available: boolean;
   unavailableReason?: 'system_admin_only';
+}
+
+/**
+ * The connection and model a run uses, and which step of the pinning order
+ * chose it. Older servers do not send it.
+ */
+export interface AgentModelResolution {
+  source:
+    | 'session'
+    | 'agent'
+    | 'default'
+    | 'single'
+    | 'workspace_env'
+    | 'pool'
+    | 'none';
+  model_config_id: string | null;
+  model_config_name: string | null;
+  model: string | null;
 }
 
 export interface AgentCapabilityPreview {

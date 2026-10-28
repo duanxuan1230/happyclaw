@@ -29,6 +29,7 @@ import { capabilitySourceLabel } from '@/utils/capability-sources';
 import { SettingsGroup } from '@/components/settings/SettingsLayout';
 import { cn } from '@/lib/utils';
 import { AgentSection } from './AgentSection';
+import { ModelResolutionRow, readModelResolution } from './ModelResolutionRow';
 
 export function EffectiveCapabilitiesPreview({
   profileId,
@@ -41,6 +42,7 @@ export function EffectiveCapabilitiesPreview({
 }) {
   const [workspaceJid, setWorkspaceJid] = useState('none');
   const [preview, setPreview] = useState<AgentCapabilityPreview | null>(null);
+  const [resolution, setResolution] = useState(readModelResolution(null));
   const [runContext, setRunContext] = useState<RunContextSnapshot | null>(null);
   const [runContextStatus, setRunContextStatus] =
     useState<RunContextStatus>('none');
@@ -79,6 +81,7 @@ export function EffectiveCapabilitiesPreview({
       );
       if (sequence === requestSequence.current) {
         setPreview(result.preview);
+        setResolution(readModelResolution(result));
         setRunContext(result.run_context);
         setRunContextStatus(result.run_context_status);
       }
@@ -160,6 +163,7 @@ export function EffectiveCapabilitiesPreview({
                 </span>
               )}
             </PreviewRow>
+            <ModelResolutionRow resolution={resolution} />
             <CapabilityEntriesRow
               label="HappyClaw Skills"
               entries={preview.skills.entries.filter(
