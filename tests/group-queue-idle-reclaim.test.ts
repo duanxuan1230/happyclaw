@@ -154,6 +154,53 @@ describe('reclaiming idle warm container runners', () => {
     expect(started).toEqual(['web:a', 'web:b']);
     expect(queue.getStatus().activeHostProcessCount).toBe(2);
   });
+
+  test('reclaims the same user’s idle container when per-user container limit is reached below global limit', async () => {
+    settings.maxConcurrentContainers = 5;
+    const { queue, started, closed } = harness();
+    const userOf = (jid: string) => (jid.startsWith('web:u1-') ? 'u1' : 'u2');
+    const activeByUser = new Map<string, number>();
+    queue.setUserConcurrentLimitChecker((jid) => {
+      const userId = userOf(jid);
+      return {
+        allowed: (activeByUser.get(userId) ?? 0) < 1,
+        userId,
+      };
+    });
+
+    // u2 has an older idle container; u1 has a newer idle container
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1_000);
+    await idleRunner(queue, 'web:u2-idle');
+    activeByUser.set('u2', 1);
+    now.mockReturnValue(2_000);
+    await idleRunner(queue, 'web:u1-idle');
+    activeByUser.set('u1', 1);
+    now.mockRestore();
+
+    // u1 enqueues a second workspace: u1 is at per-user limit (1), global is 2 < 5
+    closed.mockImplementationOnce((jid: string) => {
+      activeByUser.set(userOf(jid), 0);
+      queue.stopGroup(jid);
+    });
+    queue.enqueueMessageCheck('web:u1-next');
+    expect(closed).toHaveBeenCalledWith('web:u1-idle');
+    expect(closed).not.toHaveBeenCalledWith('web:u2-idle');
+    expect(started).toContain('web:u1-idle');
+  });
+
+  test('hasActiveMainRunnerForMessage returns false while a runner is closing', async () => {
+    settings.maxConcurrentContainers = 1;
+    const { queue, closed } = harness();
+    // Do not auto-exit on closeStdin so state.closing stays set
+    closed.mockImplementation(() => {});
+    await idleRunner(queue, 'web:closing-test');
+    expect(queue.hasActiveMainRunnerForMessage('web:closing-test')).toBe(true);
+
+    queue.enqueueMessageCheck('web:waiting-peer');
+    expect(closed).toHaveBeenCalledWith('web:closing-test');
+    expect(queue.hasActiveMainRunnerForMessage('web:closing-test')).toBe(false);
+  });
 });
 
 describe('deferring a mutation stop to the end of the current query', () => {

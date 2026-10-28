@@ -204,10 +204,12 @@ describe('usage-limit wait wiring in the conversation loops', () => {
       );
       expect(body).toMatch(
         new RegExp(
-          `releaseUsageLimitWaitForNewInput\\(${lane}\\)[\\s\\S]{0,120}?pendingWindow = getMessagesSinceBounded\\(`,
+          `pendingWindow\\.messages\\.some\\(\\(m\\) => !isScheduledTaskPromptMessage\\(m\\)\\) &&\\s*releaseUsageLimitWaitForNewInput\\(${lane}\\)[\\s\\S]{0,120}?pendingWindow = getMessagesSinceBounded\\(`,
         ),
       );
     }
+    expect(main).toContain('if (parkedForUsageLimitWait) {');
+    expect(agent).toContain('if (parkedForUsageLimitWait) {');
   });
 
   test('break, cancel, send-now, stop and restart all reach the wait', () => {
@@ -237,7 +239,7 @@ describe('usage-limit wait wiring in the conversation loops', () => {
       slice('function recoverDurableFollowUps(', '// ── Usage-limit waits'),
     ).toContain('if (waitingLanes.has(chatJid)) continue;');
     expect(source).toMatch(
-      /keepCorrelationIds: listPendingUsageLimitWaits\(\)\.map\(/,
+      /keepCorrelationIds: \[\s*\.\.\.new Set\(\s*listPendingUsageLimitWaits\(\)\.flatMap\(/,
     );
   });
 });

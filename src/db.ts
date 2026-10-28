@@ -114,7 +114,15 @@ import {
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
 import { initSessionWorktreeStore } from './session-worktree-store.js';
-import { initRuntimeStateStore } from './runtime-state-store.js';
+import {
+  clearAgentSessionHistoryReinjections,
+  clearFolderRuntimeState,
+  clearSessionHistoryReinjection,
+  clearTaskFailure,
+  clearTaskFailureNotices,
+  clearUsageLimitWait,
+  initRuntimeStateStore,
+} from './runtime-state-store.js';
 import { splitLegacyEmbeddedReferenceContent } from './message-prompt.js';
 
 let db: InstanceType<typeof Database>;
@@ -5512,6 +5520,10 @@ export function permanentlyDeleteTasksWithRevisions(
         currentTasks.push(current);
       }
 
+      const deleteRunWaits = prepareCached(
+        `DELETE FROM usage_limit_waits
+         WHERE scope_key IN (SELECT 'task-run:' || id FROM task_runs WHERE task_id = ?)`,
+      );
       const deleteRunLogs = prepareCached(
         'DELETE FROM task_run_logs WHERE task_id = ?',
       );
@@ -5521,6 +5533,7 @@ export function permanentlyDeleteTasksWithRevisions(
       const deleteDefinition = prepareCached(`DELETE FROM scheduled_tasks
          WHERE id = ? AND revision = ? AND deleted_at IS NOT NULL`);
       for (const task of currentTasks) {
+        deleteRunWaits.run(task.id);
         deleteRunLogs.run(task.id);
         deleteRuns.run(task.id);
         const result = deleteDefinition.run(task.id, task.revision);
@@ -5530,6 +5543,7 @@ export function permanentlyDeleteTasksWithRevisions(
           );
         }
       }
+      clearTaskFailureNotices(currentTasks.map((task) => task.id));
 
       return {
         status: 'deleted',
@@ -5551,6 +5565,11 @@ export function updateTaskWorkspace(
 
 export function deleteTask(id: string): void {
   // Delete child records first (FK constraint)
+  prepareCached(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (SELECT 'task-run:' || id FROM task_runs WHERE task_id = ?)`,
+  ).run(id);
+  clearTaskFailure(id);
   prepareCached('DELETE FROM task_runs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
@@ -8354,6 +8373,14 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
   const result = prepareCached(
     `DELETE FROM task_run_logs WHERE run_at < ?`,
   ).run(cutoff);
+  prepareCached(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (
+       SELECT 'task-run:' || id FROM task_runs
+       WHERE completed_at IS NOT NULL AND completed_at < ?
+         AND status IN ('success','failed','cancelled','missed')
+     )`,
+  ).run(cutoff);
   const durable = prepareCached(`DELETE FROM task_runs
        WHERE completed_at IS NOT NULL AND completed_at < ?
          AND status IN ('success','failed','cancelled','missed')`).run(cutoff);
@@ -8622,6 +8649,9 @@ export function setSession(
         groupFolder,
         effectiveAgentId,
       );
+    }
+    if (sessionId) {
+      clearSessionHistoryReinjection(groupFolder, effectiveAgentId);
     }
     syncWorkspaceRuntimeSessionProjection(groupFolder, effectiveAgentId);
   })();
@@ -13205,6 +13235,7 @@ export function deleteGroupData(
       'DELETE FROM im_context_bindings WHERE workspace_jid = ?',
     ).run(jid);
     // 1. 删除定时任务运行日志 + 定时任务
+    clearFolderRuntimeState(folder, jid);
     prepareCached(
       'DELETE FROM task_runs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)',
     ).run(folder);
@@ -14872,6 +14903,14 @@ export function listActiveConversationAgents(): SubAgent[] {
 
 export function deleteAgent(id: string): void {
   db.transaction(() => {
+    const existing = getAgent(id);
+    if (existing) {
+      clearUsageLimitWait(`${existing.chat_jid}#agent:${id}`);
+    }
+    prepareCached('DELETE FROM usage_limit_waits WHERE scope_key LIKE ?').run(
+      `%#agent:${id}`,
+    );
+    clearAgentSessionHistoryReinjections(id);
     // A product Session can own an SDK runtime resume row and channel mounts;
     // clear all three projections together so direct DB callers cannot leave
     // routable ghosts behind.

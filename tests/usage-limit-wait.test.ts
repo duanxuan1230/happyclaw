@@ -50,8 +50,10 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => {
 const db = await import('../src/db.js');
 const store = await import('../src/runtime-state-store.js');
 const wait = await import('../src/usage-limit-wait.js');
-const { applyProviderFailureDisposition } =
+const { applyCodexGatewayVerdict, applyProviderFailureDisposition } =
   await import('../src/container-runner.js');
+const { CODEX_REAUTH_REQUIRED_USER_NOTICE } =
+  await import('../src/provider-failure.js');
 const { providerPool } = await import('../src/provider-pool.js');
 type ContainerOutput = import('../src/container-runner.js').ContainerOutput;
 
@@ -209,6 +211,127 @@ describe('a usage wall on every usable connection waits for the reset', () => {
     const output = wall('m-weekly', reset);
     expect(decide(output, 'provider-a', false)).toBe(false);
     expectResumeNear(output, reset);
+  });
+
+  test('an automatic pool preserves multi-day resets beyond 24h across members', () => {
+    const now = Date.now();
+    const resetA = now + 3 * 24 * HOUR;
+    const resetB = now + 5 * 24 * HOUR;
+    quarantine('provider-a', resetA);
+    quarantine('provider-b', resetB);
+    const output = wall('m-pool-multiday', resetB);
+    expect(decide(output, 'provider-b', true)).toBe(false);
+    expectResumeNear(output, resetA);
+  });
+
+  test('auth/reauth failures never enter a usage-limit wait even when another pool member has a reset', () => {
+    const now = Date.now();
+    quarantine('provider-a', now + 2 * HOUR);
+    quarantine('provider-b');
+    // 401/auth failure on provider-b has no own reset timestamp
+    const authFailure = wall('m-auth-401');
+    expect(decide(authFailure, 'provider-b', true)).toBe(true);
+    expect(authFailure.providerUsageLimitResumeAt).toBeUndefined();
+    expect(store.getUsageLimitWait(scopeKey)).toBeNull();
+
+    // Codex gateway reauth_required clears any stale reset timestamp and never waits
+    const codexReauth = wall('m-codex-reauth', now + 2 * HOUR);
+    applyCodexGatewayVerdict(codexReauth, { lastVerdict: 'reauth_required' });
+    expect(codexReauth.providerFailureNotice).toBe(
+      CODEX_REAUTH_REQUIRED_USER_NOTICE,
+    );
+    expect(codexReauth.providerRateLimitResetsAt).toBeUndefined();
+    expect(decide(codexReauth, 'provider-b', true)).toBe(true);
+    expect(codexReauth.providerUsageLimitResumeAt).toBeUndefined();
+  });
+
+  test('deleting tasks, agents, or workspaces cleans up runtime state rows', () => {
+    const now = new Date().toISOString();
+    const folder = 'cleanup-folder';
+    const jid = 'web:cleanup-folder';
+    db.setRegisteredGroup(jid, {
+      name: 'Cleanup Workspace',
+      folder,
+      added_at: now,
+      executionMode: 'container',
+      is_home: false,
+    } as any);
+    db.createAgent({
+      id: 'agent-del-1',
+      group_folder: folder,
+      chat_jid: jid,
+      name: 'Session 1',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: null,
+      created_at: now,
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    store.markSessionForHistoryReinjection(folder, 'agent-del-1');
+    store.reserveUsageLimitWait({
+      scopeKey: `${jid}#agent:agent-del-1`,
+      inputKey: 'm-agent',
+      resetAt: now,
+      resumeAt: now,
+      maxWaits: 3,
+    });
+    db.deleteAgent('agent-del-1');
+    expect(store.getUsageLimitWait(`${jid}#agent:agent-del-1`)).toBeNull();
+    expect(
+      store.takeSessionHistoryReinjection(folder, 'agent-del-1', false),
+    ).toBe(false);
+
+    db.createTask({
+      id: 'task-del-1',
+      group_folder: folder,
+      chat_jid: jid,
+      prompt: 'check',
+      schedule_type: 'cron',
+      schedule_value: '0 9 * * *',
+      context_mode: 'isolated',
+      execution_type: 'agent',
+      execution_mode: 'container',
+      script_command: null,
+      next_run: now,
+      status: 'active',
+      created_at: now,
+      notify_channels: null,
+    });
+    const { run } = db.createTaskRun({
+      task: db.getTaskById('task-del-1')!,
+      triggerType: 'scheduled',
+      scheduledFor: now,
+    });
+    store.recordTaskFailure('task-del-1', 'key-1', 'boom');
+    store.reserveUsageLimitWait({
+      scopeKey: `task-run:${run.id}`,
+      inputKey: run.id,
+      resetAt: now,
+      resumeAt: now,
+      maxWaits: 3,
+    });
+    db.deleteTask('task-del-1');
+    expect(store.getUsageLimitWait(`task-run:${run.id}`)).toBeNull();
+    expect(store.clearTaskFailure('task-del-1')).toBeNull();
+
+    // Workspace deletion cleans up folder runtime state
+    store.markSessionForHistoryReinjection(folder, null);
+    store.reserveUsageLimitWait({
+      scopeKey: jid,
+      inputKey: 'm-main',
+      resetAt: now,
+      resumeAt: now,
+      maxWaits: 3,
+    });
+    db.deleteGroupData(jid, folder);
+    expect(store.getUsageLimitWait(jid)).toBeNull();
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(
+      false,
+    );
   });
 
   test('without a known reset, or beyond seven days, the input fails as before', () => {

@@ -173,4 +173,26 @@ describe('what a Workspace Memory write becomes on the host', () => {
     });
     expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
   });
+
+  test('an isolated scheduled task run with omitted turnId falls back to taskRunId for capability issuance', async () => {
+    const { createWorkspaceMemory } = host({});
+    const input: {
+      isScheduledTask?: boolean;
+      taskRunId?: string;
+      turnId?: string;
+    } = {
+      isScheduledTask: true,
+      taskRunId: 'task-run-fallback-1',
+    };
+    const effectiveTurnId =
+      input.turnId ?? (input.isScheduledTask ? input.taskRunId : undefined);
+    expect(effectiveTurnId).toBe('task-run-fallback-1');
+
+    const { create } = host({});
+    expect(await create(effectiveTurnId!, input.taskRunId!)).toMatchObject({
+      success: true,
+      proposal: true,
+    });
+    expect(createWorkspaceMemory).toHaveBeenCalledTimes(0);
+  });
 });

@@ -1342,6 +1342,7 @@ async function runTaskInner(
         isAdminHome,
         isScheduledTask: true,
         taskRunId: options?.taskRunId,
+        turnId: options?.taskRunId,
         // The run ID is only an IPC/session namespace.  Routing must use the
         // stable scheduled-task ID so notify_channels and chat_jid resolve.
         messageTaskId: task.id,
@@ -1536,6 +1537,15 @@ async function runTaskInner(
       commitDurableWorkspaceIntent();
     }
     finalizeRunLog();
+    if (!waitingForUsageReset && options?.taskRunId) {
+      clearUsageLimitWait(
+        usageLimitWaitScopeKey({
+          chatJid: workspace.jid,
+          taskRunId: options.taskRunId,
+          isScheduledTask: true,
+        }),
+      );
+    }
   }
 
   // 必须在 top-level try/finally 里清理 runningTaskIds：computeNextRun 抛错

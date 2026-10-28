@@ -808,6 +808,7 @@ export function applyCodexGatewayVerdict(
       break;
     case 'reauth_required':
       output.providerFailureNotice ??= CODEX_REAUTH_REQUIRED_USER_NOTICE;
+      output.providerRateLimitResetsAt = undefined;
       break;
   }
 }
@@ -939,7 +940,8 @@ export function usageLimitWaitScopeFor(
 ): UsageLimitWaitScope {
   return {
     scopeKey: usageLimitWaitScopeKey(input),
-    inputKey: input.turnId,
+    inputKey:
+      input.turnId ?? (input.isScheduledTask ? input.taskRunId : undefined),
   };
 }
 
@@ -957,12 +959,17 @@ function deferUsageLimitFailure(
   waitScope: UsageLimitWaitScope | undefined,
 ): boolean {
   if (!waitScope || !isDatabaseInitialized()) return false;
+  if (output.providerFailureNotice === CODEX_REAUTH_REQUIRED_USER_NOTICE) {
+    return false;
+  }
+  const ownResetAt = normalizeUsageLimitResetAt(
+    output.providerRateLimitResetsAt,
+  );
+  if (ownResetAt === null) return false;
   const inputKey = resolveTransientRetryKey(output) || waitScope.inputKey;
   if (!inputKey) return false;
   const now = Date.now();
-  const candidates = [
-    normalizeUsageLimitResetAt(output.providerRateLimitResetsAt),
-  ];
+  const candidates: Array<number | null> = [ownResetAt];
   const tiers = allowFailover ? poolServingTiers() : null;
   if (tiers) {
     candidates.push(
@@ -3441,6 +3448,9 @@ export async function runContainerAgent(
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
   input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
+  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
+    input = { ...input, turnId: input.taskRunId };
+  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -3452,7 +3462,7 @@ export async function runContainerAgent(
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId,
+    input.turnId ?? input.taskRunId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'container',
@@ -4619,6 +4629,9 @@ export async function runHostAgent(
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
   input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
+  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
+    input = { ...input, turnId: input.taskRunId };
+  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -4630,7 +4643,7 @@ export async function runHostAgent(
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId,
+    input.turnId ?? input.taskRunId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'host',

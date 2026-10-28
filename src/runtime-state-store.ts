@@ -191,6 +191,7 @@ export function markUsageLimitWaitResumed(scopeKey: string): boolean {
 }
 
 export function clearUsageLimitWait(scopeKey: string): void {
+  if (!database) return;
   stmt(DELETE_WAIT).run(scopeKey);
 }
 
@@ -229,6 +230,23 @@ export function markSessionForHistoryReinjection(
     groupFolder,
     agentId || '',
     new Date().toISOString(),
+  );
+}
+
+export function clearSessionHistoryReinjection(
+  groupFolder: string,
+  agentId?: string | null,
+): void {
+  if (!database) return;
+  stmt(
+    'DELETE FROM session_history_reinjections WHERE group_folder = ? AND agent_id = ?',
+  ).run(groupFolder, agentId || '');
+}
+
+export function clearAgentSessionHistoryReinjections(agentId: string): void {
+  if (!database || !agentId) return;
+  stmt('DELETE FROM session_history_reinjections WHERE agent_id = ?').run(
+    agentId,
   );
 }
 
@@ -328,6 +346,7 @@ export function recordTaskFailure(
 export function clearTaskFailure(
   taskId: string,
 ): TaskFailureNoticeState | null {
+  if (!database) return null;
   return requireDatabase().transaction(() => {
     const row = stmt(SELECT_FAILURE).get(taskId) as
       | Record<string, unknown>
@@ -336,6 +355,46 @@ export function clearTaskFailure(
     stmt('DELETE FROM task_failure_notices WHERE task_id = ?').run(taskId);
     return toTaskFailureNotice(row);
   })();
+}
+
+export function clearTaskFailureNotices(taskIds: readonly string[]): void {
+  if (!database || taskIds.length === 0) return;
+  const del = stmt('DELETE FROM task_failure_notices WHERE task_id = ?');
+  for (const taskId of taskIds) {
+    del.run(taskId);
+  }
+}
+
+export function clearFolderRuntimeState(
+  groupFolder: string,
+  chatJid?: string,
+): void {
+  if (!database) return;
+  stmt('DELETE FROM session_history_reinjections WHERE group_folder = ?').run(
+    groupFolder,
+  );
+  stmt(
+    `DELETE FROM task_failure_notices
+     WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)`,
+  ).run(groupFolder);
+  stmt(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (
+       SELECT 'task-run:' || id FROM task_runs
+       WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)
+     )`,
+  ).run(groupFolder);
+  stmt(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (
+       SELECT chat_jid || '#agent:' || id FROM agents WHERE group_folder = ?
+     )`,
+  ).run(groupFolder);
+  if (chatJid) {
+    stmt(
+      'DELETE FROM usage_limit_waits WHERE scope_key = ? OR scope_key LIKE ?',
+    ).run(chatJid, `${chatJid}#agent:%`);
+  }
 }
 
 // ─── Usage event connections ───────────────────────────────

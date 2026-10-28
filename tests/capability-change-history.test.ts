@@ -82,7 +82,10 @@ describe('history hand-off after a capability change', () => {
       source.indexOf('async function runTerminalWarmup('),
     );
     expect(main).toMatch(
-      /resetForInteractionMode \|\|[\s\S]{0,120}takeSessionHistoryReinjection\(\s*effectiveGroup\.folder,\s*null,\s*!!sessions\[effectiveGroup\.folder\],\s*\)\s*\)\s*\{[\s\S]{0,800}: CAPABILITY_CHANGE_HISTORY_INTRO,/,
+      /const capabilityReset = takeSessionHistoryReinjection\(\s*effectiveGroup\.folder,\s*null,\s*!!sessions\[effectiveGroup\.folder\],\s*\);/,
+    );
+    expect(main).toMatch(
+      /resetForInteractionMode \|\|[\s\S]{0,120}capabilityReset\s*\)\s*\{[\s\S]{0,800}: CAPABILITY_CHANGE_HISTORY_INTRO,/,
     );
     const agent = source.slice(
       source.indexOf('async function processAgentConversation('),
@@ -91,7 +94,27 @@ describe('history hand-off after a capability change', () => {
       /const capabilityReset = takeSessionHistoryReinjection\(\s*effectiveGroup\.folder,\s*agentId,\s*!!sessionId,\s*\);/,
     );
     expect(agent).toMatch(
+      /resetForInteractionMode \|\|\s*capabilityReset \|\|\s*willClearSessionOnProviderSwitch\(/,
+    );
+    expect(agent).toMatch(
       /capabilityReset\s*\?\s*CAPABILITY_CHANGE_HISTORY_INTRO/,
+    );
+  });
+
+  test('setSession clears the history reinjection marker so a later /clear stays clean', () => {
+    const folder = 'clear-after-cap-folder';
+    db.setSession(folder, 'sdk-before');
+    store.markFolderSessionsForHistoryReinjection(folder);
+    db.deleteWorkspaceSessions(folder);
+
+    // Cold turn reads the marker while sessionEstablished is false
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(true);
+    // Turn succeeds and records the new SDK session
+    db.setSession(folder, 'sdk-after');
+    // Later /clear deletes the session; marker must already be gone
+    db.deleteSession(folder);
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(
+      false,
     );
   });
 
