@@ -591,12 +591,14 @@ function summarizeItem(item: WorkspaceMemoryItem): WorkspaceMemoryItemSummary {
 }
 
 /**
- * Reject a canonical key that an active or proposed item other than
- * `exceptId` already holds, after normalization.
+ * Reject a canonical key, after normalization, that an item other than
+ * `exceptId` already holds. An owner's write is held back only by active
+ * memory; a proposal also by another proposal, so one idea waits once.
  */
 function rejectDuplicateCanonicalKey(
   store: WorkspaceMemoryStore,
   canonicalKey: string | null | undefined,
+  writer: 'owner' | 'proposal',
   exceptId?: string,
 ): void {
   const normalized = normalizeCanonicalKey(canonicalKey);
@@ -606,7 +608,7 @@ function rejectDuplicateCanonicalKey(
       `SELECT id, canonical_key FROM workspace_memory_items
        WHERE store_id = ?
          AND canonical_key IS NOT NULL
-         AND status IN ('active', 'proposed')
+         AND status IN (${writer === 'owner' ? "'active'" : "'active', 'proposed'"})
        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END,
          updated_at DESC, id DESC`,
     )
@@ -1525,7 +1527,12 @@ export function createWorkspaceMemoryItem(input: {
       }
     }
 
-    rejectDuplicateCanonicalKey(initialStore, input.value.canonicalKey);
+    // Only a turn that may not write memory directly creates a proposal.
+    rejectDuplicateCanonicalKey(
+      initialStore,
+      input.value.canonicalKey,
+      input.value.status === 'proposed' ? 'proposal' : 'owner',
+    );
     const at = nowIso();
     const store = bumpStore(initialStore.id, at);
     const itemId = newId('wmi');
@@ -1574,6 +1581,12 @@ export function updateWorkspaceMemoryItem(input: {
   requestHash?: string | null;
   /** Change the item only while it has this status. */
   requireStatus?: WorkspaceMemoryStatus;
+  /**
+   * The write comes from a turn that only proposes: it may revise a proposal,
+   * which stays one. Any other write to a proposal makes it active memory,
+   * so a proposer never again changes what the owner wrote.
+   */
+  proposal?: boolean;
   /** Audit the change as this action (default `update`). */
   auditAction?: Extract<WorkspaceMemoryAuditAction, 'update' | 'confirm'>;
 }): {
@@ -1636,10 +1649,15 @@ export function updateWorkspaceMemoryItem(input: {
         },
       );
     }
-    rejectStatusMismatch(current, input.requireStatus, initialStore.revision);
+    rejectStatusMismatch(
+      current,
+      input.proposal ? 'proposed' : input.requireStatus,
+      initialStore.revision,
+    );
 
     const at = nowIso();
     const nextRevision = current.revision + 1;
+    const promoted = !input.proposal && current.status === 'proposed';
     const next: WorkspaceMemoryValue = {
       kind: input.patch.kind ?? current.kind,
       title:
@@ -1649,7 +1667,9 @@ export function updateWorkspaceMemoryItem(input: {
         input.patch.canonicalKey === undefined
           ? current.canonicalKey
           : input.patch.canonicalKey,
-      status: input.patch.status ?? current.status,
+      status: input.proposal
+        ? 'proposed'
+        : (input.patch.status ?? (promoted ? 'active' : current.status)),
       importance: input.patch.importance ?? current.importance,
       confidence: input.patch.confidence ?? current.confidence,
       validFrom:
@@ -1670,7 +1690,12 @@ export function updateWorkspaceMemoryItem(input: {
         normalizeCanonicalKey(current.canonicalKey) ||
       (next.status === 'active' && current.status !== 'active')
     ) {
-      rejectDuplicateCanonicalKey(initialStore, next.canonicalKey, current.id);
+      rejectDuplicateCanonicalKey(
+        initialStore,
+        next.canonicalKey,
+        input.proposal ? 'proposal' : 'owner',
+        current.id,
+      );
     }
     const result = db
       .prepare(
@@ -1716,7 +1741,8 @@ export function updateWorkspaceMemoryItem(input: {
     appendAuditAndOutbox(
       store,
       item,
-      input.auditAction ?? 'update',
+      input.auditAction ??
+        (promoted && item.status === 'active' ? 'confirm' : 'update'),
       input.context,
       at,
     );

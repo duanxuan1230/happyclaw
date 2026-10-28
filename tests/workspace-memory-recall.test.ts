@@ -476,33 +476,158 @@ describe('duplicates and proposals', () => {
     }
   });
 
-  test('confirming a proposal whose key an active memory took is a duplicate', async () => {
-    const proposal = remember('Deploys go through pm2.', {
-      canonicalKey: 'deploy',
-      proposal: true,
+  test("a proposal never holds back the owner, and never changes the owner's words", async () => {
+    const memberTurn = { proposal: true };
+    const member = (
+      fields: Partial<Parameters<typeof service.updateWorkspaceMemory>[0]>,
+    ) =>
+      service.updateWorkspaceMemory({
+        actor,
+        workspaceJid: WORKSPACE,
+        sourceType: 'agent_runtime',
+        itemId: '',
+        expectedRevision: 0,
+        ...memberTurn,
+        ...fields,
+      });
+    // A group member proposes deploy-port; the owner's turn then remembers
+    // Deploy_Port. (a) The proposal does not hold the owner back.
+    const proposed = remember('Deploy on port 8080.', {
+      canonicalKey: 'deploy-port',
+      ...memberTurn,
     });
-    const owner = remember('Deploys go through launchd.');
-    const db2 = new (await import('better-sqlite3')).default(
+    const owned = remember('Deploy on port 3000.', {
+      canonicalKey: 'Deploy_Port',
+    });
+    expect(owned.status).toBe('active');
+    // A second proposal of the same idea waits once.
+    expect(() =>
+      remember('Deploy on port 9090.', {
+        canonicalKey: 'deploy port',
+        ...memberTurn,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'memory_duplicate' }));
+    // (c) Confirming the proposal would make two active items of one key.
+    const confirm = await request(
+      itemRoute(`/${proposed.id}/confirm`),
+      'POST',
+      { expectedRevision: proposed.revision },
+    );
+    expect(confirm).toMatchObject({
+      status: 409,
+      body: { error: 'memory_duplicate', existing: { id: owned.id } },
+    });
+    // The owner may still edit the proposal onto another key: an owner
+    // write makes it active memory, audited as the owner's confirmation.
+    const edited = service.updateWorkspaceMemory({
+      actor,
+      workspaceJid: WORKSPACE,
+      sourceType: 'agent_runtime',
+      itemId: proposed.id,
+      expectedRevision: proposed.revision,
+      content: 'Staging deploys on port 8080.',
+      canonicalKey: 'staging-port',
+    }).item;
+    expect(edited).toMatchObject({ status: 'active', revision: 2 });
+    // (b) Neither item now holds anything a member's turn may change.
+    for (const item of [owned, edited]) {
+      expect(() =>
+        member({
+          itemId: item.id,
+          expectedRevision: item.revision,
+          content: 'Overwritten by a member.',
+        }),
+      ).toThrow(
+        expect.objectContaining({ code: 'owner_confirmation_required' }),
+      );
+      expect(() =>
+        service.forgetWorkspaceMemory({
+          actor,
+          workspaceJid: WORKSPACE,
+          sourceType: 'agent_runtime',
+          itemId: item.id,
+          expectedRevision: item.revision,
+          ...memberTurn,
+        }),
+      ).toThrow(
+        expect.objectContaining({ code: 'owner_confirmation_required' }),
+      );
+    }
+    const audit = new (await import('better-sqlite3')).default(
       path.join(storeDir, 'messages.db'),
+      { readonly: true },
     );
     try {
-      // Legacy data may hold the same key twice; the confirm still checks.
-      db2
-        .prepare(
-          "UPDATE workspace_memory_items SET canonical_key = 'Deploy' WHERE id = ?",
-        )
-        .run(owner.id);
+      expect(
+        audit
+          .prepare(
+            `SELECT action FROM workspace_memory_audit_events
+             WHERE item_id = ? AND item_revision = 2`,
+          )
+          .get(proposed.id),
+      ).toEqual({ action: 'confirm' });
     } finally {
-      db2.close();
+      audit.close();
     }
-    const response = await request(
-      itemRoute(`/${proposal.id}/confirm`),
-      'POST',
-      { expectedRevision: proposal.revision },
-    );
-    expect(response).toMatchObject({
-      status: 409,
-      body: { error: 'memory_duplicate', existing: { id: owner.id } },
+  });
+
+  test("the owner's Web edit of a proposal makes it active memory", async () => {
+    const proposed = remember('Deploy on port 8080.', { proposal: true });
+    const saved = await request(itemRoute(`/${proposed.id}`), 'PATCH', {
+      expectedRevision: proposed.revision,
+      content: 'Deploy on port 8081.',
     });
+    expect(saved.status).toBe(200);
+    expect(saved.body.item).toMatchObject({
+      status: 'active',
+      content: 'Deploy on port 8081.',
+    });
+  });
+
+  test('only a proposing turn can set the proposed status', async () => {
+    expect(() => remember('Owner text.', { status: 'proposed' })).toThrow(
+      expect.objectContaining({ code: 'invalid_request' }),
+    );
+    const created = await request(itemRoute(), 'POST', {
+      kind: 'fact',
+      content: 'Owner text.',
+      status: 'proposed',
+    });
+    expect(created.status).toBe(400);
+    const active = remember('Owner text.');
+    const demoted = await request(itemRoute(`/${active.id}`), 'PATCH', {
+      expectedRevision: active.revision,
+      status: 'proposed',
+    });
+    expect(demoted.status).toBe(400);
+  });
+
+  test('a repeated confirm or reject with its idempotency key replays', async () => {
+    const confirmed = remember('Deploy on port 8080.', { proposal: true });
+    const rejected = remember('Deploy on port 9090.', { proposal: true });
+    for (const [item, answer] of [
+      [confirmed, 'confirm'],
+      [rejected, 'reject'],
+    ] as const) {
+      const body = {
+        expectedRevision: item.revision,
+        idempotencyKey: `k-${answer}`,
+      };
+      const first = await request(
+        itemRoute(`/${item.id}/${answer}`),
+        'POST',
+        body,
+      );
+      const again = await request(
+        itemRoute(`/${item.id}/${answer}`),
+        'POST',
+        body,
+      );
+      expect(first).toMatchObject({ status: 200, body: { replayed: false } });
+      expect(again).toMatchObject({
+        status: 200,
+        body: { replayed: true, item: { revision: 2 } },
+      });
+    }
   });
 });

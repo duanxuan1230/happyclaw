@@ -473,6 +473,19 @@ export function getWorkspaceMemory(
   }
 }
 
+/**
+ * `proposed` holds only what turns that may not write memory directly wrote:
+ * an owner write never sets it, so a proposer never changes owner content.
+ */
+function rejectOwnerProposal(
+  status: WorkspaceMemoryStatus | undefined,
+  proposal: boolean | undefined,
+): void {
+  if (status === 'proposed' && !proposal) {
+    invalid('Only a non-owner or scheduled turn can propose a memory');
+  }
+}
+
 export function createWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryValue & {
@@ -483,6 +496,7 @@ export function createWorkspaceMemory(
 ) {
   authorizeWorkspace(input, 'write');
   validateValue(input, true);
+  rejectOwnerProposal(input.status, input.proposal);
   validateBoundedOptional(
     input.idempotencyKey,
     'idempotencyKey',
@@ -561,6 +575,7 @@ export function updateWorkspaceMemory(
   if (input.proposal) delete patch.status;
   if (Object.keys(patch).length === 0) invalid('No memory fields to update');
   validateValue(patch, false);
+  rejectOwnerProposal(patch.status, input.proposal);
   try {
     const current = getMutableWorkspaceMemoryItem(
       input.workspaceJid,
@@ -593,7 +608,8 @@ export function updateWorkspaceMemory(
         expectedRevision: input.expectedRevision,
         patch,
       }),
-      ...(input.proposal || input.answer ? { requireStatus: 'proposed' } : {}),
+      proposal: input.proposal,
+      ...(input.answer ? { requireStatus: 'proposed' } : {}),
       auditAction: input.answer,
     });
     return {

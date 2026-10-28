@@ -306,6 +306,10 @@ export function MemoryPage() {
   const saveGenerationRef = useRef(0);
   const forgetGenerationRef = useRef(0);
   const answerGenerationRef = useRef(0);
+  // One answer in flight at a time; a repeated answer to the same revision
+  // reuses its idempotency key, so the server replays instead of conflicting.
+  const answerInFlightRef = useRef(false);
+  const answerKeysRef = useRef(new Map<string, string>());
 
   const selectedWorkspace = useMemo(
     () =>
@@ -870,7 +874,14 @@ export function MemoryPage() {
   };
 
   const handleAnswer = async (answer: 'confirm' | 'reject') => {
-    if (!selectedWorkspaceJid || selectedItem?.status !== 'proposed') return;
+    if (
+      answerInFlightRef.current ||
+      !selectedWorkspaceJid ||
+      selectedItem?.status !== 'proposed'
+    ) {
+      return;
+    }
+    answerInFlightRef.current = true;
     const workspaceJid = selectedWorkspaceJid;
     const workspaceEpoch = workspaceEpochRef.current;
     const item = selectedItem;
@@ -884,8 +895,12 @@ export function MemoryPage() {
         variant: 'danger',
       }))
     ) {
+      answerInFlightRef.current = false;
       return;
     }
+    const answerKey = `${item.id}:${item.revision}:${answer}`;
+    const idempotencyKey = answerKeysRef.current.get(answerKey) ?? randomUuid();
+    answerKeysRef.current.set(answerKey, idempotencyKey);
     const requestGeneration = ++answerGenerationRef.current;
     const isCurrent = () =>
       isCurrentWorkspace(workspaceJid, workspaceEpoch) &&
@@ -898,6 +913,7 @@ export function MemoryPage() {
         memoryProposalAnswerPath(workspaceJid, item.id, answer),
         {
           expectedRevision: item.revision,
+          idempotencyKey,
           provenance: { observedAt: new Date().toISOString() },
         },
       );
@@ -935,6 +951,7 @@ export function MemoryPage() {
         );
       }
     } finally {
+      answerInFlightRef.current = false;
       if (answerGenerationRef.current === requestGeneration) {
         setAnswering(null);
       }
@@ -1044,7 +1061,12 @@ export function MemoryPage() {
       ) {
         return;
       }
-      toast.success(`已保存 revision ${result.item.revision}`);
+      // The owner's edit makes a proposal active memory (memory-store).
+      toast.success(
+        selectedItem.status === 'proposed'
+          ? '已保存并确认，这条记忆会参与之后的召回'
+          : `已保存 revision ${result.item.revision}`,
+      );
       setStoreRevision(result.storeRevision);
       syncSelectedItem(result.item);
       await refreshMemoryView();
@@ -1481,7 +1503,9 @@ export function MemoryPage() {
                               ) : (
                                 <Save />
                               )}
-                              保存 revision
+                              {shownItem.status === 'proposed'
+                                ? '保存并确认'
+                                : '保存 revision'}
                             </Button>
                           </div>
                         )}

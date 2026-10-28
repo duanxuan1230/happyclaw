@@ -82,9 +82,10 @@ Workspace 有独立的 store revision，每个 item 有单独的 revision：
   `replayed: true`；同一个 key 对应不同请求时返回
   `idempotency_conflict`。
 - `canonicalKey` 表示“同一个想法”：忽略大小写、全半角和空格/`_`/`-` 的差异后，
-  已有 active 或 proposed 条目使用同一个 key 时，创建（以及把条目改到这个 key、
-  确认提议）返回 409 `memory_duplicate` 和已有条目的 id、标题、状态，调用方应改为
-  更新那一条。幂等重放先于这一检查。
+  key 已被占用时，创建（以及把条目改到这个 key、确认提议）返回 409
+  `memory_duplicate` 和已有条目的 id、标题、状态，调用方应改为更新那一条。owner 的
+  写入只被 active 条目占用；提议还会被另一条提议占用。确认一条提议时，同一 key 已有
+  active 条目也返回 409，由 owner 拒绝提议或先改 key。幂等重放先于这一检查。
 
 `validFrom`、`validUntil` 和 `expiresAt` 用于控制知识的时间有效性；`importance` 和
 `confidence` 的范围都是 0 到 1。详情字段与端点见 [API 文档](API.md#workspace-memory-v2)。
@@ -114,7 +115,17 @@ Agent Runtime 还按执行上下文收紧写权限，所有写入都必须带 Ru
 - Spawn/Task 会话和 SDK Sub-Agent 只能读取。
 
 `proposed` 条目不进入召回、记忆目录和搜索，由 owner 在记忆页确认（变为 active）或
-拒绝（写入 tombstone）；两者各自写一条 `confirm` / `reject` 审计事件。
+拒绝（写入 tombstone）；两者各自写一条 `confirm` / `reject` 审计事件。`proposed`
+只装提议者写下的内容：owner 的写入（Web 编辑或 owner 轮次的更新）会把提议直接变为
+active 并记为 `confirm`，owner 也不能把条目设成 `proposed`，所以提议者永远改不到
+owner 写过的内容。
+
+已知取舍：
+
+- 非飞书群若只通过 `/owner_mention` 认领 owner（claim source 为 `explicit`），owner
+  在该群里的写入也会存为 `proposed`（fail-closed），需要在 Web 确认。
+- 记忆目录随每个轮次发送，群聊里的成员也能通过 Agent 的回复间接看到其中的标题。
+- 很长的消息只取前 40 个检索词参与召回。
 
 Owner Profile 的边界更严格：只允许 Home 内置 HappyClaw 的 Main/普通 Runtime
 Session，并且宿主必须把本次持久化消息 sender 验证为实际 owner。每个 cold/warm

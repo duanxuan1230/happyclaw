@@ -490,7 +490,7 @@ async function main() {
   );
   const fullIndexes = count(
     custom.finalTexts,
-    '<workspace_memory_index trust="historical_data">\n',
+    '<workspace_memory_index trust="historical_data" instruction_priority="none">\n',
   );
   check(
     'custom',

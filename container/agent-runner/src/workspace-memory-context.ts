@@ -82,7 +82,7 @@ export function renderWorkspaceMemoryIndexBlock(input: {
     );
   }
   return [
-    `<workspace_memory_index trust="historical_data"${input.changesOnly ? ' changes_only="true"' : ''}>`,
+    `<workspace_memory_index trust="historical_data" instruction_priority="none"${input.changesOnly ? ' changes_only="true"' : ''}>`,
     ...body,
     '</workspace_memory_index>',
   ].join('\n');

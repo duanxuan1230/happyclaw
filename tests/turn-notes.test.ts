@@ -721,7 +721,7 @@ describe('the memory index', () => {
     const first = turn(ledger, 'u1', withIndex(indexed(ab(), 5)));
     expect(first.memoryIndex).toBe(
       [
-        '<workspace_memory_index trust="historical_data">',
+        '<workspace_memory_index trust="historical_data" instruction_priority="none">',
         'wmi_a · fact · Deploy &lt;process&gt;',
         'wmi_b · fact · Release day',
         '3 more not listed; workspace_memory_search finds them.',
@@ -747,7 +747,7 @@ describe('the memory index', () => {
     );
     expect(changed.memoryIndex).toBe(
       [
-        '<workspace_memory_index trust="historical_data" changes_only="true">',
+        '<workspace_memory_index trust="historical_data" instruction_priority="none" changes_only="true">',
         '+ wmi_a · fact · Deploy process, revised',
         '+ wmi_c · fact · New lesson',
         '- wmi_b',
@@ -786,7 +786,7 @@ describe('the memory index', () => {
     const restored = ledger.restoreAfterCompaction();
     ledger.endCompaction();
     expect(restored).toContain(
-      '<workspace_memory_index trust="historical_data">\nwmi_a · fact · Deploy',
+      '<workspace_memory_index trust="historical_data" instruction_priority="none">\nwmi_a · fact · Deploy',
     );
     expect(ledger.stage('u3', withIndex(snapshot)).memoryIndex).toBe('');
   });
