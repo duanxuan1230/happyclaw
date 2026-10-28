@@ -400,6 +400,9 @@ export class ActiveTurnOutputRegistry {
       };
     }
     binding.coordinator.commitPreparedMessage(prepared);
+    if (input.role === 'progress') {
+      binding.callbacks.onNonTerminalDelivered?.();
+    }
     return { accepted: true, duplicate: false };
   }
 

@@ -389,8 +389,8 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 
 ## 代码改动与会话 worktree
 
-- `GET /api/groups/:jid/git/status?agentId=`
-- `GET /api/groups/:jid/git/diff?agentId=&path=&orig_path=`
+- `GET /api/groups/:jid/git/status?agentId=&scope=working|branch`
+- `GET /api/groups/:jid/git/diff?agentId=&path=&orig_path=&scope=working|branch`
 - `GET /api/groups/:jid/git/worktree-support`
 - `GET /api/groups/:jid/workdir/peers?agentId=`
 
@@ -443,14 +443,16 @@ hook）。HappyClaw 本身不访问网络，但 LFS 或 partial clone 仓库在 
 ```
 
 `status` 取值 `modified`、`added`、`deleted`、`renamed`、`copied`、`type_changed`、
-`untracked`、`conflicted`；`+/-` 为相对 HEAD（暂存与未暂存合计）的行数，未跟踪文件按
+`untracked`、`conflicted`；`scope` 默认为 `working`（相对 HEAD 的暂存与未暂存合计），
+会话拥有独立 worktree 时支持 `scope=branch`（相对 worktree 的 `base_commit` 展示已提交与未提交改动，
+并额外返回 `baseCommit` 与 `baseAhead`），未跟踪文件按
 行数计入新增，二进制或过大时为 `null`。最多返回 1000 个文件，原始输出上限 2 MB，超出时
 `truncated: true`。无法读取时同样返回 200：`{"state": "unavailable", "reason":
 "container_mode" | "worktree_broken", "message": "…"}`、`{"state": "not_git_repo",
 "message": "工作目录不是 git 仓库"}` 或 `{"state": "error", "error": "…"}`，都带
 `worktree`。
 
-`git/diff` 返回单个文件相对 HEAD 的 unified diff，未跟踪文件与 `/dev/null` 比较：
+`git/diff` 返回单个文件相对 HEAD（或 `scope=branch` 下相对 `base_commit`）的 unified diff，未跟踪文件与 `/dev/null` 比较：
 `{"state": "ok", "path": "src/app.ts", "diff": "diff --git …", "binary": false,
 "truncated": false, "untracked": false}`。输出上限 512 KB（`truncated: true`）；二进制
 文件 `binary: true`。`path`、`orig_path`（重命名的原路径）必须是仓库内的相对路径：

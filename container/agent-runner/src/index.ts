@@ -2385,6 +2385,12 @@ async function runQueryAttempt(
    * turns queued in the CLI the process is closed instead, and an interrupt
    * receipt that still lists queued input closes it as well.
    */
+  let interruptCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearInterruptCloseTimer = () => {
+    if (!interruptCloseTimer) return;
+    clearTimeout(interruptCloseTimer);
+    interruptCloseTimer = null;
+  };
   const stopActiveTurn = (
     activeQuery: Pick<Query, 'interrupt' | 'close'> & {
       stopTask?: (taskId: string) => Promise<void>;
@@ -2406,13 +2412,16 @@ async function runQueryAttempt(
       processor.getBlockingBackgroundProtocolCount() > 0 ||
       processor.getPendingSdkTaskCount() > 0
     ) {
-      const closeTimer = setTimeout(() => {
+      clearInterruptCloseTimer();
+      interruptCloseTimer = setTimeout(() => {
+        interruptCloseTimer = null;
+        if (queryFinished) return;
         log(
           `${reason}: closing the query after interrupt, background SDK task(s) did not settle within 3s`,
         );
         activeQuery.close();
       }, 3_000);
-      closeTimer.unref?.();
+      interruptCloseTimer.unref?.();
     }
     activeQuery
       .interrupt()
@@ -4530,6 +4539,7 @@ async function runQueryAttempt(
     throw err;
   } finally {
     queryFinished = true;
+    clearInterruptCloseTimer();
     const timingLine = queryTiming?.finish();
     if (timingLine) logInfo(timingLine);
     const cacheLine = queryCache?.finish();

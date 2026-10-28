@@ -269,6 +269,7 @@ async function copyWorktreeIncludeFiles(
       ],
       { maxBytes: 256 * 1024 },
     );
+    if (lsResult.truncated) return;
     const matched = lsResult.stdout.split('\0').filter(Boolean);
     let copiedCount = 0;
     let totalBytes = 0;
