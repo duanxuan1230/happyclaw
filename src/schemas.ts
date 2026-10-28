@@ -609,6 +609,15 @@ export const WorkspaceMemoryForgetSchema = z
   })
   .strict();
 
+export const WorkspaceMemoryProposalAnswerSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+    reason: z.string().trim().min(1).max(1000).nullable().optional(),
+    provenance: WorkspaceMemoryProvenanceSchema.optional(),
+  })
+  .strict();
+
 export const WorkspaceMemoryListQuerySchema = z
   .object({
     status: WorkspaceMemoryStatusSchema.optional(),

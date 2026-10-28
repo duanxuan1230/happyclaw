@@ -11,11 +11,11 @@
 //
 // - custom: a custom Agent on a third-party endpoint (so the Agent contract
 //   anchor applies) with three Workspace memories, one of which is edited
-//   before turn 4. Each memory revision, the anchor and the channel context
-//   appear once; turn 4 carries only the edited memory, and turn 5 withdraws
-//   another one forgotten before it. Turns 3 and 5 wait for the Runner to
-//   close the CLI, so what was sent carries across queries as well as within
-//   one.
+//   before turn 4. Each memory revision, the memory index, the anchor and the
+//   channel context appear once; turn 4 carries only the edited memory (and
+//   its index line), and turn 5 withdraws another one forgotten before it.
+//   Turns 3 and 5 wait for the Runner to close the CLI, so what was sent
+//   carries across queries as well as within one.
 // - compaction: the stub reports a nearly full window on turn 3, so the CLI
 //   compacts on turn 4; the notes come back once right after the summary.
 // - home: the admin's Home Workspace with the built-in Agent, which adds the
@@ -488,6 +488,29 @@ async function main() {
       /1 withdrawn/.test(custom.recalls[4]?.summary ?? ''),
     `${turn5?.slice(0, 600)} ${JSON.stringify(custom.recalls[4])}`,
   );
+  const fullIndexes = count(
+    custom.finalTexts,
+    '<workspace_memory_index trust="historical_data">\n',
+  );
+  check(
+    'custom',
+    'the memory index is sent whole once',
+    fullIndexes === 1,
+    fullIndexes,
+  );
+  check(
+    'custom',
+    'turn 4 lists only the edited memory again in the index',
+    !!turn4 &&
+      turn4.includes(`+ ${edited.id} · fact · The release moved to Monday.`),
+    turn4?.slice(0, 600),
+  );
+  check(
+    'custom',
+    'turn 5 takes the forgotten memory out of the index',
+    !!turn5 && turn5.includes(`- ${forgotten.id}\n`),
+    turn5?.slice(0, 600),
+  );
   const recall4 = custom.recalls[3];
   check(
     'custom',
@@ -556,13 +579,15 @@ async function main() {
   const restored = {
     anchors: count(texts, '<active-agent-turn-contract'),
     memories: count(texts, memoryTag(compactMemory.json.item.id)),
+    indexes: count(texts, '<workspace_memory_index'),
     channels: count(texts, '<channel_context'),
   };
   check(
     'compaction',
-    'the anchor, memory and channel are restored once after the compaction',
+    'the anchor, memory, index and channel are restored once after the compaction',
     restored.anchors === 1 &&
       restored.memories === 1 &&
+      restored.indexes === 1 &&
       restored.channels === 1,
     JSON.stringify(restored),
   );

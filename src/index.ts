@@ -294,7 +294,10 @@ import {
 } from './owner-profile-store.js';
 import {
   buildWorkspaceMemoryUpdateInput,
+  isWorkspaceMemoryMutation,
+  isWorkspaceMemoryOwnerTurn,
   workspaceMemoryWriteRejection,
+  workspaceOwnerImIds,
 } from './workspace-memory-ipc.js';
 import {
   grantWorkspaceMemoryTurnToCurrentRunner,
@@ -468,7 +471,6 @@ import {
   getAgentBuilderRuntimeRejection,
   isAgentBuilderOwnerInput,
   isOwnerProfileOwnerInput,
-  OWNER_PROFILE_TRUSTED_CLAIM_SOURCES,
   ownerImIdFromDirectConversationJid,
   ownerImIdFromPersistedSender,
   resolveTrustedDirectOwnerUpgrade,
@@ -14262,22 +14264,14 @@ async function processTaskIpc(
     // The owner's IM identity is anchored across Home registrations, not the
     // single source row: Home chats registered before owner capture (legacy
     // topic groups with a NULL owner_im_id) must still authorize the owner.
-    const resolveHomeOwnerImIds = (provider: string): string[] => {
-      const ids = new Set<string>();
-      for (const jid of getJidsByFolder(sourceGroup)) {
-        if (getChannelType(jid) !== provider) continue;
-        const row = registeredGroups[jid] ?? getRegisteredGroup(jid);
-        if (
-          row?.created_by === user.id &&
-          row.owner_im_id &&
-          row.owner_claim_source &&
-          OWNER_PROFILE_TRUSTED_CLAIM_SOURCES.includes(row.owner_claim_source)
-        ) {
-          ids.add(row.owner_im_id);
-        }
-      }
-      return [...ids];
-    };
+    const resolveHomeOwnerImIds = (provider: string): string[] =>
+      workspaceOwnerImIds({
+        provider,
+        ownerUserId: user.id,
+        workspaceJids: getJidsByFolder(sourceGroup),
+        channelType: getChannelType,
+        registration: (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+      });
     let activeTurn: ReturnType<typeof resolveOwnerTurn>;
     try {
       activeTurn = resolveOwnerTurn(
@@ -14531,14 +14525,31 @@ async function processTaskIpc(
             observedAt: new Date().toISOString(),
           },
         };
-        const mutationOperation =
-          data.operation === 'create' ||
-          data.operation === 'update' ||
-          data.operation === 'delete';
+        const mutationOperation = isWorkspaceMemoryMutation(data.operation);
+        // Only the owner's own interactive turns write directly; a group
+        // member's turn or a scheduled run only proposes.
+        const proposal = !(
+          mutationOperation &&
+          hostTurnKind === 'interactive' &&
+          isWorkspaceMemoryOwnerTurn({
+            ownerUserId: actor.id,
+            workspaceJids: siblingJids,
+            channelType: getChannelType,
+            registration: (jid) =>
+              registeredGroups[jid] ?? getRegisteredGroup(jid),
+            requireActiveOwnerTurn: (isOwnerInput) =>
+              activeAgentBuilderTurns.requireExactActiveOwnerHumanTurn(
+                agentBuilderTurnScope(sourceGroup, ipcAgentId),
+                data.inputTurnId,
+                getAgentBuilderInputMessage,
+                isOwnerInput,
+              ),
+          })
+        );
         const capabilityValid =
           mutationOperation &&
           (!ipcAgentId || runtimeAgentKind === 'conversation') &&
-          hostTurnKind === 'interactive' &&
+          (hostTurnKind === 'interactive' || hostTurnKind === 'scheduled') &&
           verifyAndConsumeWorkspaceMemoryMutation(
             {
               groupFolder: sourceGroup,
@@ -14603,6 +14614,7 @@ async function processTaskIpc(
                 | 'open_loop'
                 | undefined,
               limit: data.limit,
+              ranking: 'relevance',
             });
             break;
           case 'get':
@@ -14625,6 +14637,7 @@ async function processTaskIpc(
               validUntil: data.validUntil,
               expiresAt: data.expiresAt,
               idempotencyKey: data.idempotencyKey,
+              proposal,
             });
             break;
           case 'update': {
@@ -14632,6 +14645,7 @@ async function processTaskIpc(
               buildWorkspaceMemoryUpdateInput(data, {
                 ...base,
                 ...mutation,
+                proposal,
               }) as unknown as Parameters<typeof updateWorkspaceMemory>[0],
             );
             break;
@@ -14643,6 +14657,7 @@ async function processTaskIpc(
               itemId: data.itemId ?? '',
               expectedRevision: data.expectedRevision ?? 0,
               idempotencyKey: data.idempotencyKey,
+              proposal,
             });
             break;
           default:
