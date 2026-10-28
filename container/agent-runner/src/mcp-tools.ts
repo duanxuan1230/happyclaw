@@ -1004,7 +1004,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     tool(
       'send_message',
       usesProactiveInteractiveContract
-        ? 'Send one user-visible message now. The Workspace uses Proactive reply mode: every call creates an independent native chat message immediately, and your normal SDK final text is not published. Set delivery_role=progress for acknowledgements or updates and delivery_role=final for the last substantive answer. You may call this tool zero, one, or many times and continue working after each successful progress send. A delivery error is authoritative: do not sleep and retry, switch to a card, or call a raw channel API as a fallback.'
+        ? "Send user-visible output or update live progress. The Workspace uses Proactive reply mode: your normal SDK final text is not published. Set delivery_role=final for the turn's permanent chat reply (which seals the turn), delivery_role=progress to update the live work progress (which folds into the completed process summary once final is sent, without creating a separate chat bubble), and delivery_role=separate only when an additional standalone chat message is genuinely needed. You may call this tool zero, one, or many times and continue working after each successful progress send. A delivery error is authoritative: do not sleep and retry, switch to a card, or call a raw channel API as a fallback."
         : "Publish text through HappyClaw's turn-owned delivery coordinator. In an interactive user turn, delivery_role=progress updates the existing reply status and delivery_role=final stages the primary answer on the existing card; neither creates a second text reply. Use delivery_role=separate only when the user explicitly requested another message. Scheduled/background tasks always deliver separately because their normal SDK final is not published.",
       {
         // Trim/min-length at the schema layer: the host guard is `!data.text`,
@@ -1016,7 +1016,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .optional()
           .describe(
             usesProactiveInteractiveContract
-              ? 'Semantic completion hint used for delivery recovery. Both roles still create independent native messages. Use progress for interim updates and final for the last substantive answer; omitted defaults to progress.'
+              ? 'progress updates the live work process (folded once final is sent, not a separate chat bubble); final delivers the permanent chat reply and seals the turn; separate sends an extra standalone chat message. Omitted defaults to progress.'
               : 'progress updates the active reply, final stages its answer, separate creates an additional message. Defaults to final for interactive turns and separate for scheduled tasks.',
           ),
       },
@@ -1075,7 +1075,9 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
             : 'delivered_separately';
         const acknowledgement =
           disposition === 'staged_progress'
-            ? 'Progress updated on the active reply.'
+            ? usesProactiveInteractiveContract
+              ? 'Progress updated on the live work view. This does not complete the user-visible answer. Continue the work, then call send_message(delivery_role=final) with the last substantive result before ending. Do not put a conclusion, completion phrase, or closing message only in SDK final text.'
+              : 'Progress updated on the active reply.'
             : disposition === 'staged_final'
               ? 'Final answer staged on the active reply; return the same answer normally so the SDK Result can finalize it.'
               : usesProactiveInteractiveContract

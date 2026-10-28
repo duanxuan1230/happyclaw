@@ -801,9 +801,27 @@ export const ProcessTimeline = memo(function ProcessTimeline({
       ?.focus({ preventScroll: true });
   });
 
+  const latestCommentaryId = useMemo(
+    () =>
+      [...steps]
+        .reverse()
+        .find((s) => s.kind === 'text' && s.commentary && !!s.text?.trim())?.id,
+    [steps],
+  );
+
   const defaultOpen = (step: StreamingStep): boolean => {
     if (step.kind === 'tool') return toolOpensByDefault(step);
-    if (!live || step.status !== 'running') return false;
+    if (!live) return false;
+    if (
+      step.kind === 'text' &&
+      step.commentary &&
+      step.id === latestCommentaryId &&
+      !!step.text &&
+      (step.text.includes('\n') || step.text.length > 60)
+    ) {
+      return true;
+    }
+    if (step.status !== 'running') return false;
     return step.kind === 'thinking' && thinkingText && !!step.text?.trim();
   };
 

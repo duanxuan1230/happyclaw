@@ -1667,4 +1667,33 @@ describe("a proactive turn's reply", () => {
     expect(state.streaming[JID]?.partialText).toBe('答案');
     expect(state.activeRuns[JID]?.answered).toBeUndefined();
   });
+
+  it('does not create a virtual sdkTask tab or duplicate task step for local_bash', () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'bash-bg',
+        toolInputSummary: 'npm run dev',
+        ...turn1,
+      },
+      'run-a',
+    );
+    emit(
+      {
+        eventType: 'task_start',
+        taskId: 'bash-bg',
+        toolUseId: 'bash-bg',
+        taskType: 'local_bash',
+        taskDescription: 'Run dev server',
+        ...turn1,
+      },
+      'run-a',
+    );
+    const state = useChatStore.getState();
+    expect(state.sdkTasks['bash-bg']).toBeUndefined();
+    expect(state.streaming[JID]?.steps?.map((s) => s.kind)).toEqual(['tool']);
+  });
 });

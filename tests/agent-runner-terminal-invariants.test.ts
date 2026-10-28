@@ -133,4 +133,17 @@ describe('Agent Runner terminal invariants', () => {
       /stopActiveTurn\(\s*q,\s*'No-visible companion interrupt',\s*ipcDeliveryTracker\.pendingTurnCount,\s*\)/,
     );
   });
+
+  test('stopActiveTurn stops active SDK tasks and arms a fallback close when background tasks are pending', () => {
+    const fnStart = source.indexOf('const stopActiveTurn = (');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnBody = source.slice(fnStart, fnStart + 1_300);
+    expect(fnBody).toContain('processor.getActiveSdkTaskIds()');
+    expect(fnBody).toContain('activeQuery.stopTask?.(taskId)');
+    expect(fnBody).toContain(
+      'processor.getBlockingBackgroundProtocolCount() > 0',
+    );
+    expect(fnBody).toContain('processor.getPendingSdkTaskCount() > 0');
+    expect(fnBody).toContain('activeQuery.close()');
+  });
 });

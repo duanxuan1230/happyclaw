@@ -913,4 +913,44 @@ describe('StreamEventProcessor main tool results', () => {
     returnResult(processor, 'toolu_b');
     expect(ends(outputs)).toEqual(['toolu_a', 'toolu_b']);
   });
+
+  test('exposes active SDK task IDs and forwards sub-agent model telemetry', () => {
+    const { processor, outputs } = makeProcessor();
+    startTool(processor, 'Task', 'toolu_sub');
+    processor.processSystemMessage({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'sdk-task-42',
+      tool_use_id: 'toolu_sub',
+      description: 'Investigate',
+      task_type: 'local_agent',
+    });
+    expect(processor.getActiveSdkTaskIds()).toEqual(['sdk-task-42']);
+
+    processor.processSubAgentMessage({
+      type: 'assistant',
+      parent_tool_use_id: 'toolu_sub',
+      message: {
+        model: 'claude-sonnet-4-6',
+        content: [{ type: 'text', text: 'working' }],
+      },
+    });
+    const textDelta = outputs
+      .map((o) => o.streamEvent)
+      .find(
+        (e) =>
+          e?.eventType === 'text_delta' && e.parentToolUseId === 'toolu_sub',
+      );
+    expect(textDelta?.subagentType).toBe('claude-sonnet-4-6');
+
+    processor.processSystemMessage({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'sdk-task-42',
+      tool_use_id: 'toolu_sub',
+      status: 'completed',
+      summary: 'done',
+    });
+    expect(processor.getActiveSdkTaskIds()).toEqual([]);
+  });
 });

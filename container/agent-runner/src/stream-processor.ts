@@ -1885,6 +1885,12 @@ export class StreamEventProcessor {
 
     if (message.type === 'assistant') {
       this.recordSubAgentText(msgParentToolUseId, message);
+      const subModel =
+        typeof message.message?.model === 'string' &&
+        message.message.model.trim()
+          ? message.message.model.trim()
+          : undefined;
+      const effectiveSubagentType = message.subagent_type || subModel;
       const subContent = message.message?.content as
         | Array<{
             type: string;
@@ -1923,7 +1929,7 @@ export class StreamEventProcessor {
                 agentScope: 'subagent',
                 text: block.thinking,
                 parentToolUseId: msgParentToolUseId,
-                subagentType: message.subagent_type,
+                subagentType: effectiveSubagentType,
                 taskDescription: message.task_description,
               },
             });
@@ -1937,7 +1943,7 @@ export class StreamEventProcessor {
                 agentScope: 'subagent',
                 text: block.text,
                 parentToolUseId: msgParentToolUseId,
-                subagentType: message.subagent_type,
+                subagentType: effectiveSubagentType,
                 taskDescription: message.task_description,
               },
             });
@@ -1953,7 +1959,7 @@ export class StreamEventProcessor {
                 parentToolUseId: msgParentToolUseId,
                 isNested: true,
                 agentScope: 'subagent',
-                subagentType: message.subagent_type,
+                subagentType: effectiveSubagentType,
                 taskDescription: message.task_description,
                 toolInputSummary: summarizeToolInput(block.input),
               },
@@ -1967,7 +1973,7 @@ export class StreamEventProcessor {
           }
         }
         this.log(
-          `[sub-agent] parent=${msgParentToolUseId.slice(0, 12)} blocks=${subContent.length} types=[${subContent.map((b) => b.type).join(',')}]`,
+          `[sub-agent] parent=${msgParentToolUseId.slice(0, 12)}${subModel ? ` model=${subModel}` : ''} blocks=${subContent.length} types=[${subContent.map((b) => b.type).join(',')}]`,
         );
       }
     }
@@ -2516,6 +2522,11 @@ export class StreamEventProcessor {
   /** 尚未 settle 的 SDK 任务数（异步 Agent / backgrounded Bash 等）。 */
   getPendingSdkTaskCount(): number {
     return this.pendingSdkTasks.size;
+  }
+
+  /** Active SDK task IDs (`task_id` keys in `pendingSdkTasks`) for stopTask on interrupt. */
+  getActiveSdkTaskIds(): string[] {
+    return [...this.pendingSdkTasks.keys()];
   }
 
   /** Tasks which still make replay unsafe. A detached local bash command has

@@ -181,6 +181,18 @@ const MESSAGE_DELIVERY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'mcp__happyclaw__send_message',
 ]);
 
+/**
+ * Tools whose structured result is a workspace-memory receipt (`{ result, id, title }`)
+ * rather than arbitrary tool output or model prose.
+ */
+export const MEMORY_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'mcp__happyclaw__workspace_memory_remember',
+  'mcp__happyclaw__workspace_memory_update',
+]);
+
+const MEMORY_RECEIPT_RESULT_RE = /"result":"(remembered|updated|proposed)"/;
+const MEMORY_RECEIPT_ID_RE = /"id":"([^"\\]+)"/;
+
 function isLifecycleStatus(statusText: string | null | undefined): boolean {
   return statusText != null && LIFECYCLE_STATUS_TEXTS.has(statusText);
 }
@@ -188,6 +200,22 @@ function isLifecycleStatus(statusText: string | null | undefined): boolean {
 /** Whether `toolName` is the tool a proactive Agent speaks to the user through. */
 export function isMessageDeliveryTool(toolName: string | undefined): boolean {
   return !!toolName && MESSAGE_DELIVERY_TOOL_NAMES.has(toolName);
+}
+
+/** Whether `toolName` is a workspace memory write tool that leaves a receipt. */
+export function isMemoryWriteTool(toolName: string | undefined): boolean {
+  return !!toolName && MEMORY_WRITE_TOOL_NAMES.has(toolName);
+}
+
+function keepsMemoryWriteReceipt(event: StreamEvent): boolean {
+  if (event.eventType !== 'tool_result' || event.toolIsError) return false;
+  if (event.toolName) return isMemoryWriteTool(event.toolName);
+  const text = event.toolResult?.trimStart() ?? '';
+  return (
+    text.startsWith('{') &&
+    MEMORY_RECEIPT_RESULT_RE.test(text) &&
+    MEMORY_RECEIPT_ID_RE.test(text)
+  );
 }
 
 /**
@@ -206,8 +234,11 @@ function withoutModelText(event: StreamEvent): StreamEvent {
     }
   };
   // What a tool returned, what a sub-agent finally answered and the questions
-  // an AskUserQuestion call would put to the user.
-  drop('toolResult');
+  // an AskUserQuestion call would put to the user. Memory write receipts stay
+  // so `memoryReceipts(steps)` can link to the written/proposed item.
+  if (!keepsMemoryWriteReceipt(event)) {
+    drop('toolResult');
+  }
   drop('taskResult');
   drop('toolInput');
   // How much a tool did (lines, files, exit code) is read from the same
@@ -313,6 +344,27 @@ export function projectProgressStatusForWeb(
     isSynthetic: true,
     displayLevel: 'primary',
     turnId: turn.turnId,
+    sessionId: turn.sessionId,
+  });
+}
+
+/**
+ * The commentary step announcing a progress statement the Agent wrote
+ * (`send_message` with `delivery_role=progress`), or null when the Workspace
+ * withholds commentary (`hidden` or `activity` in a proactive Workspace).
+ */
+export function projectProgressCommentaryForWeb(
+  mode: InteractionMode,
+  visibility: ProcessVisibility,
+  text: string,
+  turn: { turnId?: string; inputTurnId?: string; sessionId?: string },
+): StreamEvent | null {
+  return projectSdkStreamEventForWeb(mode, visibility, {
+    eventType: 'commentary',
+    agentScope: 'main',
+    text: text.slice(0, 4000),
+    turnId: turn.turnId,
+    inputTurnId: turn.inputTurnId,
     sessionId: turn.sessionId,
   });
 }

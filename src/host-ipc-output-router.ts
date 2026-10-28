@@ -119,13 +119,9 @@ export function routeHostIpcOutput(
     };
   }
 
-  if (input.interactionMode === 'proactive') {
+  if (input.interactionMode === 'proactive' && deliveryRole === 'final') {
     let attemptedFinalRecorded = false;
-    if (
-      deliveryRole === 'final' &&
-      typeof input.inputTurnId === 'string' &&
-      input.inputTurnId
-    ) {
+    if (typeof input.inputTurnId === 'string' && input.inputTurnId) {
       attemptedFinalRecorded = activeTurnOutputs.recordAttemptedFinal({
         scopeKey: channelTurnScope(input.sourceGroup, input.agentId),
         inputTurnId: input.inputTurnId,

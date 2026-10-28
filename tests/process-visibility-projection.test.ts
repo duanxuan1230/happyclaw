@@ -6,6 +6,7 @@ import type {
 } from '../src/stream-event.types.js';
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 import {
+  projectProgressCommentaryForWeb,
   projectProgressStatusForWeb,
   projectSdkStreamEventForWeb,
   shouldBroadcastTaskAgentStatus,
@@ -325,5 +326,51 @@ describe('progress statements written by the Agent', () => {
     const event = progress('assistant', 'full', long)!;
     expect(event.statusText).toHaveLength(160);
     expect(event.summary).toHaveLength(500);
+  });
+
+  test('projects progress as a commentary step at full (and in assistant), withheld at activity and hidden', () => {
+    const commentary = (
+      mode: InteractionMode,
+      visibility: ProcessVisibility,
+      text = SENTENCE,
+    ) =>
+      projectProgressCommentaryForWeb(mode, visibility, text, {
+        turnId: 'turn-1',
+        inputTurnId: 'input-1',
+        sessionId: 'session-1',
+      });
+
+    expect(commentary('proactive', 'hidden')).toBeNull();
+    expect(commentary('proactive', 'activity')).toBeNull();
+    expect(commentary('proactive', 'full')).toEqual({
+      eventType: 'commentary',
+      agentScope: 'main',
+      text: SENTENCE,
+      turnId: 'turn-1',
+      inputTurnId: 'input-1',
+      sessionId: 'session-1',
+    });
+    for (const level of LEVELS) {
+      expect(commentary('assistant', level)?.text).toBe(SENTENCE);
+    }
+    expect(
+      commentary('proactive', 'full', '长'.repeat(5000))?.text,
+    ).toHaveLength(4000);
+  });
+
+  test('preserves workspace memory write receipts in tool_result while stripping detail', () => {
+    const receipt = '{"result":"remembered","id":"wmi_1","title":"用户偏好"}';
+    const result = event('tool_result', {
+      toolUseId: 't-mem',
+      toolName: 'mcp__happyclaw__workspace_memory_remember',
+      toolResult: receipt,
+      detail: receipt,
+      toolIsError: false,
+    });
+    for (const level of ['activity', 'full'] as const) {
+      const projected = proactive(level, result)!;
+      expect(projected.toolResult).toBe(receipt);
+      expect(projected.detail).toBeUndefined();
+    }
   });
 });

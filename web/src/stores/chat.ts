@@ -1588,6 +1588,12 @@ function proactiveReplyLanded(
   live: StreamingState | undefined,
   utterance: Message,
 ): boolean {
+  if (
+    utterance.finalization_reason &&
+    utterance.finalization_reason !== 'completed'
+  ) {
+    return false;
+  }
   return (
     isProactiveRuntime(s, runtimeJid) &&
     streamsInputOf(s.activeRuns, runtimeJid, live, utterance.turn_id)
@@ -1797,16 +1803,32 @@ function withReplySteps(
   );
 }
 
+const MEMORY_WRITE_TOOL_NAMES = new Set([
+  'mcp__happyclaw__workspace_memory_remember',
+  'mcp__happyclaw__workspace_memory_update',
+]);
+
 /**
  * A step without what its tool or sub-agent returned: the preview of the
- * output and the numbers read from it. A proactive workspace never shows them.
+ * output and the numbers read from it. A proactive workspace never shows them,
+ * except structured workspace-memory write receipts.
  */
 export function withoutToolResults(step: StreamingStep): StreamingStep {
-  if (step.resultPreview === undefined && step.resultFacts === undefined) {
+  const keepMemoryReceipt =
+    step.kind === 'tool' &&
+    step.status === 'done' &&
+    !!step.toolName &&
+    MEMORY_WRITE_TOOL_NAMES.has(step.toolName);
+  if (
+    (keepMemoryReceipt || step.resultPreview === undefined) &&
+    step.resultFacts === undefined
+  ) {
     return step;
   }
   const { resultPreview: _preview, resultFacts: _facts, ...rest } = step;
-  return rest;
+  return keepMemoryReceipt && step.resultPreview !== undefined
+    ? { ...rest, resultPreview: step.resultPreview }
+    : rest;
 }
 
 /**
@@ -2751,6 +2773,9 @@ function updateTaskRuntime(
 /** Tools whose end comes from their own lifecycle, not their tool_result. */
 const TOOLS_ENDED_BY_LIFECYCLE = new Set(['Task', 'Agent', 'Skill']);
 
+/** SDK task types that are not sub-agents (e.g. backgrounded Bash, monitors). */
+const NON_AGENT_TASK_TYPES = new Set(['local_bash', 'monitor', 'mcp_task']);
+
 function stepStatusOfTask(
   status: StreamingTaskRuntimeState['status'],
 ): StepStatus {
@@ -2773,11 +2798,25 @@ function applyTaskToSteps(
   if (event.parentToolUseId) return;
   const taskId = taskIdFromEvent(event);
   if (!taskId) return;
+  const task = next.taskStates[taskId];
+  const effectiveTaskType = event.taskType ?? task?.taskType;
+  const id = event.toolUseId ?? taskId;
   let list = stepsOf(next);
+  if (
+    (effectiveTaskType && NON_AGENT_TASK_TYPES.has(effectiveTaskType)) ||
+    list.steps.some(
+      (s) =>
+        s.kind === 'tool' &&
+        s.toolUseId === id &&
+        s.toolName !== 'Task' &&
+        s.toolName !== 'Agent',
+    )
+  ) {
+    return;
+  }
   if (!hasTaskStep(list, taskId)) {
     list = closeOpenSteps(list, at, prev.partialText, prev.partialBase ?? 0);
   }
-  const task = next.taskStates[taskId];
   list = ensureTaskStep(
     list,
     {
@@ -4872,7 +4911,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // ② task_start / Task tool start → 创建/更新虚拟 Agent（SDK Task）
     if (
-      (event.eventType === 'task_start' && event.toolUseId) ||
+      (event.eventType === 'task_start' &&
+        event.toolUseId &&
+        !(event.taskType && NON_AGENT_TASK_TYPES.has(event.taskType))) ||
       (event.eventType === 'tool_use_start' &&
         event.toolName === 'Task' &&
         event.toolUseId)

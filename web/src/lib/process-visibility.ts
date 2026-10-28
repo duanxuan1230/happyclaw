@@ -64,6 +64,29 @@ const ACTIVITY_EVENTS = new Set<string>([
 export const SPEECH_TOOL_NAME = 'mcp__happyclaw__send_message';
 
 /**
+ * Tools whose structured result is a workspace-memory receipt (`{ result, id, title }`)
+ * rather than arbitrary tool output or model prose.
+ */
+export const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'mcp__happyclaw__workspace_memory_remember',
+  'mcp__happyclaw__workspace_memory_update',
+]);
+
+const MEMORY_RECEIPT_RESULT_RE = /"result":"(remembered|updated|proposed)"/;
+const MEMORY_RECEIPT_ID_RE = /"id":"([^"\\]+)"/;
+
+function keepsMemoryWriteReceipt(event: StreamEvent): boolean {
+  if (event.eventType !== 'tool_result' || event.toolIsError) return false;
+  if (event.toolName) return MEMORY_WRITE_TOOLS.has(event.toolName);
+  const text = event.toolResult?.trimStart() ?? '';
+  return (
+    text.startsWith('{') &&
+    MEMORY_RECEIPT_RESULT_RE.test(text) &&
+    MEMORY_RECEIPT_ID_RE.test(text)
+  );
+}
+
+/**
  * Work a proactive turn does that its owner watches: a tool (the speech tool
  * never reaches the process), a sub-agent or a plan. Reasoning and the model's
  * requests are not: after it speaks, a turn asks the model once more to decide
@@ -216,7 +239,9 @@ function scrubEvent(event: StreamEvent): StreamEvent {
   // not text, and stays: it is what lets a failed call read as failed.
   if (event.toolResultFacts) strip.toolResultFacts = undefined;
   if (type === 'tool_result') {
-    strip.toolResult = undefined;
+    if (!keepsMemoryWriteReceipt(event)) {
+      strip.toolResult = undefined;
+    }
     strip.detail = undefined;
   }
   if (type.startsWith('task_')) {

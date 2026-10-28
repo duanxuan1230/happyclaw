@@ -469,8 +469,10 @@ describe('TurnTraceTracker', () => {
     expect(steps[0].durationMs).toBeGreaterThan(0);
   });
 
-  test('a proactive turn stores neither its speech tool nor the narration the host composes', () => {
-    const { instance, stored } = tracker('proactive', { current: 'full' });
+  test('a proactive turn omits its speech tool and keeps commentary at full (withheld at activity)', () => {
+    const { instance, stored, visibility } = tracker('proactive', {
+      current: 'full',
+    });
     instance.observe('in-1', ev('thinking_delta', { text: '想' }), 10);
     instance.observe(
       'in-1',
@@ -492,16 +494,30 @@ describe('TurnTraceTracker', () => {
       40,
     );
     instance.observe('in-1', ev('tool_result', { toolUseId: 'say' }), 50);
-    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1', keep: true });
     const steps = JSON.parse(stored[0].stepsJson!);
     expect(steps.map((s: { kind: string }) => s.kind)).toEqual([
       'thinking',
+      'text',
       'tool',
     ]);
+    expect(steps[1]).toMatchObject({
+      kind: 'text',
+      commentary: true,
+      text: '我先读文件。',
+    });
     expect(stored[0].stepsJson).not.toContain('send_message');
-    expect(stored[0].stepsJson).not.toContain('我先读文件');
     // the existing trace is untouched by this
     expect(stored[0].traceJson).toContain('send_message');
+
+    visibility.current = 'activity';
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    const activitySteps = JSON.parse(stored[1].stepsJson!);
+    expect(activitySteps.map((s: { kind: string }) => s.kind)).toEqual([
+      'thinking',
+      'tool',
+    ]);
+    expect(stored[1].stepsJson).not.toContain('我先读文件');
   });
 
   test('the number of steps dropped at the cap is stored with the rest', () => {
