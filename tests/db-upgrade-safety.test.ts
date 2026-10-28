@@ -207,7 +207,9 @@ describe('schema version head', () => {
     // (schema-v84-drop-agent-prompt-versions.test.ts). Same step:
     // workspace_memory_recall_fts, the bigram/word index memory recall ranks
     // by (schema-v84-memory-recall-index.test.ts); session_worktrees, the git
-    // worktree a Runtime Session runs in (schema-v84-session-worktrees.test.ts).
+    // worktree a Runtime Session runs in (schema-v84-session-worktrees.test.ts);
+    // every Agent's host Skill grant written out explicitly, without resetting
+    // sessions (schema-v84-agent-host-skills.test.ts).
     expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
   });
 });
