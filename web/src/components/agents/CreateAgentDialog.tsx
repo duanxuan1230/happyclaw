@@ -113,7 +113,8 @@ export function CreateAgentDialog({
       }
       onCreated(profile);
     } catch (err) {
-      if (apiErrorBody(err)?.code === 'AGENT_NAME_TAKEN') {
+      const code = apiErrorBody(err)?.code;
+      if (code === 'AGENT_NAME_TAKEN' || code === 'INVALID_NAME') {
         setNameError(getErrorMessage(err, '名称已被使用'));
       } else {
         setError(getErrorMessage(err, '创建失败，请重试'));

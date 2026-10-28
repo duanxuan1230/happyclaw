@@ -63,6 +63,7 @@ import {
 import {
   buildAgentProfileExport,
   dropMissingReferences,
+  hostGrantsOf,
   parseAgentProfileExport,
   stripHostGrants,
 } from '../agent-profile-transfer.js';
@@ -228,7 +229,9 @@ function invalidAgentProfileBody(
       error:
         issue.code === 'too_big'
           ? `名称不能超过 ${AGENT_NAME_MAX_CHARS} 个字`
-          : '请填写名称',
+          : issue.code === 'custom'
+            ? issue.message
+            : '请填写名称',
       code: 'INVALID_NAME',
       field,
     };
@@ -471,6 +474,19 @@ agentProfileRoutes.post('/import', authMiddleware, async (c) => {
     () => {
       const conflict = findAgentProfileNameConflict(user.id, name);
       if (conflict) return c.json(agentNameTaken(conflict), 409);
+      // An admin keeps host grants, but only after seeing them: a file from
+      // elsewhere must not quietly load ~/.claude or every host Skill.
+      const hostGrants = hostGrantsOf(imported.policy);
+      if (hostGrants.length > 0 && !parsedBody.data.confirm_host_grants) {
+        return c.json(
+          {
+            error: '导入的智能体会使用宿主机资源，需要确认',
+            code: 'AGENT_IMPORT_HOST_GRANTS',
+            grants: hostGrants,
+          },
+          409,
+        );
+      }
       // Restricted system MCP already shows up as missing for a member.
       const { restricted_system_mcp: _restricted, ...missing } =
         validateRuntimePolicyReferences(
@@ -549,11 +565,11 @@ agentProfileRoutes.post('/generate', authMiddleware, async (c) => {
  * conversation pick and the Workspace's own provider environment count.
  */
 function resolveAgentModelResolution(
-  profile: AgentProfile,
+  binding: Pick<AgentProfile, 'model_config_id' | 'model'>,
   workspace?: RegisteredGroup,
 ) {
   const pinned = resolvePinnedModelConfig(
-    profile.model_config_id,
+    binding.model_config_id,
     workspace ? { groupFolder: workspace.folder, agentId: null } : undefined,
   );
   const provider = pinned.id
@@ -567,7 +583,7 @@ function resolveAgentModelResolution(
           .model ?? unpickedLaunchModel(provider, null, folder))
       : unpickedLaunchModel(
           provider,
-          pinned.source === 'agent' ? profile.model : null,
+          pinned.source === 'agent' ? binding.model : null,
           folder,
         );
   return {
@@ -575,6 +591,40 @@ function resolveAgentModelResolution(
     model_config_id: pinned.id,
     model_config_name: provider?.name ?? null,
     model,
+    // A binding to a deleted connection makes every run fail.
+    connection_missing: !!pinned.id && !provider,
+  };
+}
+
+/**
+ * The model binding a preview resolves: unsaved values in the request win,
+ * like the unsaved policy does. A model belongs to its configuration, so a
+ * new configuration without a model runs that configuration's default.
+ */
+function previewModelBinding(
+  saved: Pick<AgentProfile, 'model_config_id' | 'model'>,
+  body: Record<string, unknown>,
+): Pick<AgentProfile, 'model_config_id' | 'model'> | null {
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+  const valid = (value: unknown) =>
+    value === null || (typeof value === 'string' && value.length <= 200);
+  if (
+    (has('model_config_id') && !valid(body.model_config_id)) ||
+    (has('model') && !valid(body.model))
+  ) {
+    return null;
+  }
+  const modelConfigId = has('model_config_id')
+    ? ((body.model_config_id as string | null) ?? null)
+    : saved.model_config_id;
+  const model = has('model')
+    ? ((body.model as string | null) ?? null)
+    : modelConfigId === saved.model_config_id
+      ? saved.model
+      : null;
+  return {
+    model_config_id: modelConfigId,
+    model: modelConfigId ? model : null,
   };
 }
 
@@ -596,6 +646,8 @@ agentProfileRoutes.post(
         : AgentProfileRuntimePolicySchema.safeParse(body.runtime_policy);
     if (!parsedPolicy.success)
       return c.json({ error: 'Invalid runtime policy' }, 400);
+    const modelBinding = previewModelBinding(existing, body);
+    if (!modelBinding) return c.json({ error: 'Invalid model binding' }, 400);
     if (isUnauthorizedHostClaudeContext(user, parsedPolicy.data)) {
       return c.json(
         { error: 'host_claude context requires an admin role' },
@@ -665,7 +717,10 @@ agentProfileRoutes.post(
     const runContext = workspace ? getRunContextSnapshot(workspace.jid) : null;
     return c.json({
       preview,
-      model_resolution: resolveAgentModelResolution(existing, workspace?.group),
+      model_resolution: resolveAgentModelResolution(
+        modelBinding,
+        workspace?.group,
+      ),
       run_context: runContext,
       run_context_status: classifyRunContextSnapshot(runContext, {
         agentProfile: {

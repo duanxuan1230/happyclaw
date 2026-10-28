@@ -41,7 +41,11 @@ afterAll(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-function createUser(id: string, role: 'admin' | 'member'): void {
+function createUser(
+  id: string,
+  role: 'admin' | 'member',
+  status: 'active' | 'disabled' = 'active',
+): void {
   const now = new Date().toISOString();
   db.createUser({
     id,
@@ -49,7 +53,7 @@ function createUser(id: string, role: 'admin' | 'member'): void {
     password_hash: 'hash',
     display_name: id,
     role,
-    status: 'active',
+    status,
     created_at: now,
     updated_at: now,
     must_change_password: false,
@@ -94,6 +98,8 @@ function buildV83Database(
     owner: string;
     effectiveSource: 'managed' | 'host_claude';
     create: () => ReturnType<typeof db.createAgentProfile>;
+    /** Store unreadable JSON, as a hand-edited or truncated row would. */
+    corruptPolicy?: boolean;
   }>,
 ): LegacyCase[] {
   if (db.isDatabaseInitialized()) db.closeDatabase();
@@ -108,6 +114,7 @@ function buildV83Database(
   }
   createUser('admin-owner', 'admin');
   createUser('member-owner', 'member');
+  createUser('disabled-admin', 'admin', 'disabled');
 
   const created = profiles.map((entry) => {
     const profile = entry.create();
@@ -139,7 +146,10 @@ function buildV83Database(
       ).runtime_policy,
     );
     delete raw.skills.host;
-    const legacyPolicy = db.normalizeAgentProfileRuntimePolicy(raw);
+    // The runner decodes unreadable JSON to the default policy.
+    const legacyPolicy = db.normalizeAgentProfileRuntimePolicy(
+      entry.corruptPolicy ? undefined : raw,
+    );
     const legacyHash = legacyEffectiveHash(
       profile,
       legacyPolicy,
@@ -150,7 +160,7 @@ function buildV83Database(
         'UPDATE agent_profiles SET runtime_policy = ?, identity_hash = ? WHERE id = ?',
       )
       .run(
-        JSON.stringify(raw),
+        entry.corruptPolicy ? '{"skills": {"mode": ' : JSON.stringify(raw),
         db.computeAgentProfileIdentityHash(profile, legacyPolicy, profile.name),
         profile.id,
       );
@@ -340,5 +350,56 @@ describe('schema v84 pins host Skill policies', () => {
     db.closeDatabase();
     upgrade();
     expect(hostSkills(adminMain)).toEqual({ mode: 'disabled', ids: [] });
+  });
+
+  test('a disabled admin and an unreadable policy pin host Skills off', () => {
+    runtimeConfig.saveSystemSettings({ mainAgentContextSource: 'host_claude' });
+    const [disabledMain, disabledHost, corrupt] = buildV83Database([
+      {
+        folder: 'disabled-main',
+        owner: 'disabled-admin',
+        effectiveSource: 'managed',
+        create: () => db.getOrCreateDefaultAgentProfile('disabled-admin'),
+      },
+      {
+        folder: 'disabled-host',
+        owner: 'disabled-admin',
+        effectiveSource: 'managed',
+        create: () =>
+          db.createAgentProfile({
+            ownerUserId: 'disabled-admin',
+            name: 'Disabled Host',
+            runtimePolicy: { context: { source: 'host_claude' } },
+          }),
+      },
+      {
+        folder: 'corrupt-policy',
+        owner: 'admin-owner',
+        effectiveSource: 'managed',
+        corruptPolicy: true,
+        create: () =>
+          db.createAgentProfile({
+            ownerUserId: 'admin-owner',
+            name: 'Corrupt Policy',
+            runtimePolicy: {
+              context: { source: 'host_claude' },
+              skills: { mode: 'custom', ids: ['lost'] },
+            },
+          }),
+      },
+    ]);
+    upgrade();
+
+    expect(hostSkills(disabledMain)).toEqual({ mode: 'disabled', ids: [] });
+    expect(hostSkills(disabledHost)).toEqual({ mode: 'disabled', ids: [] });
+    // Unreadable JSON becomes the default policy the runner already used,
+    // now with an explicit grant.
+    expect(db.getAgentProfile(corrupt.id)!.runtime_policy).toEqual({
+      ...db.normalizeAgentProfileRuntimePolicy(),
+      skills: { mode: 'inherit', ids: [], host: { mode: 'disabled', ids: [] } },
+    });
+    for (const entry of [disabledMain, disabledHost, corrupt]) {
+      expectSessionKept(entry);
+    }
   });
 });

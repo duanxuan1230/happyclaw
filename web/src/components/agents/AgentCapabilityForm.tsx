@@ -114,7 +114,9 @@ export function capabilityFormModelChanges(
 }
 
 /** The model binding the form would save, as the profile stores it. */
-export function capabilityFormBinding(value: AgentCapabilityFormValue) {
+export function capabilityFormBinding(
+  value: Pick<AgentCapabilityFormValue, 'modelConfigId' | 'model'>,
+) {
   const modelConfigId =
     value.modelConfigId === 'inherit' ? null : value.modelConfigId;
   return {

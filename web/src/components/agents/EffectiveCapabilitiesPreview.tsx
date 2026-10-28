@@ -29,16 +29,22 @@ import { capabilitySourceLabel } from '@/utils/capability-sources';
 import { SettingsGroup } from '@/components/settings/SettingsLayout';
 import { cn } from '@/lib/utils';
 import { AgentSection } from './AgentSection';
-import { ModelResolutionRow, readModelResolution } from './ModelResolutionRow';
+import {
+  ModelResolutionRow,
+  readModelResolution,
+  type ModelBinding,
+} from './ModelResolutionRow';
 
 export function EffectiveCapabilitiesPreview({
   profileId,
   runtimePolicy,
   workspaces,
+  modelBinding,
 }: {
   profileId: string;
   runtimePolicy: AgentProfileRuntimePolicy;
   workspaces: AgentProfileWorkspace[];
+  modelBinding?: ModelBinding;
 }) {
   const [workspaceJid, setWorkspaceJid] = useState('none');
   const [preview, setPreview] = useState<AgentCapabilityPreview | null>(null);
@@ -76,6 +82,7 @@ export function EffectiveCapabilitiesPreview({
         `/api/agent-profiles/${encodeURIComponent(profileId)}/effective-capabilities`,
         {
           runtime_policy: runtimePolicy,
+          ...modelBinding,
           workspace_jid: workspaceJid === 'none' ? undefined : workspaceJid,
         },
       );
@@ -94,7 +101,7 @@ export function EffectiveCapabilitiesPreview({
     } finally {
       if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [profileId, runtimePolicy, workspaceJid]);
+  }, [modelBinding, profileId, runtimePolicy, workspaceJid]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadPreview(), 250);

@@ -16,6 +16,7 @@ import { apiErrorBody } from '@/utils/error';
 import {
   useAgentProfilesStore,
   type AgentCapabilityReferences,
+  type AgentHostGrant,
   type AgentProfileImportResult,
 } from '@/stores/agent-profiles';
 
@@ -25,6 +26,14 @@ interface ParsedFile {
     string,
     unknown
   >;
+}
+
+function describeHostGrants(grants: AgentHostGrant[]): string {
+  return grants
+    .map((grant) =>
+      grant === 'host_context' ? '宿主机 Claude 上下文' : '宿主机 Skills',
+    )
+    .join(' / ');
 }
 
 export function describeReferences(refs: AgentCapabilityReferences): string {
@@ -65,6 +74,8 @@ export function ImportAgentDialog({
   const [missing, setMissing] = useState<AgentCapabilityReferences | null>(
     null,
   );
+  // Set once the server named the host resources the file would grant.
+  const [hostGrants, setHostGrants] = useState<AgentHostGrant[] | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -73,6 +84,7 @@ export function ImportAgentDialog({
     setNameError(null);
     setError(null);
     setMissing(null);
+    setHostGrants(null);
   }, [open]);
 
   const readFile = async (selected: File | undefined) => {
@@ -80,6 +92,7 @@ export function ImportAgentDialog({
     setError(null);
     setNameError(null);
     setMissing(null);
+    setHostGrants(null);
     try {
       const data = JSON.parse(await selected.text());
       if (data?.format !== 'happyclaw-agent') {
@@ -102,16 +115,19 @@ export function ImportAgentDialog({
       const result = await importProfile({
         data: file.data,
         name: name.trim(),
-        // Only after the user saw the list and chose to go without it.
+        // Each only after the user saw what it covers and went on.
         ...(missing ? { drop_missing: true } : {}),
+        ...(hostGrants ? { confirm_host_grants: true } : {}),
       });
       onImported(result);
     } catch (err) {
       const body = apiErrorBody(err);
-      if (body?.code === 'AGENT_NAME_TAKEN') {
+      if (body?.code === 'AGENT_NAME_TAKEN' || body?.code === 'INVALID_NAME') {
         setNameError(getErrorMessage(err, '名称已被使用'));
       } else if (body?.code === 'AGENT_IMPORT_MISSING_REFERENCES') {
         setMissing(body.missing as AgentCapabilityReferences);
+      } else if (body?.code === 'AGENT_IMPORT_HOST_GRANTS') {
+        setHostGrants(body.grants as AgentHostGrant[]);
       } else {
         setError(getErrorMessage(err, '导入失败'));
       }
@@ -187,6 +203,20 @@ export function ImportAgentDialog({
             </SettingsField>
           )}
 
+          {hostGrants && (
+            <div
+              role="alert"
+              className="space-y-1 rounded-lg bg-warning/10 px-3 py-2.5"
+            >
+              <p className="text-label text-foreground">
+                此文件会授予：{describeHostGrants(hostGrants)}
+              </p>
+              <p className="text-caption leading-5 text-muted-foreground">
+                导入的智能体运行时会使用这台机器上的这些资源。确认来源可信后再导入。
+              </p>
+            </div>
+          )}
+
           {missing && (
             <div
               role="alert"
@@ -225,7 +255,7 @@ export function ImportAgentDialog({
             disabled={!file || !name.trim() || importing}
           >
             {importing && <Loader2 className="animate-spin" />}
-            {missing ? '去掉这些后创建' : '导入'}
+            {missing ? '去掉这些后创建' : hostGrants ? '授予并导入' : '导入'}
           </Button>
         </DialogFooter>
       </DialogContent>

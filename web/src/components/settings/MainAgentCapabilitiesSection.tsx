@@ -9,6 +9,7 @@ import type { AgentProfileRuntimePolicy } from '../../types';
 import { confirmRunnerRestart } from '../../utils/agent-save-confirm';
 import {
   AgentCapabilityForm,
+  capabilityFormBinding,
   capabilityFormError,
   capabilityFormFromProfile,
   capabilityFormModelChanges,
@@ -66,6 +67,19 @@ export function MainAgentCapabilitiesSection() {
   const dirty = !!form && !!saved && !sameCapabilityForm(form, saved);
   const formError = form ? capabilityFormError(form) : null;
 
+  // The preview resolves the unsaved binding and refetches when it changes.
+  const bindingConfigId = form?.modelConfigId;
+  const bindingModel = form?.model ?? null;
+  const previewBinding = useMemo(
+    () =>
+      bindingConfigId === undefined
+        ? undefined
+        : capabilityFormBinding({
+            modelConfigId: bindingConfigId,
+            model: bindingModel,
+          }),
+    [bindingConfigId, bindingModel],
+  );
   const previewPolicy = useMemo<AgentProfileRuntimePolicy | null>(
     () =>
       profile && form
@@ -156,6 +170,7 @@ export function MainAgentCapabilitiesSection() {
           <EffectiveCapabilitiesPreview
             profileId={profile.id}
             runtimePolicy={previewPolicy}
+            modelBinding={previewBinding}
             workspaces={governance?.workspaces ?? []}
           />
         </ErrorBoundary>

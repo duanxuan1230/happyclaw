@@ -11,6 +11,15 @@ const SOURCE_LABELS: Record<AgentModelResolution['source'], string> = {
   none: '无可用配置',
 };
 
+/**
+ * An unsaved model binding to resolve instead of the saved one. Callers keep
+ * it referentially stable (useMemo): the preview refetches when it changes.
+ */
+export interface ModelBinding {
+  model_config_id: string | null;
+  model: string | null;
+}
+
 /** The resolution from an effective-capabilities response, if it has one. */
 export function readModelResolution(
   response: unknown,
@@ -21,6 +30,7 @@ export function readModelResolution(
 }
 
 function describe(resolution: AgentModelResolution): string {
+  if (resolution.connection_missing) return '绑定的连接不存在，运行会失败';
   if (resolution.model_config_id) {
     return [resolution.model_config_name, resolution.model]
       .filter(Boolean)
@@ -52,9 +62,11 @@ export function ModelResolutionRow({
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span
           className={
-            resolution.source === 'none'
-              ? 'text-caption text-error'
-              : 'min-w-0 text-label break-all text-foreground'
+            resolution.connection_missing
+              ? 'text-caption text-warning'
+              : resolution.source === 'none'
+                ? 'text-caption text-error'
+                : 'min-w-0 text-label break-all text-foreground'
           }
         >
           {describe(resolution)}

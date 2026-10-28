@@ -534,8 +534,10 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
 
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
 脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”；`model_resolution`
-（`source`、`model_config_id`、`model_config_name`、`model`）说明运行实际用的连接
-与模型，`source` 按固定顺序取 `session`（会话手选，仅指定 `workspace_jid` 时看该
+（`source`、`model_config_id`、`model_config_name`、`model`、`connection_missing`）
+说明运行实际用的连接与模型。请求体可带未保存的 `model_config_id`、`model`，与未保存
+的 `runtime_policy` 一样按它们计算；绑定的连接已删除时 `connection_missing` 为 true。
+`source` 按固定顺序取 `session`（会话手选，仅指定 `workspace_jid` 时看该
 工作区主会话）、`agent`（智能体绑定）、`default`（全局默认，工作区自带 Provider 环境
 变量时让位）、`single`（唯一启用）、`workspace_env`、`pool`（自动池）或 `none`。
 
@@ -546,8 +548,12 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
 名称在同一用户的 active 智能体（含内置 HappyClaw）之间唯一，按 NFKC 折叠后不区分
 大小写比较；创建、导入和改名冲突返回 409 与 `code: AGENT_NAME_TAKEN`，已有的重名
 不受影响。四段 Prompt 每段最多 20000 个字符；超限返回 400 与
-`code: PROMPT_TOO_LONG`、`field`（如 `soul_prompt`）和 `max`，名称不合法返回
-`code: INVALID_NAME`。
+`code: PROMPT_TOO_LONG`、`field`（如 `soul_prompt`）和 `max`，名称不合法（含零宽
+空格、软连字符等不可见字符）返回 `code: INVALID_NAME`；比较名称时也会去掉这类字符。
+唯一性在数据库层的创建与改名里检查，Agent Builder 准备和发布草稿同样受约束。
+
+`runtime_policy.mcp.ids` 的引用可带 `system:`/`user:` 前缀，前缀不计入 id 的 128 字符
+上限。
 
 每个 profile 的 `runtime_policy.skills.host` 都是显式值（schema v84 起），宿主机
 Skills 不再随有效上下文来源隐式继承。
@@ -566,11 +572,14 @@ Runner 停止期间，用一个事务把该智能体的全部工作区迁到目�
 `export` 返回 `{format: "happyclaw-agent", version: 1, exported_at, agent}`，`agent`
 含名称、头像 Emoji/背景色、四段 Prompt、`prompt_mode` 与 `runtime_policy`；Skills 用
 目录名、MCP 用 `system:`/`user:` 前缀名引用，不含模型配置、上传头像、宿主机路径或
-凭据。`import` 接受 `{data, name?, drop_missing?}`：格式或版本不对返回 400
+凭据。`import` 接受 `{data, name?, drop_missing?, confirm_host_grants?}`：格式或
+版本不对返回 400
 （`INVALID_AGENT_EXPORT`、`UNSUPPORTED_AGENT_EXPORT_VERSION`）；引用了本账号没有的
 Skills/MCP 时返回 409 `AGENT_IMPORT_MISSING_REFERENCES` 与 `missing`，带
 `drop_missing: true` 重发会去掉这些引用后创建（去掉后为空的“所选”改为不使用）；非
-admin 导入时去掉宿主机上下文与宿主机 Skills。成功返回 201
+admin 导入时去掉宿主机上下文与宿主机 Skills；admin 导入会授予它们的文件时返回 409
+`AGENT_IMPORT_HOST_GRANTS` 与 `grants`，确认后带 `confirm_host_grants: true` 重发。
+成功返回 201
 `{profile, stripped, dropped}`。
 
 `GET /api/agent-profiles` 的每个 profile 带 `model_config_id` 与 `model`（该配置内

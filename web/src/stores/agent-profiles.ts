@@ -105,6 +105,7 @@ interface AgentProfilesState {
     data: unknown;
     name?: string;
     drop_missing?: boolean;
+    confirm_host_grants?: boolean;
   }) => Promise<AgentProfileImportResult>;
   setWorkspaceAgentProfile: (jid: string, profileId: string) => Promise<void>;
 }

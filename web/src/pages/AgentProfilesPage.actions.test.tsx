@@ -350,3 +350,80 @@ describe('copy, export and import', () => {
     );
   });
 });
+
+describe('import grants', () => {
+  test('an admin sees the host resources a file grants before importing', async () => {
+    const imported = profile({ id: 'host-import', name: '宿主机智能体' });
+    await renderPage([profile(), imported]);
+    mocks.importProfile
+      .mockRejectedValueOnce({
+        status: 409,
+        message: '导入的智能体会使用宿主机资源，需要确认',
+        body: {
+          code: 'AGENT_IMPORT_HOST_GRANTS',
+          grants: ['host_context', 'host_skills'],
+        },
+      })
+      .mockResolvedValueOnce({
+        profile: imported,
+        stripped: [],
+        dropped: { skills: [], host_skills: [], mcp: [] },
+      });
+
+    await act(async () => button('导入智能体').click());
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type="file"][accept=".json,application/json"]',
+    )!;
+    const file = new File(
+      [
+        JSON.stringify({
+          format: 'happyclaw-agent',
+          version: 1,
+          agent: { name: '宿主机智能体' },
+        }),
+      ],
+      'agent.json',
+      { type: 'application/json' },
+    );
+    Object.defineProperty(input, 'files', { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLInputElement>('#import-agent-name')?.value,
+      ).toBe('宿主机智能体'),
+    );
+
+    await act(async () => button('导入').click());
+    expect(mocks.importProfile).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ confirm_host_grants: true }),
+    );
+    expect(document.body.textContent).toContain(
+      '此文件会授予：宿主机 Claude 上下文 / 宿主机 Skills',
+    );
+
+    await act(async () => button('授予并导入').click());
+    expect(mocks.importProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ confirm_host_grants: true }),
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '已导入「宿主机智能体」，模型配置跟随默认',
+    );
+  });
+
+  test('a name with invisible characters is reported at the name field', async () => {
+    await renderPage([profile()]);
+    mocks.createProfile.mockRejectedValueOnce({
+      status: 400,
+      message: '名称不能包含不可见字符',
+      body: { code: 'INVALID_NAME', field: 'name' },
+    });
+    await act(async () => button('新建').click());
+    await type('#new-agent-name', 'Re​viewer');
+    await act(async () => button('创建').click());
+    expect(document.querySelector('#new-agent-name-error')?.textContent).toBe(
+      '名称不能包含不可见字符',
+    );
+  });
+});

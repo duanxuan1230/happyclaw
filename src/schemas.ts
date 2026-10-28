@@ -332,6 +332,19 @@ const AgentProfileRuntimePolicyModeSchema = z.enum([
   'disabled',
 ]);
 
+/**
+ * An MCP server id, bare or scoped as `system:`/`user:`; the scope does not
+ * count against the id's own limit, so an exported reference imports back.
+ */
+const McpPolicyReferenceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(
+    (reference) => reference.replace(/^(?:system|user):/, '').length <= 128,
+    'MCP id is too long',
+  );
+
 export const AgentProfileRuntimePolicySchema = z
   .object({
     reasoning: z
@@ -375,7 +388,7 @@ export const AgentProfileRuntimePolicySchema = z
     mcp: z
       .object({
         mode: AgentProfileRuntimePolicyModeSchema.optional(),
-        ids: z.array(z.string().trim().min(1).max(128)).max(100).optional(),
+        ids: z.array(McpPolicyReferenceSchema).max(100).optional(),
       })
       .optional(),
   })
@@ -418,7 +431,12 @@ const AgentProfileNameSchema = z
   .string()
   .trim()
   .min(1)
-  .max(AGENT_NAME_MAX_CHARS);
+  .max(AGENT_NAME_MAX_CHARS)
+  // Invisible characters would let two names look the same.
+  .refine(
+    (name) => !/\p{Default_Ignorable_Code_Point}/u.test(name),
+    '名称不能包含不可见字符',
+  );
 
 /**
  * What an Agent is apart from its owner, model binding and Workspaces: the
@@ -493,6 +511,8 @@ export const AgentProfileImportSchema = z.object({
   name: AgentProfileNameSchema.optional(),
   /** Create without the Skills/MCP this account does not have. */
   drop_missing: z.boolean().optional(),
+  /** An admin agreed to the host context / host Skills the file grants. */
+  confirm_host_grants: z.boolean().optional(),
 });
 
 export const AgentProfileGenerateSchema = z.object({

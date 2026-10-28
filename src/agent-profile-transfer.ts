@@ -114,6 +114,16 @@ export function parseAgentProfileExport(
 
 export type HostGrant = 'host_context' | 'host_skills';
 
+/** The host resources a policy reaches: only an admin may hold them. */
+export function hostGrantsOf(policy: AgentProfileRuntimePolicy): HostGrant[] {
+  const grants: HostGrant[] = [];
+  if (policy.context.source === 'host_claude') grants.push('host_context');
+  if (policy.skills.host && policy.skills.host.mode !== 'disabled') {
+    grants.push('host_skills');
+  }
+  return grants;
+}
+
 /**
  * A non-admin cannot hold the host Claude context or host Skills. A copied
  * or imported Agent loses them (reported to the caller) instead of failing.
@@ -130,15 +140,10 @@ export function stripHostGrants(
       host: source.skills.host ?? { mode: 'disabled', ids: [] },
     },
   };
-  const stripped: HostGrant[] = [];
-  if (isAdmin) return { policy, stripped };
-  if (policy.context.source === 'host_claude') {
-    policy.context.source = 'managed';
-    stripped.push('host_context');
-  }
-  if (policy.skills.host?.mode !== 'disabled') {
+  const stripped = isAdmin ? [] : hostGrantsOf(policy);
+  if (stripped.includes('host_context')) policy.context.source = 'managed';
+  if (stripped.includes('host_skills')) {
     policy.skills.host = { mode: 'disabled', ids: [] };
-    stripped.push('host_skills');
   }
   return { policy, stripped };
 }
