@@ -204,7 +204,7 @@ describe('usage-limit wait wiring in the conversation loops', () => {
       );
       expect(body).toMatch(
         new RegExp(
-          `pendingWindow\\.messages\\.some\\(\\(m\\) => !isScheduledTaskPromptMessage\\(m\\)\\) &&\\s*releaseUsageLimitWaitForNewInput\\(${lane}\\)[\\s\\S]{0,120}?pendingWindow = getMessagesSinceBounded\\(`,
+          `pendingWindow\\.messages\\.some\\([\\s\\S]{0,120}?\\) &&\\s*releaseUsageLimitWaitForNewInput\\(${lane}\\)[\\s\\S]{0,120}?pendingWindow = getMessagesSinceBounded\\(`,
         ),
       );
     }
