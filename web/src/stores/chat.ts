@@ -59,8 +59,7 @@ import {
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
 import {
-  workspaceWorktreesDirtyFromError,
-  worktreeDirtyFromError,
+  dirtyWorktreesFromError,
   type WorktreeDirtyInfo,
 } from '../lib/session-worktree';
 import { markdownTail } from '../lib/markdown-blocks';
@@ -1222,7 +1221,7 @@ interface ChatState {
     jid: string,
     agentId: string,
     options?: { forceWorktree?: boolean },
-  ) => Promise<boolean | { worktreeDirty: WorktreeDirtyInfo }>;
+  ) => Promise<boolean | { worktreesDirty: WorktreeDirtyInfo[] }>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
   createConversation: (
@@ -3915,7 +3914,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       useFileStore.getState().loadFiles(jid);
       return true;
     } catch (err) {
-      const worktreesDirty = workspaceWorktreesDirtyFromError(err);
+      const worktreesDirty = dirtyWorktreesFromError(err);
       // Release clearing lock on failure
       set((s) => {
         const { [jid]: _, ...nextClearing } = s.clearing;
@@ -5837,8 +5836,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return true;
     } catch (err) {
-      const dirty = worktreeDirtyFromError(err);
-      if (dirty) return { worktreeDirty: dirty };
+      const worktreesDirty = dirtyWorktreesFromError(err);
+      if (worktreesDirty) return { worktreesDirty };
       set({ error: extractErrorMessage(err) || '删除会话失败' });
       return false;
     }

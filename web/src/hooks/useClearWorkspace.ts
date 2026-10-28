@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
-import { confirmDialog } from '../stores/confirm';
-import { describeDirtyWorktrees } from '../lib/session-worktree';
+import { confirmDiscardWorktreeChanges } from '../lib/session-worktree';
 import type { GroupInfo } from '../types';
 
 /**
@@ -50,12 +49,10 @@ export function useClearWorkspace() {
       let ok = result === true;
       if (typeof result === 'object') {
         // Session worktrees hold uncommitted work the rebuild would remove.
-        const discard = await confirmDialog({
-          title: '丢弃未提交的改动？',
-          message: describeDirtyWorktrees(result.worktreesDirty),
-          confirmText: '丢弃并重建',
-          variant: 'danger',
-        });
+        const discard = await confirmDiscardWorktreeChanges(
+          result.worktreesDirty,
+          '丢弃并重建',
+        );
         if (!discard) {
           closeClear();
           return;

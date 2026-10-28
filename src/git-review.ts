@@ -10,13 +10,16 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { isRealpathInside, realpathBestEffort } from './utils.js';
+
 export const GIT_TIMEOUT_MS = 15_000;
 export const GIT_STATUS_MAX_FILES = 1_000;
 export const GIT_STATUS_MAX_BYTES = 2 * 1024 * 1024;
 export const GIT_DIFF_MAX_BYTES = 512 * 1024;
 /** Untracked files larger than this are not read to count their lines. */
 const UNTRACKED_LINE_COUNT_MAX_BYTES = 512 * 1024;
-const UNTRACKED_LINE_COUNT_MAX_FILES = 200;
+/** Total untracked bytes one status may read; the rest report null counts. */
+const UNTRACKED_LINE_COUNT_BUDGET_BYTES = 4 * 1024 * 1024;
 const STDERR_MAX_BYTES = 8 * 1024;
 
 export class GitCommandError extends Error {
@@ -125,22 +128,6 @@ export async function runGit(
   });
 }
 
-function realpathOrSelf(target: string): string {
-  try {
-    return fs.realpathSync(target);
-  } catch {
-    return path.resolve(target);
-  }
-}
-
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return (
-    relative === '' ||
-    (!relative.startsWith('..') && !path.isAbsolute(relative))
-  );
-}
-
 export interface GitRepoLocation {
   /** Real path of the repository's top level (a worktree root for worktrees). */
   topLevel: string;
@@ -169,10 +156,9 @@ export async function locateGitRepo(
     return null;
   }
   if (!topLevel) return null;
-  const realTop = realpathOrSelf(topLevel);
-  const realDir = realpathOrSelf(dir);
-  if (!isInside(realTop, realDir)) return null;
-  const subpath = path.relative(realTop, realDir);
+  if (!isRealpathInside(dir, topLevel)) return null;
+  const realTop = realpathBestEffort(topLevel);
+  const subpath = path.relative(realTop, realpathBestEffort(dir));
   if (options.requireTopLevel && subpath !== '') return null;
   return { topLevel: realTop, subpath };
 }
@@ -369,17 +355,23 @@ function looksBinary(buffer: Buffer): boolean {
 }
 
 /** Lines an untracked regular file would add, or null when not counted. */
-function countUntrackedLines(
+async function countUntrackedLines(
   root: string,
   relativePath: string,
-): { additions: number | null; binary: boolean } {
+  budget: { bytes: number },
+): Promise<{ additions: number | null; binary: boolean }> {
   const absolute = path.join(root, relativePath);
   try {
-    const stats = fs.lstatSync(absolute);
-    if (!stats.isFile() || stats.size > UNTRACKED_LINE_COUNT_MAX_BYTES) {
+    const stats = await fs.promises.lstat(absolute);
+    if (
+      !stats.isFile() ||
+      stats.size > UNTRACKED_LINE_COUNT_MAX_BYTES ||
+      stats.size > budget.bytes
+    ) {
       return { additions: null, binary: false };
     }
-    const content = fs.readFileSync(absolute);
+    budget.bytes -= stats.size;
+    const content = await fs.promises.readFile(absolute);
     if (looksBinary(content)) return { additions: null, binary: true };
     if (content.length === 0) return { additions: 0, binary: false };
     let lines = 0;
@@ -421,11 +413,14 @@ export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
       file.binary = stat.additions === null && stat.deletions === null;
     }
   }
-  let counted = 0;
+  const budget = { bytes: UNTRACKED_LINE_COUNT_BUDGET_BYTES };
   for (const file of files) {
     if (file.status !== 'untracked') continue;
-    if (counted++ >= UNTRACKED_LINE_COUNT_MAX_FILES) break;
-    const { additions, binary } = countUntrackedLines(root, file.path);
+    const { additions, binary } = await countUntrackedLines(
+      root,
+      file.path,
+      budget,
+    );
     file.additions = additions;
     file.deletions = additions === null ? null : 0;
     file.binary = binary;
@@ -472,18 +467,9 @@ export function normalizeRepoPath(root: string, input: string): string {
   if (!normalized || normalized === '.' || normalized.startsWith('../')) {
     throw new GitPathError('path must stay inside the repository');
   }
-  const realRoot = realpathOrSelf(root);
-  const absolute = path.resolve(realRoot, normalized);
-  if (!isInside(realRoot, absolute)) {
-    throw new GitPathError('path must stay inside the repository');
-  }
-  // The file itself may be deleted or be a symlink git reports as such;
-  // its closest existing parent directory must still be inside the root.
-  let parent = path.dirname(absolute);
-  while (!fs.existsSync(parent) && parent !== realRoot) {
-    parent = path.dirname(parent);
-  }
-  if (!isInside(realRoot, realpathOrSelf(parent))) {
+  // The file itself may be deleted, or be a symlink git reports as a link;
+  // its directory must still resolve inside the root.
+  if (!isRealpathInside(path.dirname(path.resolve(root, normalized)), root)) {
     throw new GitPathError('path must stay inside the repository');
   }
   return normalized;

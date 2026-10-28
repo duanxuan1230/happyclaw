@@ -8,8 +8,11 @@ import {
 import { canAccessGroup } from '../group-acl.js';
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
-import { getAgent, getRegisteredGroup } from '../db.js';
-import { resolveWorkspaceProjectRoot } from '../session-worktree.js';
+import { getRegisteredGroup } from '../db.js';
+import {
+  resolveWorkspaceProjectRoot,
+  workspaceSessionFromQuery,
+} from '../session-worktree.js';
 import { logger } from '../logger.js';
 import {
   listFiles,
@@ -292,13 +295,9 @@ function resolveRequestFileRoot(
   jid: string,
   group: RegisteredGroup,
 ): { rootOverride: string | undefined } | Response {
-  const rawAgentId = c.req.query('agentId');
-  const agentId = rawAgentId && rawAgentId !== 'main' ? rawAgentId : null;
-  if (agentId) {
-    const agent = getAgent(agentId);
-    if (!agent || agent.chat_jid !== jid) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
+  const agentId = workspaceSessionFromQuery(c.req.query('agentId'), jid);
+  if (agentId === undefined) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   return { rootOverride: getFileRootOverride(group, agentId) };
 }

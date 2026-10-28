@@ -107,12 +107,16 @@ describe('session worktrees in the chat store', () => {
 
   it('reports uncommitted worktree changes instead of failing a session delete', async () => {
     api.delete.mockRejectedValueOnce(
-      dirtyError({ worktree: { branch: 'happyclaw/s1', changed_files: 3 } }),
+      dirtyError({
+        dirty_worktrees: [
+          { session_id: 's1', branch: 'happyclaw/s1', changed_files: 3 },
+        ],
+      }),
     );
     await expect(
       useChatStore.getState().deleteAgentAction(JID, 's1'),
     ).resolves.toEqual({
-      worktreeDirty: { branch: 'happyclaw/s1', changedFiles: 3 },
+      worktreesDirty: [{ branch: 'happyclaw/s1', changedFiles: 3 }],
     });
     expect(useChatStore.getState().error).toBeNull();
 

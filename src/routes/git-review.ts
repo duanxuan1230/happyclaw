@@ -11,9 +11,6 @@
  * Git runs only for Host workspaces: a container Agent controls its
  * repository's config and hooks, which must never execute on the host.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-
 import { Hono, type Context } from 'hono';
 
 import { authMiddleware } from '../middleware/auth.js';
@@ -38,10 +35,12 @@ import {
   resolveSessionWorkingDirectory,
   resolveWorkspaceProjectRoot,
   toSessionWorktreePayload,
+  workspaceSessionFromQuery,
   WORKTREE_UNAVAILABLE_MESSAGES,
 } from '../session-worktree.js';
 import { getSessionWorktree } from '../session-worktree-store.js';
 import { logger } from '../logger.js';
+import { realpathBestEffort } from '../utils.js';
 
 const gitReviewRoutes = new Hono<{ Variables: Variables }>();
 
@@ -72,13 +71,9 @@ function resolveReviewScope(
       403,
     );
   }
-  const rawAgentId = c.req.query('agentId');
-  const agentId = rawAgentId && rawAgentId !== 'main' ? rawAgentId : null;
-  if (agentId) {
-    const agent = getAgent(agentId);
-    if (!agent || agent.chat_jid !== jid) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
+  const agentId = workspaceSessionFromQuery(c.req.query('agentId'), jid);
+  if (agentId === undefined) {
+    return c.json({ error: 'Session not found' }, 404);
   }
   return { group, authUser, agentId };
 }
@@ -187,14 +182,6 @@ gitReviewRoutes.get('/:jid/git/worktree-support', authMiddleware, async (c) => {
 const AGENT_JID_MARKER = '#agent:';
 const TASK_JID_MARKER = '#task:';
 
-function realDirectory(dir: string): string {
-  try {
-    return fs.realpathSync(dir);
-  } catch {
-    return path.resolve(dir);
-  }
-}
-
 function workspaceForFolder(folder: string): WorkspaceGroup | undefined {
   for (const jid of getJidsByFolder(folder)) {
     if (!jid.startsWith('web:')) continue;
@@ -215,8 +202,11 @@ gitReviewRoutes.get('/:jid/workdir/peers', authMiddleware, (c) => {
   const scope = resolveReviewScope(c);
   if (scope instanceof Response) return scope;
   const queue = getWebDeps()?.queue;
-  if (!queue) return c.json({ peers: [], hidden_count: 0 });
-  const ownDir = realDirectory(
+  // A worktree belongs to one session; nothing else runs there.
+  if (!queue || getSessionWorktree(scope.agentId)) {
+    return c.json({ peers: [], hidden_count: 0 });
+  }
+  const ownDir = realpathBestEffort(
     resolveWorkspaceProjectRoot(scope.group, { agentId: scope.agentId }),
   );
   const principal = { id: scope.authUser.id, role: scope.authUser.role };
@@ -253,7 +243,7 @@ gitReviewRoutes.get('/:jid/workdir/peers', authMiddleware, (c) => {
     const key = kind === 'task' ? entry.jid : `${workspace.jid}\0${agentId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const dir = realDirectory(
+    const dir = realpathBestEffort(
       resolveWorkspaceProjectRoot(workspace, { agentId }),
     );
     if (dir !== ownDir) continue;

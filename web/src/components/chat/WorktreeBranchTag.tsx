@@ -5,9 +5,12 @@ import type { SessionWorktreeInfo } from '../../types';
 /** The branch of a session's own worktree, for session lists and headers. */
 export function WorktreeBranchTag({
   worktree,
+  compact = false,
   className,
 }: {
   worktree: SessionWorktreeInfo;
+  /** Narrow rows drop the shared `happyclaw/` prefix; the title keeps it. */
+  compact?: boolean;
   className?: string;
 }) {
   const broken = worktree.status === 'broken';
@@ -25,7 +28,11 @@ export function WorktreeBranchTag({
       )}
     >
       <GitBranch className="size-3 shrink-0" aria-hidden="true" />
-      <span className="truncate">{worktree.branch}</span>
+      <span className="truncate">
+        {compact
+          ? worktree.branch.replace(/^happyclaw\//, '')
+          : worktree.branch}
+      </span>
     </span>
   );
 }

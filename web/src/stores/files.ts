@@ -110,15 +110,6 @@ export function formatUploadRetryStatus(
   return null;
 }
 
-/**
- * The Runtime Session whose worktree a workspace's file panel, `@` picker and
- * composer uploads use: a session with its own worktree runs there, so its
- * files live there. Absent means the workspace directory.
- */
-const fileScopeSessions = new Map<string, string>();
-/** Workspaces whose listing was requested, so a scope change refreshes it. */
-const listedWorkspaces = new Set<string>();
-
 /** `/api/groups/:jid/<suffix>` in the workspace's current file scope. */
 export function workspaceFilesUrl(
   jid: string,
@@ -126,7 +117,7 @@ export function workspaceFilesUrl(
   params?: URLSearchParams,
 ): string {
   const query = new URLSearchParams(params);
-  const agentId = fileScopeSessions.get(jid);
+  const agentId = useFileStore.getState().fileScope[jid];
   if (agentId) query.set('agentId', agentId);
   const search = query.toString();
   return `/api/groups/${encodeURIComponent(jid)}/${suffix}${search ? `?${search}` : ''}`;
@@ -163,6 +154,14 @@ export function uploadedFilePath(basePath: string, file: File): string {
 interface FileState {
   files: Record<string, FileEntry[]>;
   currentPath: Record<string, string>;
+  /**
+   * The Runtime Session whose worktree a workspace's file panel, `@` picker
+   * and composer uploads use: a session with its own worktree runs there, so
+   * its files live there. Absent means the workspace directory.
+   */
+  fileScope: Record<string, string>;
+  /** Workspaces whose listing was requested, so a scope change refreshes it. */
+  listed: Record<string, true>;
   loading: boolean;
   uploading: boolean;
   uploadProgress: UploadProgress | null;
@@ -207,6 +206,8 @@ export function toBase64Url(str: string): string {
 export const useFileStore = create<FileState>((set, get) => ({
   files: {},
   currentPath: {},
+  fileScope: {},
+  listed: {},
   loading: false,
   uploading: false,
   uploadProgress: null,
@@ -215,15 +216,18 @@ export const useFileStore = create<FileState>((set, get) => ({
   cancelUpload: () => activeUploadController?.abort(),
 
   loadFiles: async (jid: string, path?: string) => {
-    listedWorkspaces.add(jid);
-    set({ loading: true, error: null });
+    set((s) => ({
+      loading: true,
+      error: null,
+      listed: s.listed[jid] ? s.listed : { ...s.listed, [jid]: true },
+    }));
     try {
       const targetPath =
         path !== undefined ? path : get().currentPath[jid] || '';
-      const scope = fileScopeSessions.get(jid);
+      const scope = get().fileScope[jid];
       const data = await listWorkspaceFiles(jid, targetPath);
       // The listing belongs to a scope the panel already left.
-      if (fileScopeSessions.get(jid) !== scope) return;
+      if (get().fileScope[jid] !== scope) return;
 
       set((s) => ({
         files: { ...s.files, [jid]: data.files },
@@ -449,17 +453,18 @@ export const useFileStore = create<FileState>((set, get) => ({
   },
 
   setFileScopeSession: (jid: string, agentId: string | null) => {
-    if ((fileScopeSessions.get(jid) ?? null) === agentId) return;
-    if (agentId) fileScopeSessions.set(jid, agentId);
-    else fileScopeSessions.delete(jid);
+    if ((get().fileScope[jid] ?? null) === agentId) return;
     set((s) => {
+      const fileScope = { ...s.fileScope };
       const files = { ...s.files };
       const currentPath = { ...s.currentPath };
+      if (agentId) fileScope[jid] = agentId;
+      else delete fileScope[jid];
       delete files[jid];
       delete currentPath[jid];
-      return { files, currentPath };
+      return { fileScope, files, currentPath };
     });
-    if (listedWorkspaces.has(jid)) void get().loadFiles(jid, '');
+    if (get().listed[jid]) void get().loadFiles(jid, '');
   },
 
   saveFileContent: async (jid: string, filePath: string, content: string) => {

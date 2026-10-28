@@ -40,9 +40,17 @@ export interface SessionWorktree {
   updated_at: string;
 }
 
-function requireDatabase(): SqliteDatabase {
+const statements = new Map<string, SqliteStatement>();
+
+/** A prepared statement of the bound connection, prepared once. */
+function statement(sql: string): SqliteStatement {
   if (!database) throw new Error('Session worktree store is not initialized');
-  return database;
+  let prepared = statements.get(sql);
+  if (!prepared) {
+    prepared = database.prepare(sql);
+    statements.set(sql, prepared);
+  }
+  return prepared;
 }
 
 export function initSessionWorktreeStore(db: SqliteDatabase): void {
@@ -66,6 +74,7 @@ export function initSessionWorktreeStore(db: SqliteDatabase): void {
       ON session_worktrees(group_folder);
   `);
   database = db;
+  statements.clear();
 }
 
 export function insertSessionWorktree(
@@ -77,28 +86,26 @@ export function insertSessionWorktree(
     broken_reason: null,
     updated_at: record.created_at,
   };
-  requireDatabase()
-    .prepare(
-      `INSERT INTO session_worktrees (
+  statement(
+    `INSERT INTO session_worktrees (
          agent_id, group_folder, chat_jid, repo_path, cwd_subpath,
          worktree_path, branch, base_commit, status, broken_reason,
          created_at, updated_at
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      row.agent_id,
-      row.group_folder,
-      row.chat_jid,
-      row.repo_path,
-      row.cwd_subpath,
-      row.worktree_path,
-      row.branch,
-      row.base_commit,
-      row.status,
-      row.broken_reason,
-      row.created_at,
-      row.updated_at,
-    );
+  ).run(
+    row.agent_id,
+    row.group_folder,
+    row.chat_jid,
+    row.repo_path,
+    row.cwd_subpath,
+    row.worktree_path,
+    row.branch,
+    row.base_commit,
+    row.status,
+    row.broken_reason,
+    row.created_at,
+    row.updated_at,
+  );
   return row;
 }
 
@@ -106,42 +113,36 @@ export function getSessionWorktree(
   agentId: string | null | undefined,
 ): SessionWorktree | undefined {
   if (!agentId || !database) return undefined;
-  return database
-    .prepare('SELECT * FROM session_worktrees WHERE agent_id = ?')
-    .get(agentId) as SessionWorktree | undefined;
+  return statement('SELECT * FROM session_worktrees WHERE agent_id = ?').get(
+    agentId,
+  ) as SessionWorktree | undefined;
 }
 
 export function listSessionWorktreesByFolder(
   groupFolder: string,
 ): SessionWorktree[] {
-  return requireDatabase()
-    .prepare(
-      'SELECT * FROM session_worktrees WHERE group_folder = ? ORDER BY created_at',
-    )
-    .all(groupFolder) as SessionWorktree[];
+  return statement(
+    'SELECT * FROM session_worktrees WHERE group_folder = ? ORDER BY created_at',
+  ).all(groupFolder) as SessionWorktree[];
 }
 
 export function listAllSessionWorktrees(): SessionWorktree[] {
-  return requireDatabase()
-    .prepare('SELECT * FROM session_worktrees ORDER BY created_at')
-    .all() as SessionWorktree[];
+  return statement(
+    'SELECT * FROM session_worktrees ORDER BY created_at',
+  ).all() as SessionWorktree[];
 }
 
 export function markSessionWorktreeBroken(
   agentId: string,
   reason: string,
 ): void {
-  requireDatabase()
-    .prepare(
-      `UPDATE session_worktrees
+  statement(
+    `UPDATE session_worktrees
          SET status = 'broken', broken_reason = ?, updated_at = ?
        WHERE agent_id = ?`,
-    )
-    .run(reason, new Date().toISOString(), agentId);
+  ).run(reason, new Date().toISOString(), agentId);
 }
 
 export function deleteSessionWorktreeRecord(agentId: string): void {
-  requireDatabase()
-    .prepare('DELETE FROM session_worktrees WHERE agent_id = ?')
-    .run(agentId);
+  statement('DELETE FROM session_worktrees WHERE agent_id = ?').run(agentId);
 }

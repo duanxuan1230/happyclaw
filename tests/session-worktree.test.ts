@@ -302,7 +302,7 @@ describe('managed path guard', () => {
       worktrees.isManagedWorktreePath(
         path.join(managed, 'via-link-parent', 'child', 'x'),
       ),
-    ).toBe(true); // nothing exists there yet, so there is nothing to escape through
+    ).toBe(false); // a not-yet-created path below a symlink still lands outside
   });
 });
 

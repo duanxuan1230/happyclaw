@@ -12,6 +12,7 @@ import {
 } from '../web-context.js';
 import {
   createSessionWorktree,
+  dirtyWorktreesConflict,
   findDirtySessionWorktrees,
   removeSessionWorktree,
   toSessionWorktreePayload,
@@ -429,21 +430,6 @@ async function insertSession(
   }
 }
 
-function worktreeDirtyResponse(
-  c: Context<{ Variables: Variables }>,
-  branch: string,
-  changedFiles: number,
-): Response {
-  return c.json(
-    {
-      error: `会话的 worktree 有 ${changedFiles} 个未提交的改动，确认后才会移除（分支 ${branch} 会保留）`,
-      code: 'WORKTREE_DIRTY',
-      worktree: { branch, changed_files: changedFiles },
-    },
-    409,
-  );
-}
-
 /**
  * Refuse to delete a session whose worktree holds uncommitted changes until
  * the caller confirms with `force_worktree=true`. Checked before the runner
@@ -457,10 +443,8 @@ async function checkWorktreeBeforeDelete(
   const worktree = getSessionWorktree(sessionId);
   if (!worktree || force) return null;
   try {
-    const [dirty] = await findDirtySessionWorktrees([worktree]);
-    return dirty
-      ? worktreeDirtyResponse(c, dirty.branch, dirty.dirtyFiles)
-      : null;
+    const dirty = await findDirtySessionWorktrees([worktree]);
+    return dirty.length > 0 ? c.json(dirtyWorktreesConflict(dirty), 409) : null;
   } catch (error) {
     logger.error({ err: error, sessionId }, 'Failed to inspect worktree');
     return c.json({ error: '无法检查会话 worktree 的改动，会话未删除' }, 500);
@@ -489,7 +473,16 @@ async function releaseSessionWorktree(
       force: input.force,
     });
     if (result && !result.removed) {
-      return worktreeDirtyResponse(c, result.branch, result.dirtyFiles);
+      return c.json(
+        dirtyWorktreesConflict([
+          {
+            agentId: input.sessionId,
+            branch: result.branch,
+            dirtyFiles: result.dirtyFiles,
+          },
+        ]),
+        409,
+      );
     }
     return null;
   } catch (error) {

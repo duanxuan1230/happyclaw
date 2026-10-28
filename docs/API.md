@@ -487,10 +487,10 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
   `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
   或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
 - 删除带 worktree 的会话会移除 worktree 目录、保留分支；有未提交改动（含未跟踪文件）
-  时返回 409 `{"code": "WORKTREE_DIRTY", "worktree": {"branch", "changed_files"}}`，
-  带 `?force_worktree=true` 确认后才丢弃。删除工作区和 `clear-history` 同理，409 带
-  `dirty_worktrees: [{"session_id", "branch", "changed_files"}]`，确认参数为
-  `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
+  时返回 409
+  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files"}]}`，
+  带 `?force_worktree=true` 确认后才丢弃。删除工作区和 `clear-history` 同理（409 相同），
+  确认参数为 `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
   （409 `WORKTREE_SESSIONS_EXIST`）。
 - 工作区绑定只接受原生话题群（飞书话题群或 Telegram Forum）。
 - Runtime Session 绑定接受私聊和普通群，`sessionId=main` 表示该 Workspace 的主会话。

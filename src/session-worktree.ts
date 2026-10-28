@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { getAgent } from './db.js';
 import {
   GitCommandError,
   locateGitRepo,
@@ -34,6 +35,7 @@ import {
   type SessionWorktree,
 } from './session-worktree-store.js';
 import type { RegisteredGroup } from './types.js';
+import { isRealpathInside, realpathBestEffort } from './utils.js';
 
 export const WORKTREES_DIR = path.join(DATA_DIR, 'worktrees');
 
@@ -61,18 +63,28 @@ export function resolveWorkspaceProjectRoot(
   group: WorkspaceLike,
   options: { agentId?: string | null } = {},
 ): string {
-  const worktree = getSessionWorktree(options.agentId);
+  return projectRootOf(group, getSessionWorktree(options.agentId));
+}
+
+/**
+ * The session a request's `?agentId=` names in workspace `jid`: null for the
+ * main session (absent or `main`), undefined when it is no session there.
+ */
+export function workspaceSessionFromQuery(
+  raw: string | undefined,
+  jid: string,
+): string | null | undefined {
+  if (!raw || raw === 'main') return null;
+  return getAgent(raw)?.chat_jid === jid ? raw : undefined;
+}
+
+function projectRootOf(
+  group: WorkspaceLike,
+  worktree: SessionWorktree | undefined,
+): string {
   if (worktree) return path.join(worktree.worktree_path, worktree.cwd_subpath);
   if (isHostWorkspace(group) && group.customCwd) return group.customCwd;
   return path.join(GROUPS_DIR, group.folder);
-}
-
-function realpathOrSelf(target: string): string {
-  try {
-    return fs.realpathSync(target);
-  } catch {
-    return path.resolve(target);
-  }
 }
 
 function hasGitEntry(dir: string): boolean {
@@ -101,8 +113,8 @@ export function projectSkillRoots(
   cwd: string,
   options: { mainRepoRoot?: string } = {},
 ): string[] {
-  const home = realpathOrSelf(os.homedir());
-  const start = realpathOrSelf(cwd);
+  const home = realpathBestEffort(os.homedir());
+  const start = realpathBestEffort(cwd);
   const own = path.join(start, '.claude', 'skills');
   const nearestFirst: string[] = [];
   let gitRoot: string | null = null;
@@ -120,7 +132,7 @@ export function projectSkillRoots(
   if (options.mainRepoRoot && gitRoot) {
     const gitRootSkills = path.join(gitRoot, '.claude', 'skills');
     const mainSkills = path.join(
-      realpathOrSelf(options.mainRepoRoot),
+      realpathBestEffort(options.mainRepoRoot),
       '.claude',
       'skills',
     );
@@ -145,8 +157,8 @@ export function resolveWorkspaceSkillRoots(
   group: WorkspaceLike,
   options: { agentId?: string | null } = {},
 ): string[] {
-  const root = resolveWorkspaceProjectRoot(group, options);
   const worktree = getSessionWorktree(options.agentId);
+  const root = projectRootOf(group, worktree);
   if (!isHostWorkspace(group) || (!group.customCwd && !worktree)) {
     return [path.join(root, '.claude', 'skills')];
   }
@@ -214,29 +226,19 @@ function worktreePathFor(folder: string, agentId: string): string {
 }
 
 /**
- * True only for a path strictly below data/worktrees whose real location is
- * also below it, so a removal can never reach a directory outside.
+ * True only for a path strictly below data/worktrees whose real location
+ * (through any symlinked component) is also below it, so creating or removing
+ * a worktree can never reach a directory outside.
  */
 export function isManagedWorktreePath(target: string): boolean {
-  const root = path.resolve(WORKTREES_DIR);
   const resolved = path.resolve(target);
-  const relative = path.relative(root, resolved);
+  const relative = path.relative(path.resolve(WORKTREES_DIR), resolved);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     return false;
   }
-  try {
-    if (fs.lstatSync(resolved).isSymbolicLink()) return false;
-  } catch {
-    return true; // nothing on disk to escape through
-  }
-  const realRelative = path.relative(
-    realpathOrSelf(root),
-    realpathOrSelf(resolved),
-  );
   return (
-    !!realRelative &&
-    !realRelative.startsWith('..') &&
-    !path.isAbsolute(realRelative)
+    realpathBestEffort(resolved) !== realpathBestEffort(WORKTREES_DIR) &&
+    isRealpathInside(resolved, WORKTREES_DIR)
   );
 }
 
@@ -452,27 +454,53 @@ export async function removeSessionWorktree(
   return { removed: true, branch: worktree.branch };
 }
 
+export interface DirtyWorktree {
+  agentId: string;
+  branch: string;
+  dirtyFiles: number;
+}
+
+/** The 409 body of an operation refused because worktrees hold changes. */
+export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
+  const files = dirty.reduce((sum, item) => sum + item.dirtyFiles, 0);
+  const owner = dirty.length === 1 ? '会话' : `${dirty.length} 个会话`;
+  return {
+    error: `${owner}的 worktree 有 ${files} 个未提交的改动，确认后才会移除（分支会保留）`,
+    code: 'WORKTREE_DIRTY',
+    dirty_worktrees: dirty.map((item) => ({
+      session_id: item.agentId,
+      branch: item.branch,
+      changed_files: item.dirtyFiles,
+    })),
+  };
+}
+
 /**
  * Sessions of `records` whose worktrees hold uncommitted changes. Damaged
  * worktrees have nothing to lose and are skipped.
  */
 export async function findDirtySessionWorktrees(
   records: SessionWorktree[],
-): Promise<Array<{ agentId: string; branch: string; dirtyFiles: number }>> {
-  const dirty: Array<{ agentId: string; branch: string; dirtyFiles: number }> =
-    [];
-  for (const record of records) {
-    if (inspectSessionWorktree(record) !== null) continue;
-    const dirtyFiles = await countWorktreeChanges(record.worktree_path);
-    if (dirtyFiles > 0) {
-      dirty.push({
-        agentId: record.agent_id,
-        branch: record.branch,
-        dirtyFiles,
-      });
-    }
-  }
-  return dirty;
+): Promise<DirtyWorktree[]> {
+  // Read-only status takes no index lock, so the checks run side by side.
+  const counts = await Promise.all(
+    records.map((record) =>
+      inspectSessionWorktree(record) === null
+        ? countWorktreeChanges(record.worktree_path)
+        : 0,
+    ),
+  );
+  return records.flatMap((record, index) =>
+    counts[index] > 0
+      ? [
+          {
+            agentId: record.agent_id,
+            branch: record.branch,
+            dirtyFiles: counts[index],
+          },
+        ]
+      : [],
+  );
 }
 
 /**

@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { TriangleAlert } from 'lucide-react';
 import { api } from '../../api/client';
+import { useVisibleInterval } from '../../hooks/useVisibleInterval';
+import { useChatStore } from '../../stores/chat';
 import { cn } from '@/lib/utils';
 
 export interface WorkdirPeer {
@@ -11,53 +13,55 @@ export interface WorkdirPeer {
   session_name: string | null;
 }
 
-const POLL_MS = 15_000;
+interface WorkdirPeersState {
+  peers: WorkdirPeer[];
+  hiddenCount: number;
+}
+
+const NO_PEERS: WorkdirPeersState = { peers: [], hiddenCount: 0 };
+/** Runs this client is not told about (another user's) surface this late. */
+const FALLBACK_POLL_MS = 60_000;
 
 /**
  * Other conversations running a turn in this conversation's working
  * directory. Only reported: sessions may run in parallel by design, they can
- * just overwrite each other's edits. Polled while the page is visible.
+ * just overwrite each other's edits. Rechecked whenever a run this client
+ * knows of starts or stops, and slowly polled while the page is visible.
  */
 export function useWorkdirPeers(
   groupJid: string,
   agentId: string | null,
   enabled: boolean,
-): { peers: WorkdirPeer[]; hiddenCount: number } {
-  const [state, setState] = useState<{
-    peers: WorkdirPeer[];
-    hiddenCount: number;
-  }>({ peers: [], hiddenCount: 0 });
+): WorkdirPeersState {
+  const [state, setState] = useState<WorkdirPeersState>(NO_PEERS);
+  const scope = `${groupJid}\n${agentId ?? ''}\n${enabled}`;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
 
-  useEffect(() => {
-    setState({ peers: [], hiddenCount: 0 });
-    if (!enabled) return;
-    let active = true;
+  const load = useCallback(async () => {
+    const requested = scope;
     const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
-    const load = () => {
-      if (document.hidden) return;
-      api
-        .get<{ peers: WorkdirPeer[]; hidden_count: number }>(
-          `/api/groups/${encodeURIComponent(groupJid)}/workdir/peers${query}`,
-        )
-        .then((data) => {
-          if (active) {
-            setState({ peers: data.peers, hiddenCount: data.hidden_count });
-          }
-        })
-        .catch(() => {
-          // A failed check shows nothing rather than a stale warning.
-          if (active) setState({ peers: [], hiddenCount: 0 });
-        });
-    };
-    load();
-    const timer = setInterval(load, POLL_MS);
-    document.addEventListener('visibilitychange', load);
-    return () => {
-      active = false;
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', load);
-    };
-  }, [groupJid, agentId, enabled]);
+    let next = NO_PEERS;
+    try {
+      const data = await api.get<{
+        peers: WorkdirPeer[];
+        hidden_count: number;
+      }>(`/api/groups/${encodeURIComponent(groupJid)}/workdir/peers${query}`);
+      next = { peers: data.peers, hiddenCount: data.hidden_count };
+    } catch {
+      // A failed check shows nothing rather than a stale warning.
+    }
+    if (scopeRef.current === requested) setState(next);
+  }, [scope, groupJid, agentId]);
+
+  const runKeys = useChatStore((s) =>
+    Object.keys(s.activeRuns).sort().join('\n'),
+  );
+  useEffect(() => setState(NO_PEERS), [scope]);
+  useEffect(() => {
+    if (enabled) void load();
+  }, [enabled, load, runKeys]);
+  useVisibleInterval(load, FALLBACK_POLL_MS, enabled);
 
   return state;
 }

@@ -251,7 +251,7 @@ function SessionRow({
       >
         <span className="truncate">{name}</span>
         {worktree && (
-          <WorktreeBranchTag worktree={worktree} className="max-w-24" />
+          <WorktreeBranchTag worktree={worktree} compact className="max-w-24" />
         )}
         {linked && (
           <Link2

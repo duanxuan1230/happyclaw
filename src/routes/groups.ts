@@ -35,9 +35,12 @@ import {
   canDeleteGroup,
 } from '../group-acl.js';
 import { MAX_GROUP_NAME_LEN } from '../group-constants.js';
+import { realpathBestEffort } from '../utils.js';
 import {
+  dirtyWorktreesConflict,
   findDirtySessionWorktrees,
   removeSessionWorktree,
+  type DirtyWorktree,
 } from '../session-worktree.js';
 import { listSessionWorktreesByFolder } from '../session-worktree-store.js';
 import {
@@ -641,34 +644,11 @@ function stageWorkspaceResetForGroup(folder: string): StagedWorkspaceReset {
   };
 }
 
-type DirtyWorktree = Awaited<
-  ReturnType<typeof findDirtySessionWorktrees>
->[number];
-
 class DirtyWorktreesError extends Error {
   constructor(readonly dirty: DirtyWorktree[]) {
     super('Session worktrees have uncommitted changes');
     this.name = 'DirtyWorktreesError';
   }
-}
-
-function dirtyWorktreesResponse(
-  c: Context<{ Variables: Variables }>,
-  dirty: DirtyWorktree[],
-): Response {
-  const files = dirty.reduce((sum, item) => sum + item.dirtyFiles, 0);
-  return c.json(
-    {
-      error: `有 ${dirty.length} 个会话的 worktree 存在 ${files} 个未提交的改动，确认后才会移除（分支会保留）`,
-      code: 'WORKTREE_DIRTY',
-      dirty_worktrees: dirty.map((item) => ({
-        session_id: item.agentId,
-        branch: item.branch,
-        changed_files: item.dirtyFiles,
-      })),
-    },
-    409,
-  );
 }
 
 /**
@@ -686,7 +666,7 @@ async function workspaceWorktreeBlock(
   if (records.length === 0) return null;
   try {
     const dirty = await findDirtySessionWorktrees(records);
-    return dirty.length > 0 ? dirtyWorktreesResponse(c, dirty) : null;
+    return dirty.length > 0 ? c.json(dirtyWorktreesConflict(dirty), 409) : null;
   } catch (error) {
     logger.error({ err: error, folder }, 'Failed to inspect session worktrees');
     return c.json({ error: '无法检查会话 worktree 的改动，操作未执行' }, 500);
@@ -722,14 +702,7 @@ function sharedCustomCwdWarnings(
   workspaces: Array<{ jid: string; name: string }>;
 }> {
   if (!customCwd) return [];
-  const real = (dir: string) => {
-    try {
-      return fs.realpathSync(dir);
-    } catch {
-      return path.resolve(dir);
-    }
-  };
-  const target = real(customCwd);
+  const target = realpathBestEffort(customCwd);
   const workspaces = Object.entries(getAllRegisteredGroups())
     .filter(
       ([jid, group]) =>
@@ -738,7 +711,7 @@ function sharedCustomCwdWarnings(
         group.created_by === ownerId &&
         isHostExecutionGroup(group) &&
         !!group.customCwd &&
-        real(group.customCwd) === target,
+        realpathBestEffort(group.customCwd) === target,
     )
     .map(([jid, group]) => ({ jid, name: group.name }));
   if (workspaces.length === 0) return [];
@@ -2962,7 +2935,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       }
     }
     if (err instanceof DirtyWorktreesError && !rollbackError) {
-      return dirtyWorktreesResponse(c, err.dirty);
+      return c.json(dirtyWorktreesConflict(err.dirty), 409);
     }
     logger.error(
       {

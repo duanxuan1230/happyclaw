@@ -592,7 +592,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   useEffect(() => {
     useFileStore.getState().setFileScopeSession(groupJid, worktreeSessionId);
   }, [groupJid, worktreeSessionId]);
-  const workdirPeers = useWorkdirPeers(groupJid, composerAgentId, !!group);
+  // A worktree belongs to one session: nothing else runs there.
+  const workdirPeers = useWorkdirPeers(
+    groupJid,
+    composerAgentId,
+    !!group && !activeWorktree,
+  );
   const showWorkdirNotice =
     workdirPeers.peers.length + workdirPeers.hiddenCount > 0;
   // Memoized so the memoized composer does not re-render with a fresh element.

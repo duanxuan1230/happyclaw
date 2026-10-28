@@ -503,7 +503,9 @@ describe('deleting worktree sessions', () => {
     expect(refused.status).toBe(409);
     expect(refused.body).toMatchObject({
       code: 'WORKTREE_DIRTY',
-      worktree: { branch: worktree.branch, changed_files: 2 },
+      dirty_worktrees: [
+        { session_id: sessionId, branch: worktree.branch, changed_files: 2 },
+      ],
     });
     expect(db.getAgent(sessionId)).toBeDefined();
     expect(fs.existsSync(worktree.worktree_path)).toBe(true);

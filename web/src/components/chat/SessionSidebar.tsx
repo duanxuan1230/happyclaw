@@ -352,7 +352,11 @@ function SessionRow({
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
             {worktree && (
-              <WorktreeBranchTag worktree={worktree} className="max-w-32" />
+              <WorktreeBranchTag
+                worktree={worktree}
+                compact
+                className="max-w-32"
+              />
             )}
             <span className="truncate">{meta}</span>
           </span>

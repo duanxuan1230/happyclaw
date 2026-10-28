@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
 import { confirmDialog } from '../stores/confirm';
-import { describeDirtyWorktrees } from '../lib/session-worktree';
+import { confirmDiscardWorktreeChanges } from '../lib/session-worktree';
 import type { AgentInfo } from '../types';
 
 /**
@@ -74,12 +74,10 @@ export function useSessionActions() {
         if (!confirmed) return;
         let result = await deleteAgentAction(groupJid, id);
         if (typeof result === 'object') {
-          const discard = await confirmDialog({
-            title: '丢弃未提交的改动？',
-            message: describeDirtyWorktrees([result.worktreeDirty]),
-            confirmText: '丢弃并删除',
-            variant: 'danger',
-          });
+          const discard = await confirmDiscardWorktreeChanges(
+            result.worktreesDirty,
+            '丢弃并删除',
+          );
           if (!discard) return;
           result = await deleteAgentAction(groupJid, id, {
             forceWorktree: true,

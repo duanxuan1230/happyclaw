@@ -453,7 +453,11 @@ function PhoneSessionRow({
             {title}
           </button>
           {worktree && (
-            <WorktreeBranchTag worktree={worktree} className="max-w-28" />
+            <WorktreeBranchTag
+              worktree={worktree}
+              compact
+              className="max-w-28"
+            />
           )}
           {linked && (
             <Link2

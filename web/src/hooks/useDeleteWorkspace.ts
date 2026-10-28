@@ -1,10 +1,9 @@
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
-import { confirmDialog } from '../stores/confirm';
 import {
-  describeDirtyWorktrees,
-  workspaceWorktreesDirtyFromError,
+  confirmDiscardWorktreeChanges,
+  dirtyWorktreesFromError,
 } from '../lib/session-worktree';
 import type { WorkspaceDeleteImpact } from '../types';
 
@@ -92,14 +91,12 @@ export function useDeleteWorkspace(
         await deleteFlow(deletedJid, { unbindChannels: true });
       } catch (error) {
         // Session worktrees hold uncommitted work the deletion would remove.
-        const dirty = workspaceWorktreesDirtyFromError(error);
+        const dirty = dirtyWorktreesFromError(error);
         if (!dirty) throw error;
-        const discard = await confirmDialog({
-          title: '丢弃未提交的改动？',
-          message: describeDirtyWorktrees(dirty),
-          confirmText: '丢弃并删除',
-          variant: 'danger',
-        });
+        const discard = await confirmDiscardWorktreeChanges(
+          dirty,
+          '丢弃并删除',
+        );
         if (!discard) return;
         await deleteFlow(deletedJid, {
           unbindChannels: true,
