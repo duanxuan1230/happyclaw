@@ -204,7 +204,9 @@ describe('schema version head', () => {
     // v83: agent_profiles.model, the model an Agent picks within its model
     // configuration (schema-v83-agent-model.test.ts).
     // v84: drop agent_profile_prompt_versions; Agents keep no prompt history
-    // (schema-v84-drop-agent-prompt-versions.test.ts).
+    // (schema-v84-drop-agent-prompt-versions.test.ts). Same step:
+    // workspace_memory_recall_fts, the bigram/word index memory recall ranks
+    // by (schema-v84-memory-recall-index.test.ts).
     expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
   });
 });
