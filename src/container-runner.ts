@@ -814,14 +814,24 @@ export function applyCodexGatewayVerdict(
  * it could run, and a failing account can still serve its fallback tier.
  */
 function poolCanStillServe(): boolean {
-  const enabled = getEnabledProviders();
-  if (enabled.length === 0) return false;
-  const primaryTier = new Map(
-    enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
+  const tiers = poolServingTiers();
+  return (
+    !!tiers && tiers.some((tier) => providerPool.hasCandidateForTier(tier))
   );
-  if (providerPool.hasCandidateForTier(primaryTier)) return true;
+}
+
+/**
+ * The model tiers an automatic pool may serve a run on: each member's own
+ * model first, then the system fallback model. Null without members.
+ */
+function poolServingTiers(): ProviderTier[] | null {
+  const enabled = getEnabledProviders();
+  if (enabled.length === 0) return null;
   const fallbackModel = getSystemSettings().fallbackModel?.trim();
-  return !!fallbackModel && providerPool.hasCandidateForTier(fallbackModel);
+  return [
+    new Map(enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)])),
+    ...(fallbackModel ? [fallbackModel] : []),
+  ];
 }
 
 /** Host-process replay budget; each transient retry runs a fresh runner. */
@@ -947,20 +957,10 @@ function deferUsageLimitFailure(
   const candidates = [
     normalizeUsageLimitResetAt(output.providerRateLimitResetsAt),
   ];
-  if (allowFailover) {
-    const enabled = getEnabledProviders();
-    const fallbackModel = getSystemSettings().fallbackModel?.trim();
+  const tiers = allowFailover ? poolServingTiers() : null;
+  if (tiers) {
     candidates.push(
-      providerPool.earliestReportedRecoveryAt(
-        [
-          new Map(
-            enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
-          ),
-          ...(fallbackModel ? [fallbackModel] : []),
-        ],
-        selectedProfileId,
-        now,
-      ),
+      providerPool.earliestReportedRecoveryAt(tiers, selectedProfileId, now),
     );
   }
   const known = candidates.filter((at): at is number => at !== null);
@@ -974,7 +974,6 @@ function deferUsageLimitFailure(
     });
     if (!wait) return false;
     output.providerUsageLimitResumeAt = Date.parse(wait.resumeAt);
-    output.providerUsageLimitWaitCount = wait.waitCount;
     logger.warn(
       {
         scopeKey: waitScope.scopeKey,
@@ -1020,7 +1019,6 @@ function carryUsageLimitWait(
 ): void {
   if (decided?.providerUsageLimitResumeAt === undefined) return;
   output.providerUsageLimitResumeAt = decided.providerUsageLimitResumeAt;
-  output.providerUsageLimitWaitCount = decided.providerUsageLimitWaitCount;
 }
 
 function applyKnownProviderFailureDisposition(
@@ -1044,9 +1042,9 @@ function applyKnownProviderFailureDisposition(
 /**
  * Remember which connection served a usage event, so cache hit rates can be
  * read per connection. The usage row itself is written by the caller under
- * the same event id.
+ * the same event id. Exported for tests.
  */
-function recordUsageConnection(
+export function recordUsageConnection(
   output: ContainerOutput,
   profileId: string | null,
 ): void {

@@ -123,6 +123,7 @@ import {
 } from './task-failure-notice.js';
 import {
   clearUsageLimitWait,
+  markUsageLimitWaitResumed,
   type TaskFailureNoticeState,
 } from './runtime-state-store.js';
 import {
@@ -1453,6 +1454,14 @@ async function runTaskInner(
         )
       ) {
         waitingForUsageReset = true;
+        // task_runs owns the resume; the lane row only keeps the count.
+        markUsageLimitWaitResumed(
+          usageLimitWaitScopeKey({
+            chatJid: workspace.jid,
+            taskRunId: options?.taskRunId,
+            isScheduledTask: true,
+          }),
+        );
         error = `模型服务额度已用尽，预计 ${formatUsageLimitResumeTime(resumeAt)} 自动重试本次运行。`;
         lastOutputTime = Date.now();
         logger.warn(

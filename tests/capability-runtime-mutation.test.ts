@@ -26,8 +26,8 @@ vi.mock('../src/db.js', () => ({
 }));
 
 vi.mock('../src/runtime-state-store.js', () => ({
-  markFolderSessionsForHistoryReinjection: (folder: string, reason: string) =>
-    state.events.push(`mark:${folder}:${reason}`),
+  markFolderSessionsForHistoryReinjection: (folder: string) =>
+    state.events.push(`mark:${folder}`),
   markSessionForHistoryReinjection: () => {},
 }));
 
@@ -130,14 +130,14 @@ describe('capability runtime mutation invalidation', () => {
     // session rows it reads from are deleted.
     expect(state.events).toEqual(
       expect.arrayContaining([
-        'mark:u1-inherit-folder:capability_changed',
-        'mark:u2-custom-folder:capability_changed',
+        'mark:u1-inherit-folder',
+        'mark:u2-custom-folder',
       ]),
     );
     for (const folder of ['u1-inherit-folder', 'u2-custom-folder']) {
-      expect(
-        state.events.indexOf(`mark:${folder}:capability_changed`),
-      ).toBeLessThan(state.events.indexOf(`delete:${folder}`));
+      expect(state.events.indexOf(`mark:${folder}`)).toBeLessThan(
+        state.events.indexOf(`delete:${folder}`),
+      );
     }
     expect(state.unblocked).toEqual([
       ['web:u1-inherit-folder', 'web:u2-custom-folder'],

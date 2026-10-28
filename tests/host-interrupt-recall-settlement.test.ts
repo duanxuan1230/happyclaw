@@ -888,7 +888,7 @@ describe('startup order', () => {
     );
     expect(repairAt).toBeGreaterThan(main.indexOf('  loadState();'));
     // Before follow-up recovery (which can start Runners) and replay.
-    expect(repairAt).toBeLessThan(main.indexOf('  recoverDurableFollowUps();'));
+    expect(repairAt).toBeLessThan(main.indexOf('  recoverDurableFollowUps('));
     expect(repairAt).toBeLessThan(main.indexOf('  recoverPendingMessages();'));
     const discardAt = main.indexOf(
       'await discardWithdrawnTurnCardsAfterConnect(withdrawnTurnCardCleanups);',

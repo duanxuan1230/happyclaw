@@ -38,15 +38,16 @@ afterEach(async () => {
  * A queue whose message runs stay alive until released, like a warm runner
  * that went idle after its query. `exits` resolves a lane's run.
  */
-function harness(host = false) {
+function harness(host: boolean | ((jid: string) => boolean) = false) {
+  const isHost = typeof host === 'function' ? host : () => host;
   const queue = new GroupQueue();
-  queue.setHostModeChecker(() => host);
+  queue.setHostModeChecker(isHost);
   const exits = new Map<string, () => void>();
   const started: string[] = [];
   queue.setProcessMessagesFn(async (jid) => {
     started.push(jid);
     queue.registerProcess(jid, {} as never, {
-      containerName: host ? null : `c-${jid}`,
+      containerName: isHost(jid) ? null : `c-${jid}`,
       groupFolder: jid.replace('web:', ''),
     });
     const exit = deferred();
@@ -129,6 +130,19 @@ describe('reclaiming idle warm container runners', () => {
 
     queue.enqueueMessageCheck('web:new');
     expect(closed.mock.calls.map(([jid]) => jid)).toEqual(['web:old']);
+  });
+
+  test('an idle Host runner never gives up its process for a container lane', async () => {
+    const { queue, started, closed } = harness((jid) =>
+      jid.startsWith('web:host'),
+    );
+    await idleRunner(queue, 'web:host-idle');
+    queue.enqueueMessageCheck('web:busy');
+    await tick();
+    queue.enqueueMessageCheck('web:waiting');
+    expect(closed).not.toHaveBeenCalled();
+    expect(started).toEqual(['web:host-idle', 'web:busy']);
+    expect(queue.getStatus().waitingCount).toBe(1);
   });
 
   test('Host runners are never reclaimed and never wait for a slot', async () => {

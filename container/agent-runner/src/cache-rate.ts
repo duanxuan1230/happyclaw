@@ -7,13 +7,7 @@
  * that counts cached tokens into `input_tokens` therefore reads low; the four
  * raw numbers are always printed so that case stays recognisable.
  */
-
-interface ResultUsage {
-  input_tokens?: number;
-  output_tokens?: number;
-  cache_creation_input_tokens?: number;
-  cache_read_input_tokens?: number;
-}
+import type { SdkResultUsage } from './result-usage.js';
 
 function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
@@ -33,7 +27,7 @@ export class QueryCacheUsage {
   /** Add the usage of every SDK result message the query produces. */
   observe(sdkMessage: { type: string }): void {
     if (sdkMessage.type !== 'result') return;
-    const usage = (sdkMessage as { usage?: ResultUsage }).usage;
+    const usage = (sdkMessage as { usage?: SdkResultUsage }).usage;
     if (!usage) return;
     this.results += 1;
     this.input += count(usage.input_tokens);

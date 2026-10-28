@@ -122,6 +122,9 @@ const analyticsCache = new VersionedTtlCache<
   maxWeight: MAX_CACHED_BREAKDOWN_ROWS,
   weigh: (data) => data.breakdown.length,
 });
+const cacheRatesCache = new VersionedTtlCache<
+  ReturnType<typeof getUsageCacheRates>
+>({ maxEntries: 16, maxAgeMs: 60_000, staleGraceMs: 0 });
 const attributionsCache = new VersionedTtlCache<
   ReturnType<typeof getUsageAttributions>
 >({ maxEntries: 32, maxAgeMs: 60_000, staleGraceMs: 0 });
@@ -130,6 +133,7 @@ const attributionsCache = new VersionedTtlCache<
 export function clearUsageAnalyticsCache(): void {
   analyticsCache.clear();
   attributionsCache.clear();
+  cacheRatesCache.clear();
 }
 
 /**
@@ -218,7 +222,13 @@ usage.get('/stats', (c) => {
 usage.get('/cache', (c) => {
   const user = c.get('user') as AuthUser;
   const { window, filters } = queryContext(c, user);
-  const rates = getUsageCacheRates(filters);
+  const version = getUsageDataVersion();
+  const key = JSON.stringify(filters);
+  let rates = cacheRatesCache.get(key, version);
+  if (!rates) {
+    rates = getUsageCacheRates(filters);
+    cacheRatesCache.set(key, version, rates);
+  }
   const names = new Map(
     getProviders().map((provider) => [provider.id, provider.name]),
   );

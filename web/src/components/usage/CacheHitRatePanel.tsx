@@ -147,11 +147,6 @@ export function CacheHitRatePanel({ queryParams }: { queryParams: string }) {
             className="text-label text-foreground"
           >
             缓存命中率
-            {data && (
-              <span className="ml-2 text-title-sm tabular-nums">
-                {formatHitRate(data.summary.hitRate)}
-              </span>
-            )}
           </h3>
           <p className="mt-0.5 text-caption leading-5 text-muted-foreground">
             按 Anthropic 用量语义计算（input 不含缓存）：缓存读取 ÷（普通输入 +

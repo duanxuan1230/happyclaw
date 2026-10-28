@@ -17,7 +17,7 @@ import { logger } from './logger.js';
 import {
   clearUsageLimitWait,
   getUsageLimitWait,
-  listUsageLimitWaits,
+  listWaitingUsageLimitWaits,
   markUsageLimitWaitResumed,
   reserveUsageLimitWait,
   type UsageLimitWait,
@@ -27,9 +27,6 @@ export const USAGE_LIMIT_MAX_WAITS = 3;
 export const USAGE_LIMIT_MAX_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
 export const USAGE_LIMIT_RESUME_GRACE_MS = 60_000;
 export const USAGE_LIMIT_RESUME_JITTER_MS = 30_000;
-
-/** Lane prefix of an isolated scheduled run; resumed by task_runs, not here. */
-const TASK_RUN_SCOPE_PREFIX = 'task-run:';
 
 /** Upstream reset stamps arrive in epoch seconds or milliseconds. */
 export function normalizeUsageLimitResetAt(
@@ -67,7 +64,8 @@ export function usageLimitWaitScopeKey(input: {
   isScheduledTask?: boolean;
 }): string {
   if (input.isScheduledTask && input.taskRunId) {
-    return `${TASK_RUN_SCOPE_PREFIX}${input.taskRunId}`;
+    // Resumed by task_runs retry_wait, which marks the wait resumed at once.
+    return `task-run:${input.taskRunId}`;
   }
   return input.agentId
     ? `${input.chatJid}#agent:${input.agentId}`
@@ -84,14 +82,9 @@ export function reserveUsageLimitWaitFor(input: {
   inputKey: string;
   resetAtMs: number;
   nowMs?: number;
-  jitter?: number;
 }): UsageLimitWait | null {
   const nowMs = input.nowMs ?? Date.now();
-  const resumeAtMs = resolveUsageLimitResumeAt(
-    input.resetAtMs,
-    nowMs,
-    input.jitter,
-  );
+  const resumeAtMs = resolveUsageLimitResumeAt(input.resetAtMs, nowMs);
   if (resumeAtMs === null) {
     clearUsageLimitWait(input.scopeKey);
     return null;
@@ -106,28 +99,32 @@ export function reserveUsageLimitWaitFor(input: {
   });
 }
 
+const RESUME_TIME_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: TIMEZONE,
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+function dateParts(date: Date): Record<string, string> {
+  return Object.fromEntries(
+    RESUME_TIME_FORMAT.formatToParts(date).map((part) => [
+      part.type,
+      part.value,
+    ]),
+  );
+}
+
 /** `HH:MM` today, `M月D日 HH:MM` otherwise, in the scheduler's time zone. */
 export function formatUsageLimitResumeTime(
   resumeAt: string,
   now = new Date(),
 ): string {
-  const at = new Date(resumeAt);
-  const parts = (date: Date) =>
-    Object.fromEntries(
-      new Intl.DateTimeFormat('en-CA', {
-        timeZone: TIMEZONE,
-        year: 'numeric',
-        month: 'numeric',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hourCycle: 'h23',
-      })
-        .formatToParts(date)
-        .map((part) => [part.type, part.value]),
-    );
-  const target = parts(at);
-  const today = parts(now);
+  const target = dateParts(new Date(resumeAt));
+  const today = dateParts(now);
   const time = `${target.hour}:${target.minute}`;
   return target.year === today.year &&
     target.month === today.month &&
@@ -175,7 +172,6 @@ function disarm(laneJid: string): void {
 
 /** Resume the lane once its wait is over (re-armed for very long waits). */
 export function armUsageLimitResume(wait: UsageLimitWait): void {
-  if (wait.scopeKey.startsWith(TASK_RUN_SCOPE_PREFIX)) return;
   disarm(wait.scopeKey);
   const delay = Math.min(
     MAX_TIMER_DELAY_MS,
@@ -225,12 +221,8 @@ export function endUsageLimitWait(
   const wait = getUsageLimitWait(laneJid);
   if (!wait) return null;
   disarm(laneJid);
-  if (reason === 'new_input') {
-    if (wait.state !== 'waiting') return null;
-    markUsageLimitWaitResumed(laneJid);
-  } else {
-    clearUsageLimitWait(laneJid);
-  }
+  if (reason === 'new_input') markUsageLimitWaitResumed(laneJid);
+  else clearUsageLimitWait(laneJid);
   if (wait.state !== 'waiting') return null;
   host?.broadcast(laneJid, null);
   if (reason === 'discarded') host?.discardQueuedInput(laneJid);
@@ -239,21 +231,9 @@ export function endUsageLimitWait(
 
 /** A healthy turn in the lane: its consecutive-wait count starts over. */
 export function settleUsageLimitWaitAfterSuccess(laneJid: string): void {
-  const wait = getUsageLimitWait(laneJid);
-  if (!wait) return;
-  // A scheduled run resumes through task_runs and never reads 'resumed'.
-  if (wait.state === 'resumed' || laneJid.startsWith(TASK_RUN_SCOPE_PREFIX)) {
+  if (getUsageLimitWait(laneJid)?.state === 'resumed') {
     clearUsageLimitWait(laneJid);
   }
-}
-
-/** Whether the lane is parked and its resume time has not come yet. */
-export function isUsageLimitWaitPending(
-  laneJid: string,
-  now = Date.now(),
-): boolean {
-  const wait = getUsageLimitWait(laneJid);
-  return !!wait && wait.state === 'waiting' && Date.parse(wait.resumeAt) > now;
 }
 
 /**
@@ -263,8 +243,7 @@ export function isUsageLimitWaitPending(
  */
 export function rearmUsageLimitWaitsAfterRestart(now = Date.now()): string[] {
   const pending: string[] = [];
-  for (const wait of listUsageLimitWaits('waiting')) {
-    if (wait.scopeKey.startsWith(TASK_RUN_SCOPE_PREFIX)) continue;
+  for (const wait of listWaitingUsageLimitWaits()) {
     if (Date.parse(wait.resumeAt) > now) {
       armUsageLimitResume(wait);
       pending.push(wait.scopeKey);
@@ -279,13 +258,9 @@ export function rearmUsageLimitWaitsAfterRestart(now = Date.now()): string[] {
 export function listPendingUsageLimitWaits(now = Date.now()): UsageLimitWait[] {
   let waits: UsageLimitWait[];
   try {
-    waits = listUsageLimitWaits('waiting');
+    waits = listWaitingUsageLimitWaits();
   } catch {
     return []; // store not bound (early startup, isolated tests)
   }
-  return waits.filter(
-    (wait) =>
-      !wait.scopeKey.startsWith(TASK_RUN_SCOPE_PREFIX) &&
-      Date.parse(wait.resumeAt) > now,
-  );
+  return waits.filter((wait) => Date.parse(wait.resumeAt) > now);
 }

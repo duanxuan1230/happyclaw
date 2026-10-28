@@ -164,6 +164,42 @@ describe('/api/usage/cache', () => {
     expect(body.daily).toEqual([]);
   });
 
+  test('a runner records the connection of the usage events it serves', async () => {
+    const { recordUsageConnection } =
+      await import('../src/container-runner.js');
+    seed('cache-a3', 'user-a', 'haiku', { input: 1, creation: 0, read: 3 });
+    const usageOutput = (eventId: string) =>
+      ({
+        status: 'stream',
+        result: null,
+        streamEvent: {
+          eventType: 'usage',
+          usage: {
+            eventId,
+            inputTokens: 1,
+            outputTokens: 0,
+            cacheReadInputTokens: 3,
+            cacheCreationInputTokens: 0,
+            reasoningTokens: 0,
+            costUSD: 0,
+            durationMs: 0,
+            numTurns: 1,
+          },
+        },
+      }) as never;
+    recordUsageConnection(usageOutput('cache-a3'), 'conn-work');
+    // No connection selected: nothing to record.
+    recordUsageConnection(usageOutput('cache-a3-none'), null);
+    const rows = store.getUsageCacheRates({
+      from: today,
+      to: today,
+      userId: 'user-a',
+    }).connections;
+    expect(rows.find((row) => row.key === 'conn-work')?.cacheReadTokens).toBe(
+      603,
+    );
+  });
+
   test('both runners record the connection of every usage event they serve', () => {
     const source = fs.readFileSync('src/container-runner.ts', 'utf8');
     expect(

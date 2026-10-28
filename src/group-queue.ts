@@ -226,12 +226,14 @@ interface GroupState {
   /** The last idle came from a truncation/auto continuation, which may still
    * be finishing inside the runner. Never reclaimed then. */
   idleFromContinuation?: boolean;
-  /** A _close was written to free this idle container slot for waiting work. */
-  reclaimRequested?: boolean;
-  /** Close once the current query ends instead of serving another one. */
-  closeAfterQuery?: boolean;
-  /** Called with the runner's JID after its teardown, before the next drain. */
-  afterRunnerExit?: Array<(runnerJid: string) => void>;
+  /**
+   * The runner was asked to exit and takes no further query: `reclaim` freed
+   * its idle container slot for waiting work, `after_query` closes it once
+   * the query in flight ends.
+   */
+  closing?: 'reclaim' | 'after_query' | null;
+  /** Runs with the runner's JID after its teardown, before the next drain. */
+  afterRunnerExit?: ((runnerJid: string) => void) | null;
 }
 
 type ActiveGroupState = GroupState & { groupFolder: string };
@@ -980,11 +982,6 @@ export class GroupQueue {
     return null;
   }
 
-  /** The runner was asked to exit and must not start another query. */
-  private isClosingRunner(state: GroupState): boolean {
-    return state.closeAfterQuery === true || state.reclaimRequested === true;
-  }
-
   /**
    * Container slots bound execution, not warm runners. When work waits for a
    * slot and the container pool is full, close the runner that has been idle
@@ -999,35 +996,44 @@ export class GroupQueue {
     ) {
       return false;
     }
-    // Only lanes with no runner of their own need a new slot.
+    let closing = 0;
+    const idle: Array<{ jid: string; state: GroupState }> = [];
+    for (const [jid, state] of this.groups) {
+      if (state.active && state.closing === 'reclaim') closing++;
+      if (this.isIdleContainerRunner(jid, state)) idle.push({ jid, state });
+    }
+    if (idle.length === 0) return false;
+    // Only lanes with no runner of their own need a new slot, and each runner
+    // already closing frees one.
+    const runnerKeys = new Set<string>();
+    for (const [jid, state] of this.groups) {
+      if (state.active) runnerKeys.add(this.getSerializationKey(jid));
+    }
     let demand = 0;
     for (const jid of this.waitingGroups) {
       const state = this.groups.get(jid);
       if (
         state &&
         (state.pendingMessages || state.pendingTasks.length > 0) &&
+        !runnerKeys.has(this.getSerializationKey(jid)) &&
         !this.isHostMode(jid) &&
-        !this.isMutationPaused(jid) &&
-        !this.findActiveRunnerFor(jid)
+        !this.isMutationPaused(jid)
       ) {
         demand++;
       }
     }
-    let closing = 0;
-    let victim: { jid: string; idleSince: number } | null = null;
-    for (const [jid, state] of this.groups) {
-      if (state.active && state.reclaimRequested) closing++;
-      if (!this.isReclaimableIdleRunner(jid, state)) continue;
-      const idleSince = state.idleSince ?? 0;
-      if (!victim || idleSince < victim.idleSince) victim = { jid, idleSince };
-    }
-    // Each runner already closing frees one slot for one waiting lane.
-    if (!victim || closing >= demand) return false;
-    this.getGroup(victim.jid).reclaimRequested = true;
+    if (closing >= demand) return false;
+    // Longest idle first; the costlier checks run only until one passes.
+    idle.sort((a, b) => (a.state.idleSince ?? 0) - (b.state.idleSince ?? 0));
+    const victim = idle.find(({ jid, state }) =>
+      this.owesNoWorkOutsideQueue(jid, state),
+    );
+    if (!victim) return false;
+    victim.state.closing = 'reclaim';
     logger.info(
       {
         groupJid: victim.jid,
-        idleMs: Date.now() - victim.idleSince,
+        idleMs: Date.now() - (victim.state.idleSince ?? Date.now()),
         waitingCount: demand,
       },
       'Closing the longest-idle container runner to free a slot for waiting work',
@@ -1036,32 +1042,35 @@ export class GroupQueue {
     return true;
   }
 
-  private isReclaimableIdleRunner(jid: string, state: GroupState): boolean {
-    if (
-      !state.active ||
-      state.runnerRuntime !== 'container' ||
+  /** An idle warm container runner whose GroupQueue state owes nothing. */
+  private isIdleContainerRunner(jid: string, state: GroupState): boolean {
+    return (
+      state.active &&
+      state.runnerRuntime === 'container' &&
       // Scheduled-task runners close themselves when their run ends.
-      (state.activeRunnerIsTask && !jid.includes('#agent:')) ||
-      state.queryInFlight ||
-      state.idleSince == null ||
-      state.idleFromContinuation ||
-      this.isClosingRunner(state) ||
-      state.stopRequested ||
-      state.restarting ||
-      state.drainSentinelWritten ||
-      state.pendingMessages ||
-      state.pendingTasks.length > 0 ||
-      state.hasIpcInjectedMessages ||
-      state.ipcOwedSinceAt !== null ||
-      state.pendingIpcDeliveries.size > 0 ||
-      !state.groupFolder ||
-      this.isMutationPaused(jid)
-    ) {
-      return false;
-    }
+      (!state.activeRunnerIsTask || jid.includes('#agent:')) &&
+      !state.queryInFlight &&
+      state.idleSince != null &&
+      !state.idleFromContinuation &&
+      !state.closing &&
+      !state.stopRequested &&
+      !state.restarting &&
+      !state.drainSentinelWritten &&
+      !state.pendingMessages &&
+      state.pendingTasks.length === 0 &&
+      !state.hasIpcInjectedMessages &&
+      state.ipcOwedSinceAt === null &&
+      state.pendingIpcDeliveries.size === 0 &&
+      !!state.groupFolder &&
+      !this.isMutationPaused(jid)
+    );
+  }
+
+  /** No IPC input left on disk and nothing the host reports for the lane. */
+  private owesNoWorkOutsideQueue(jid: string, state: GroupState): boolean {
     if (
       this.hasRemainingIpcMessages(
-        state.groupFolder,
+        state.groupFolder!,
         state.agentId,
         state.taskRunId,
       )
@@ -1109,28 +1118,23 @@ export class GroupQueue {
     onRunnerExit: (runnerJid: string) => void,
   ): void {
     const state = this.getGroup(runnerJid);
-    state.closeAfterQuery = true;
-    state.afterRunnerExit ??= [];
-    if (!state.afterRunnerExit.includes(onRunnerExit)) {
-      state.afterRunnerExit.push(onRunnerExit);
-    }
+    state.closing = 'after_query';
+    // Repeated deferrals in one turn all want the same clean-up once.
+    state.afterRunnerExit ??= onRunnerExit;
     if (!state.queryInFlight) this.closeStdin(runnerJid);
   }
 
   /** Reset per-runner close bookkeeping and run the after-exit callbacks. */
   private settleRunnerExit(groupJid: string, state: GroupState): void {
-    const callbacks = state.afterRunnerExit ?? [];
-    state.afterRunnerExit = [];
-    state.closeAfterQuery = false;
-    state.reclaimRequested = false;
+    const callback = state.afterRunnerExit;
+    state.afterRunnerExit = null;
+    state.closing = null;
     state.idleSince = null;
     state.idleFromContinuation = false;
-    for (const callback of callbacks) {
-      try {
-        callback(groupJid);
-      } catch (err) {
-        logger.error({ groupJid, err }, 'After-runner-exit callback failed');
-      }
+    try {
+      callback?.(groupJid);
+    } catch (err) {
+      logger.error({ groupJid, err }, 'After-runner-exit callback failed');
     }
   }
 
@@ -1389,7 +1393,7 @@ export class GroupQueue {
     state.currentQueryCoveredMessageIds = new Set();
     state.idleSince = Date.now();
     state.idleFromContinuation = options?.preserveIpcDebt === true;
-    if (state.closeAfterQuery) this.closeStdin(groupJid);
+    if (state.closing === 'after_query') this.closeStdin(groupJid);
     if (!completedQueryId) return;
     // Publish the terminal event before the legacy idle callback. The callback
     // may synchronously reserve/announce the next queued query; ordering the
@@ -1453,7 +1457,7 @@ export class GroupQueue {
    * durable queued follow-up while it is being prepared for IPC injection. */
   reserveNextQuery(groupJid: string): string | null {
     const state = this.resolveActiveState(groupJid);
-    if (!state?.active || state.queryInFlight || this.isClosingRunner(state)) {
+    if (!state?.active || state.queryInFlight || state.closing) {
       return null;
     }
     state.queryInFlight = true;
@@ -1949,7 +1953,7 @@ export class GroupQueue {
     if (!state) return 'no_active';
     // A runner on its way out must not take a new turn; the caller's cold
     // start runs once it has exited.
-    if (this.isClosingRunner(state)) return 'no_active';
+    if (state.closing) return 'no_active';
 
     // Container credentials are immutable process environment. Never inject a
     // turn from Bot B into a warm runner that started with Bot A (or with no

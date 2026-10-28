@@ -7,6 +7,7 @@
  * db.ts binds this module to its connection; no other module touches these
  * tables directly.
  */
+import type { UsageQueryFilters } from './db.js';
 
 interface SqliteRunResult {
   changes: number;
@@ -25,15 +26,27 @@ interface SqliteDatabase {
 }
 
 let database: SqliteDatabase | null = null;
+/** Prepared statements of the bound connection; per-turn paths reuse them. */
+const statements = new Map<string, SqliteStatement>();
 
 function requireDatabase(): SqliteDatabase {
   if (!database) throw new Error('Runtime state store is not initialized');
   return database;
 }
 
+function stmt(sql: string): SqliteStatement {
+  let statement = statements.get(sql);
+  if (!statement) {
+    statement = requireDatabase().prepare(sql);
+    statements.set(sql, statement);
+  }
+  return statement;
+}
+
 /** Create the tables (idempotent) and bind the store; null unbinds it. */
 export function initRuntimeStateStore(db: SqliteDatabase | null): void {
   database = db;
+  statements.clear();
   if (!db) return;
   db.exec(`
     CREATE TABLE IF NOT EXISTS usage_limit_waits (
@@ -49,7 +62,6 @@ export function initRuntimeStateStore(db: SqliteDatabase | null): void {
     CREATE TABLE IF NOT EXISTS session_history_reinjections (
       group_folder TEXT NOT NULL,
       agent_id TEXT NOT NULL DEFAULT '',
-      reason TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (group_folder, agent_id)
     );
@@ -71,8 +83,6 @@ export function initRuntimeStateStore(db: SqliteDatabase | null): void {
 
 // ─── Usage-limit waits ─────────────────────────────────────
 
-export type UsageLimitWaitState = 'waiting' | 'resumed';
-
 export interface UsageLimitWait {
   /** Queue lane: a chat JID, `{jid}#agent:{id}`, or `task-run:{runId}`. */
   scopeKey: string;
@@ -82,7 +92,8 @@ export interface UsageLimitWait {
   waitCount: number;
   resetAt: string;
   resumeAt: string;
-  state: UsageLimitWaitState;
+  /** `resumed` keeps the count while the parked input runs again. */
+  state: 'waiting' | 'resumed';
   createdAt: string;
   updatedAt: string;
 }
@@ -100,6 +111,9 @@ function toUsageLimitWait(row: Record<string, unknown>): UsageLimitWait {
   };
 }
 
+const SELECT_WAIT = 'SELECT * FROM usage_limit_waits WHERE scope_key = ?';
+const DELETE_WAIT = 'DELETE FROM usage_limit_waits WHERE scope_key = ?';
+
 /**
  * Count one more consecutive wait for a lane and record when it resumes.
  * Returns null, and forgets the lane, once the wait budget is spent: the
@@ -113,20 +127,17 @@ export function reserveUsageLimitWait(input: {
   maxWaits: number;
   now?: string;
 }): UsageLimitWait | null {
-  const db = requireDatabase();
   const now = input.now ?? new Date().toISOString();
-  return db.transaction(() => {
-    const row = db
-      .prepare('SELECT * FROM usage_limit_waits WHERE scope_key = ?')
-      .get(input.scopeKey) as Record<string, unknown> | undefined;
+  return requireDatabase().transaction(() => {
+    const row = stmt(SELECT_WAIT).get(input.scopeKey) as
+      | Record<string, unknown>
+      | undefined;
     const waitCount = (row ? Number(row.wait_count) || 0 : 0) + 1;
     if (waitCount > input.maxWaits) {
-      db.prepare('DELETE FROM usage_limit_waits WHERE scope_key = ?').run(
-        input.scopeKey,
-      );
+      stmt(DELETE_WAIT).run(input.scopeKey);
       return null;
     }
-    db.prepare(
+    stmt(
       `INSERT INTO usage_limit_waits (
          scope_key, input_key, wait_count, reset_at, resume_at, state,
          created_at, updated_at
@@ -148,76 +159,48 @@ export function reserveUsageLimitWait(input: {
       now,
     );
     return toUsageLimitWait(
-      db
-        .prepare('SELECT * FROM usage_limit_waits WHERE scope_key = ?')
-        .get(input.scopeKey) as Record<string, unknown>,
+      stmt(SELECT_WAIT).get(input.scopeKey) as Record<string, unknown>,
     );
   })();
 }
 
 export function getUsageLimitWait(scopeKey: string): UsageLimitWait | null {
-  const row = requireDatabase()
-    .prepare('SELECT * FROM usage_limit_waits WHERE scope_key = ?')
-    .get(scopeKey) as Record<string, unknown> | undefined;
+  const row = stmt(SELECT_WAIT).get(scopeKey) as
+    | Record<string, unknown>
+    | undefined;
   return row ? toUsageLimitWait(row) : null;
 }
 
-export function listUsageLimitWaits(
-  state?: UsageLimitWaitState,
-): UsageLimitWait[] {
-  const db = requireDatabase();
-  const rows = (
-    state
-      ? db
-          .prepare(
-            'SELECT * FROM usage_limit_waits WHERE state = ? ORDER BY resume_at',
-          )
-          .all(state)
-      : db.prepare('SELECT * FROM usage_limit_waits ORDER BY resume_at').all()
-  ) as Array<Record<string, unknown>>;
-  return rows.map(toUsageLimitWait);
+/** Lanes whose parked input has not started again yet. */
+export function listWaitingUsageLimitWaits(): UsageLimitWait[] {
+  return (
+    stmt(
+      "SELECT * FROM usage_limit_waits WHERE state = 'waiting' ORDER BY resume_at",
+    ).all() as Array<Record<string, unknown>>
+  ).map(toUsageLimitWait);
 }
 
 /** The parked input started again; keep the count until a healthy turn. */
 export function markUsageLimitWaitResumed(scopeKey: string): boolean {
   return (
-    requireDatabase()
-      .prepare(
-        `UPDATE usage_limit_waits SET state = 'resumed', updated_at = ?
-         WHERE scope_key = ? AND state = 'waiting'`,
-      )
-      .run(new Date().toISOString(), scopeKey).changes === 1
+    stmt(
+      `UPDATE usage_limit_waits SET state = 'resumed', updated_at = ?
+       WHERE scope_key = ? AND state = 'waiting'`,
+    ).run(new Date().toISOString(), scopeKey).changes === 1
   );
 }
 
-export function clearUsageLimitWait(scopeKey: string): UsageLimitWait | null {
-  const db = requireDatabase();
-  return db.transaction(() => {
-    const row = db
-      .prepare('SELECT * FROM usage_limit_waits WHERE scope_key = ?')
-      .get(scopeKey) as Record<string, unknown> | undefined;
-    if (!row) return null;
-    db.prepare('DELETE FROM usage_limit_waits WHERE scope_key = ?').run(
-      scopeKey,
-    );
-    return toUsageLimitWait(row);
-  })();
-}
-
-/** Every wait of a chat JID and of the Runtime Sessions under it. */
-export function listUsageLimitWaitsForChat(chatJid: string): UsageLimitWait[] {
-  const rows = requireDatabase()
-    .prepare(
-      `SELECT * FROM usage_limit_waits
-       WHERE scope_key = ? OR substr(scope_key, 1, ?) = ?`,
-    )
-    .all(chatJid, chatJid.length + 7, `${chatJid}#agent:`) as Array<
-    Record<string, unknown>
-  >;
-  return rows.map(toUsageLimitWait);
+export function clearUsageLimitWait(scopeKey: string): void {
+  stmt(DELETE_WAIT).run(scopeKey);
 }
 
 // ─── Session history re-injection ──────────────────────────
+
+const UPSERT_REINJECTION = `INSERT INTO session_history_reinjections (
+    group_folder, agent_id, created_at
+  ) VALUES (?, ?, ?)
+  ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+    created_at = excluded.created_at`;
 
 /**
  * Remember that every conversation session of a folder holding an SDK
@@ -227,68 +210,47 @@ export function listUsageLimitWaitsForChat(chatJid: string): UsageLimitWait[] {
  */
 export function markFolderSessionsForHistoryReinjection(
   groupFolder: string,
-  reason: string,
 ): number {
-  return requireDatabase()
-    .prepare(
-      `INSERT INTO session_history_reinjections (
-         group_folder, agent_id, reason, created_at
-       )
-       SELECT group_folder, agent_id, ?, ? FROM sessions
-       WHERE group_folder = ? AND agent_id NOT LIKE 'task-%'
-       ON CONFLICT(group_folder, agent_id) DO UPDATE SET
-         reason = excluded.reason, created_at = excluded.created_at`,
-    )
-    .run(reason, new Date().toISOString(), groupFolder).changes;
+  return stmt(
+    `INSERT INTO session_history_reinjections (group_folder, agent_id, created_at)
+     SELECT group_folder, agent_id, ? FROM sessions
+     WHERE group_folder = ? AND agent_id NOT LIKE 'task-%'
+     ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+       created_at = excluded.created_at`,
+  ).run(new Date().toISOString(), groupFolder).changes;
 }
 
 /** Owe one session (`''` is the main session) a history hand-off. */
 export function markSessionForHistoryReinjection(
   groupFolder: string,
   agentId: string | null | undefined,
-  reason: string,
 ): void {
-  requireDatabase()
-    .prepare(
-      `INSERT INTO session_history_reinjections (
-         group_folder, agent_id, reason, created_at
-       ) VALUES (?, ?, ?, ?)
-       ON CONFLICT(group_folder, agent_id) DO UPDATE SET
-         reason = excluded.reason, created_at = excluded.created_at`,
-    )
-    .run(groupFolder, agentId || '', reason, new Date().toISOString());
+  stmt(UPSERT_REINJECTION).run(
+    groupFolder,
+    agentId || '',
+    new Date().toISOString(),
+  );
 }
 
 /**
- * The reason a session owes a history hand-off, or null. The marker lives
- * until the session holds an SDK session again: a turn that fails before it
+ * Whether a session owes a history hand-off. The marker lives until the
+ * session holds an SDK session again: a turn that fails before it
  * establishes one re-injects on its retry, and one that succeeded clears it.
  */
 export function takeSessionHistoryReinjection(
   groupFolder: string,
   agentId: string | null | undefined,
   sessionEstablished: boolean,
-): string | null {
-  const db = requireDatabase();
+): boolean {
   const key = agentId || '';
-  if (sessionEstablished) {
-    db.prepare(
-      'DELETE FROM session_history_reinjections WHERE group_folder = ? AND agent_id = ?',
-    ).run(groupFolder, key);
-    return null;
-  }
-  const row = db
-    .prepare(
-      'SELECT reason FROM session_history_reinjections WHERE group_folder = ? AND agent_id = ?',
-    )
-    .get(groupFolder, key) as { reason: string } | undefined;
-  return row?.reason ?? null;
-}
-
-export function clearSessionHistoryReinjections(groupFolder: string): void {
-  requireDatabase()
-    .prepare('DELETE FROM session_history_reinjections WHERE group_folder = ?')
-    .run(groupFolder);
+  const owed = !!stmt(
+    'SELECT 1 FROM session_history_reinjections WHERE group_folder = ? AND agent_id = ?',
+  ).get(groupFolder, key);
+  if (!owed || !sessionEstablished) return owed;
+  stmt(
+    'DELETE FROM session_history_reinjections WHERE group_folder = ? AND agent_id = ?',
+  ).run(groupFolder, key);
+  return false;
 }
 
 // ─── Scheduled-task failure notices ────────────────────────
@@ -315,6 +277,8 @@ function toTaskFailureNotice(
   };
 }
 
+const SELECT_FAILURE = 'SELECT * FROM task_failure_notices WHERE task_id = ?';
+
 /**
  * Record a failed run. `notify` is true for the first failure of a streak
  * and whenever the normalized error changes; a repeat of the error already
@@ -326,20 +290,19 @@ export function recordTaskFailure(
   errorText: string,
   now = new Date().toISOString(),
 ): { notify: boolean; state: TaskFailureNoticeState } {
-  const db = requireDatabase();
-  return db.transaction(() => {
-    const row = db
-      .prepare('SELECT * FROM task_failure_notices WHERE task_id = ?')
-      .get(taskId) as Record<string, unknown> | undefined;
+  return requireDatabase().transaction(() => {
+    const row = stmt(SELECT_FAILURE).get(taskId) as
+      | Record<string, unknown>
+      | undefined;
     const repeat = !!row && String(row.error_key) === errorKey;
     if (repeat) {
-      db.prepare(
+      stmt(
         `UPDATE task_failure_notices
          SET failure_count = failure_count + 1, last_failed_at = ?
          WHERE task_id = ?`,
       ).run(now, taskId);
     } else {
-      db.prepare(
+      stmt(
         `INSERT INTO task_failure_notices (
            task_id, error_key, error_text, failure_count,
            first_failed_at, last_failed_at
@@ -355,9 +318,7 @@ export function recordTaskFailure(
     return {
       notify: !repeat,
       state: toTaskFailureNotice(
-        db
-          .prepare('SELECT * FROM task_failure_notices WHERE task_id = ?')
-          .get(taskId) as Record<string, unknown>,
+        stmt(SELECT_FAILURE).get(taskId) as Record<string, unknown>,
       ),
     };
   })();
@@ -367,15 +328,12 @@ export function recordTaskFailure(
 export function clearTaskFailure(
   taskId: string,
 ): TaskFailureNoticeState | null {
-  const db = requireDatabase();
-  return db.transaction(() => {
-    const row = db
-      .prepare('SELECT * FROM task_failure_notices WHERE task_id = ?')
-      .get(taskId) as Record<string, unknown> | undefined;
+  return requireDatabase().transaction(() => {
+    const row = stmt(SELECT_FAILURE).get(taskId) as
+      | Record<string, unknown>
+      | undefined;
     if (!row) return null;
-    db.prepare('DELETE FROM task_failure_notices WHERE task_id = ?').run(
-      taskId,
-    );
+    stmt('DELETE FROM task_failure_notices WHERE task_id = ?').run(taskId);
     return toTaskFailureNotice(row);
   })();
 }
@@ -388,22 +346,10 @@ export function recordUsageEventConnection(
   providerId: string,
 ): void {
   if (!eventId || !providerId) return;
-  requireDatabase()
-    .prepare(
-      `INSERT OR IGNORE INTO usage_event_connections (event_id, provider_id, created_at)
-       VALUES (?, ?, ?)`,
-    )
-    .run(eventId, providerId, new Date().toISOString());
-}
-
-export interface UsageCacheFilters {
-  from: string;
-  to: string;
-  userId?: string;
-  model?: string;
-  agentId?: string;
-  groupFolder?: string;
-  source?: string;
+  stmt(
+    `INSERT OR IGNORE INTO usage_event_connections (event_id, provider_id, created_at)
+     VALUES (?, ?, ?)`,
+  ).run(eventId, providerId, new Date().toISOString());
 }
 
 export interface UsageCacheRateRow {
@@ -415,20 +361,11 @@ export interface UsageCacheRateRow {
   hitRate: number | null;
 }
 
-export function cacheHitRate(
-  inputTokens: number,
-  cacheCreationTokens: number,
-  cacheReadTokens: number,
-): number | null {
-  const denominator = inputTokens + cacheCreationTokens + cacheReadTokens;
-  return denominator > 0 ? cacheReadTokens / denominator : null;
-}
-
-function buildCacheWhere(filters: UsageCacheFilters): {
+function buildCacheWhere(filters: UsageQueryFilters): {
   sql: string;
   params: unknown[];
 } {
-  // Same filter semantics as the usage analytics in db.ts.
+  // Mirrors db.ts buildUsageWhere (not exported), so /cache and /stats agree.
   const conditions = ['r.usage_date >= ?', 'r.usage_date <= ?'];
   const params: unknown[] = [filters.from, filters.to];
   const add = (column: string, value?: string) => {
@@ -446,13 +383,12 @@ function buildCacheWhere(filters: UsageCacheFilters): {
 }
 
 /** Prompt-cache hit rates of usage_records by day, model and connection. */
-export function getUsageCacheRates(filters: UsageCacheFilters): {
+export function getUsageCacheRates(filters: UsageQueryFilters): {
   summary: Omit<UsageCacheRateRow, 'key'>;
   daily: UsageCacheRateRow[];
   models: UsageCacheRateRow[];
   connections: UsageCacheRateRow[];
 } {
-  const db = requireDatabase();
   const where = buildCacheWhere(filters);
   const select = `COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
     COALESCE(SUM(r.cache_creation_input_tokens), 0) AS cache_creation_tokens,
@@ -461,17 +397,18 @@ export function getUsageCacheRates(filters: UsageCacheFilters): {
     const inputTokens = Number(row.input_tokens) || 0;
     const cacheCreationTokens = Number(row.cache_creation_tokens) || 0;
     const cacheReadTokens = Number(row.cache_read_tokens) || 0;
+    const prompt = inputTokens + cacheCreationTokens + cacheReadTokens;
     return {
       key: String(row.key ?? ''),
       inputTokens,
       cacheCreationTokens,
       cacheReadTokens,
-      hitRate: cacheHitRate(inputTokens, cacheCreationTokens, cacheReadTokens),
+      hitRate: prompt > 0 ? cacheReadTokens / prompt : null,
     };
   };
   const grouped = (keyExpression: string, join = ''): UsageCacheRateRow[] =>
     (
-      db
+      requireDatabase()
         .prepare(
           `SELECT ${keyExpression} AS key, ${select}
            FROM usage_records r ${join}
@@ -481,7 +418,7 @@ export function getUsageCacheRates(filters: UsageCacheFilters): {
         .all(...where.params) as Array<Record<string, unknown>>
     ).map(toRow);
   const { key: _key, ...summary } = toRow(
-    db
+    requireDatabase()
       .prepare(
         `SELECT '' AS key, ${select} FROM usage_records r WHERE ${where.sql}`,
       )

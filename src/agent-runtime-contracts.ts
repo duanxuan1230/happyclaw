@@ -44,11 +44,9 @@ export interface ContainerOutput {
   providerFailureTerminal?: boolean;
   /**
    * Host-only. Set on a non-terminal usage-limit failure that waits for the
-   * reset instead of ending the input: when to resume (epoch ms) and how many
-   * consecutive waits the lane has used.
+   * reset instead of ending the input: when to resume (epoch ms).
    */
   providerUsageLimitResumeAt?: number;
-  providerUsageLimitWaitCount?: number;
   providerFailureRetrying?: boolean;
   providerFailureMaintenance?: boolean;
   providerLivenessTimeout?: boolean;

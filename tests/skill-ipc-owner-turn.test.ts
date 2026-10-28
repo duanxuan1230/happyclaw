@@ -148,7 +148,7 @@ describe('install_skill / uninstall_skill only from the owner’s own turn', () 
     ]) {
       const body = clauses[name];
       expect(body).toBeDefined();
-      const guard = body.indexOf('skillMutationTurnRejectionFor(');
+      const guard = body.indexOf('refuseSkillMutationFromNonOwnerTurn(');
       expect(guard).toBeGreaterThan(-1);
       expect(guard).toBeLessThan(body.indexOf(mutate));
     }

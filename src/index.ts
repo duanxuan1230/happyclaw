@@ -677,7 +677,6 @@ import {
   endUsageLimitWait,
   formatUsageLimitResumeTime,
   formatUsageLimitWaitNotice,
-  isUsageLimitWaitPending,
   listPendingUsageLimitWaits,
   rearmUsageLimitWaitsAfterRestart,
 } from './usage-limit-wait.js';
@@ -2228,12 +2227,18 @@ function steerQueuedFollowUpBatch(
   };
 }
 
-/** Hand a lane's durable queue to the cold-start reader as one batch. */
-function releaseQueuedFollowUpsToColdReader(chatJid: string): void {
+/**
+ * Hand a lane's durable queue to the cold-start reader as one batch and, by
+ * default, schedule the run that reads it. Returns whether any was released.
+ */
+function releaseQueuedFollowUpsToColdReader(
+  chatJid: string,
+  options: { enqueue?: boolean } = {},
+): boolean {
   withdrawQueuedInputsOutsideAudience(chatJid);
   const recoveryRunId = `recovery:${crypto.randomUUID()}`;
   const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
-  if (items.length === 0) return;
+  if (items.length === 0) return false;
   const deliveryUpdatedAt = new Date().toISOString();
   const released = releaseQueuedFollowUpBatch(
     items,
@@ -2246,13 +2251,18 @@ function releaseQueuedFollowUpsToColdReader(chatJid: string): void {
     recoveryRunId,
     deliveryUpdatedAt,
   );
-  enqueueReleasedFollowUp(items[items.length - 1]);
+  if (options.enqueue !== false) {
+    enqueueReleasedFollowUp(items[items.length - 1]);
+  }
+  return released;
 }
 
-function recoverDurableFollowUps(): void {
+/** `waitingLanes` resume on their own usage-limit timers instead. */
+function recoverDurableFollowUps(
+  waitingLanes: ReadonlySet<string> = new Set(),
+): void {
   for (const chatJid of getQueuedFollowUpChatJids()) {
-    // A lane waiting for a usage-limit reset resumes on its own timer.
-    if (isUsageLimitWaitPending(chatJid)) continue;
+    if (waitingLanes.has(chatJid)) continue;
     releaseQueuedFollowUpsToColdReader(chatJid);
   }
 }
@@ -2333,21 +2343,15 @@ function parkInputForUsageLimitWait(input: {
   return `额度用尽，预计 ${formatUsageLimitResumeTime(wait.resumeAt)} 自动继续`;
 }
 
-/** New input ends the lane's wait; returns true when parked inputs rejoin. */
+/**
+ * New input ends the lane's wait: its parked inputs join the batch the
+ * caller is about to read. Returns true when they were released.
+ */
 function releaseUsageLimitWaitForNewInput(laneJid: string): boolean {
-  if (!endUsageLimitWait(laneJid, 'new_input')) return false;
-  const runId = `usage-limit:${crypto.randomUUID()}`;
-  const items = claimNextQueuedFollowUpBatch(laneJid, runId);
-  if (items.length === 0) return false;
-  const deliveryUpdatedAt = new Date().toISOString();
-  const released = releaseQueuedFollowUpBatch(items, runId, deliveryUpdatedAt);
-  broadcastFollowUpBatchUpdate(
-    laneJid,
-    released ? items : [],
-    runId,
-    deliveryUpdatedAt,
+  return (
+    !!endUsageLimitWait(laneJid, 'new_input') &&
+    releaseQueuedFollowUpsToColdReader(laneJid, { enqueue: false })
   );
-  return released;
 }
 
 /** A discarded wait takes the input it parked along. */
@@ -7474,7 +7478,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Recovery: injected recent conversation history into prompt',
       );
     }
-  } else if (resetForAgentProfile || resetForInteractionMode) {
+  } else if (
+    resetForAgentProfile ||
+    resetForInteractionMode ||
+    // A Skill/MCP change reset the SDK session; the conversation goes on.
+    takeSessionHistoryReinjection(
+      effectiveGroup.folder,
+      null,
+      !!sessions[effectiveGroup.folder],
+    )
+  ) {
     historyContext = buildRecentConversationHistoryContext(
       chatJid,
       new Set(missedMessages.map((m) => m.id)),
@@ -7483,7 +7496,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         maxMessageLength: 700,
         intro: resetForInteractionMode
           ? '当前输入来源使用不同的回复模式，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。'
-          : '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。',
+          : resetForAgentProfile
+            ? '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。'
+            : CAPABILITY_CHANGE_HISTORY_INTRO,
       },
     );
     if (historyContext) {
@@ -7494,29 +7509,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           historyCount: historyContext.count,
         },
         'AgentProfile identity change: injected recent conversation history into prompt',
-      );
-    }
-  } else if (
-    takeSessionHistoryReinjection(
-      effectiveGroup.folder,
-      null,
-      !!sessions[effectiveGroup.folder],
-    )
-  ) {
-    // A Skill/MCP change reset the SDK session; the conversation goes on.
-    historyContext = buildRecentConversationHistoryContext(
-      chatJid,
-      new Set(missedMessages.map((m) => m.id)),
-      {
-        limit: 30,
-        maxMessageLength: 700,
-        intro: CAPABILITY_CHANGE_HISTORY_INTRO,
-      },
-    );
-    if (historyContext) {
-      logger.info(
-        { group: group.name, historyCount: historyContext.count },
-        'Capability change: injected recent conversation history into prompt',
       );
     }
   } else if (
@@ -14247,24 +14239,47 @@ function writeTaskResult(
   }
 }
 
-/** Refusal for a Skill install/uninstall from a turn the owner did not start. */
-function skillMutationTurnRejectionFor(
-  sourceGroup: string,
-  ipcAgentId: string | null,
-  ipcTaskId: string | null,
-  ownerUserId: string,
-): string | null {
-  return skillMutationTurnRejection({
+/**
+ * Refuse a Skill install/uninstall from a turn the workspace owner did not
+ * start, writing the reason as the tool result. Returns true when refused.
+ */
+function refuseSkillMutationFromNonOwnerTurn(request: {
+  type: 'install_skill' | 'uninstall_skill';
+  sourceGroup: string;
+  ipcAgentId: string | null;
+  ipcTaskId: string | null;
+  ownerUserId: string;
+  tasksDir: string;
+  resultFilePath: string;
+}): boolean {
+  const rejection = skillMutationTurnRejection({
     registry: activeAgentBuilderTurns,
-    sourceFolder: sourceGroup,
-    turnScope: agentBuilderTurnScope(sourceGroup, ipcAgentId),
-    isolatedTaskRun: !!ipcTaskId,
-    ownerUserId,
+    sourceFolder: request.sourceGroup,
+    turnScope: agentBuilderTurnScope(request.sourceGroup, request.ipcAgentId),
+    isolatedTaskRun: !!request.ipcTaskId,
+    ownerUserId: request.ownerUserId,
     loadPersistedInput: getAgentBuilderInputMessage,
     getGroup: (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
     getFolderJids: getJidsByFolder,
     getChannelType,
   });
+  if (!rejection) return false;
+  logger.warn(
+    {
+      type: request.type,
+      sourceGroup: request.sourceGroup,
+      ipcAgentId: request.ipcAgentId,
+      ipcTaskId: request.ipcTaskId,
+    },
+    'Rejected a Skill change from a turn the workspace owner did not start',
+  );
+  fs.mkdirSync(path.dirname(request.resultFilePath), { recursive: true });
+  writeExclusiveIpcResult(
+    request.tasksDir,
+    request.resultFilePath,
+    JSON.stringify({ success: false, error: rejection }),
+  );
+  return true;
 }
 
 /**
@@ -16239,23 +16254,17 @@ async function processTaskIpc(
           break;
         }
 
-        const installRejection = skillMutationTurnRejectionFor(
-          sourceGroup,
-          ipcAgentId,
-          ipcTaskId,
-          userId,
-        );
-        if (installRejection) {
-          logger.warn(
-            { sourceGroup, ipcAgentId, ipcTaskId, pkg },
-            'Rejected install_skill from a turn the workspace owner did not start',
-          );
-          fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
-          writeExclusiveIpcResult(
+        if (
+          refuseSkillMutationFromNonOwnerTurn({
+            type: 'install_skill',
+            sourceGroup,
+            ipcAgentId,
+            ipcTaskId,
+            ownerUserId: userId,
             tasksDir,
             resultFilePath,
-            JSON.stringify({ success: false, error: installRejection }),
-          );
+          })
+        ) {
           break;
         }
 
@@ -16337,23 +16346,17 @@ async function processTaskIpc(
           break;
         }
 
-        const uninstallRejection = skillMutationTurnRejectionFor(
-          sourceGroup,
-          ipcAgentId,
-          ipcTaskId,
-          userId,
-        );
-        if (uninstallRejection) {
-          logger.warn(
-            { sourceGroup, ipcAgentId, ipcTaskId, skillId },
-            'Rejected uninstall_skill from a turn the workspace owner did not start',
-          );
-          fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
-          writeExclusiveIpcResult(
+        if (
+          refuseSkillMutationFromNonOwnerTurn({
+            type: 'uninstall_skill',
+            sourceGroup,
+            ipcAgentId,
+            ipcTaskId,
+            ownerUserId: userId,
             tasksDir,
             resultFilePath,
-            JSON.stringify({ success: false, error: uninstallRejection }),
-          );
+          })
+        ) {
           break;
         }
 
@@ -24599,12 +24602,14 @@ async function main(): Promise<void> {
   });
   // An idle runner that still owes its lane queued input or a running
   // background agent keeps its container slot.
-  queue.setIdleRunnerReclaimBlocker(
-    (jid) =>
+  queue.setIdleRunnerReclaimBlocker((jid) => {
+    const baseJid = stripVirtualJidSuffix(jid);
+    return (
       listQueuedFollowUps(jid).length > 0 ||
       getRunningTaskAgentsByChat(jid).length > 0 ||
-      getRunningTaskAgentsByChat(stripVirtualJidSuffix(jid)).length > 0,
-  );
+      (baseJid !== jid && getRunningTaskAgentsByChat(baseJid).length > 0)
+    );
+  });
   // IM attachments must land where the Agent's cwd resolves the relative
   // path it is given: a Host workspace with customCwd runs there, not in
   // data/groups/{folder} (same root as the Web file panel).
@@ -24795,8 +24800,7 @@ async function main(): Promise<void> {
   // durable item per chat into the normal cold-start path; the remaining items
   // stay queued and are promoted one-by-one after each completed query.
   // Lanes still waiting for a usage-limit reset get their timers back first.
-  rearmUsageLimitWaitsAfterRestart();
-  recoverDurableFollowUps();
+  recoverDurableFollowUps(new Set(rearmUsageLimitWaitsAfterRestart()));
   const schedulerDeps: import('./task-scheduler.js').SchedulerDependencies = {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,

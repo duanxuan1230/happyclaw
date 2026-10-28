@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { create } from 'zustand';
 
 import { wsManager } from '../api/ws';
+import { contextUsageKey } from './chat';
 
 /** A Session whose input waits for a usage-limit reset. */
 export interface UsageLimitWait {
@@ -16,11 +17,6 @@ interface UsageLimitWaitMessage {
   waitCount?: number;
 }
 
-/** The runtime JID the rest of the chat store keys a Session by. */
-export function usageLimitWaitKey(chatJid: string, agentId?: string): string {
-  return agentId ? `${chatJid}#agent:${agentId}` : chatJid;
-}
-
 interface UsageLimitWaitsState {
   waits: Record<string, UsageLimitWait>;
   apply: (message: UsageLimitWaitMessage) => void;
@@ -32,7 +28,7 @@ function toEntry(
 ): [string, UsageLimitWait] | null {
   if (!message.chatJid || !message.resumeAt) return null;
   return [
-    usageLimitWaitKey(message.chatJid, message.agentId),
+    contextUsageKey(message.chatJid, message.agentId),
     { resumeAt: message.resumeAt, waitCount: message.waitCount ?? 1 },
   ];
 }
@@ -41,7 +37,7 @@ export const useUsageLimitWaits = create<UsageLimitWaitsState>((set) => ({
   waits: {},
   apply: (message) => {
     if (!message.chatJid) return;
-    const key = usageLimitWaitKey(message.chatJid, message.agentId);
+    const key = contextUsageKey(message.chatJid, message.agentId);
     const entry = toEntry(message);
     set((state) => {
       const waits = { ...state.waits };

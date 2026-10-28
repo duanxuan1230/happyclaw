@@ -20,7 +20,7 @@ vi.mock('../src/logger.js', () => ({
 
 const db = await import('../src/db.js');
 const store = await import('../src/runtime-state-store.js');
-const { invalidateSessionAfterRunnerExit, CAPABILITY_CHANGE_RESET_REASON } =
+const { invalidateSessionAfterRunnerExit } =
   await import('../src/capability-runtime-mutation.js');
 
 beforeAll(() => db.initDatabase());
@@ -35,26 +35,28 @@ describe('history hand-off after a capability change', () => {
     db.setSession(folder, 'sdk-main');
     db.setSession(folder, 'sdk-topic', 'session-topic');
     db.setSession(folder, 'sdk-task', 'task-run-1');
-    expect(store.markFolderSessionsForHistoryReinjection(folder, 'x')).toBe(2);
+    expect(store.markFolderSessionsForHistoryReinjection(folder)).toBe(2);
     db.deleteWorkspaceSessions(folder);
 
     // A turn that fails before it establishes a session re-injects on retry.
-    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe('x');
-    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe('x');
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(true);
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(true);
     expect(
       store.takeSessionHistoryReinjection(folder, 'session-topic', false),
-    ).toBe('x');
+    ).toBe(true);
     // Isolated task sessions never resume and owe nothing.
     expect(
       store.takeSessionHistoryReinjection(folder, 'task-run-1', false),
-    ).toBeNull();
+    ).toBe(false);
 
     // Once the session exists again the marker is spent.
-    expect(store.takeSessionHistoryReinjection(folder, null, true)).toBeNull();
-    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBeNull();
+    expect(store.takeSessionHistoryReinjection(folder, null, true)).toBe(false);
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(
+      false,
+    );
     expect(
       store.takeSessionHistoryReinjection(folder, 'session-topic', false),
-    ).toBe('x');
+    ).toBe(true);
   });
 
   test('a runner that changed its own capabilities loses the session it saved, once it exits', () => {
@@ -64,11 +66,13 @@ describe('history hand-off after a capability change', () => {
     expect(db.getSession(folder, 'session-self')).toBeUndefined();
     expect(
       store.takeSessionHistoryReinjection(folder, 'session-self', false),
-    ).toBe(CAPABILITY_CHANGE_RESET_REASON);
+    ).toBe(true);
 
     // Nothing to reset, nothing owed.
     invalidateSessionAfterRunnerExit(folder, null);
-    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBeNull();
+    expect(store.takeSessionHistoryReinjection(folder, null, false)).toBe(
+      false,
+    );
   });
 
   test('both conversation paths re-inject history with the capability intro', () => {
@@ -78,7 +82,7 @@ describe('history hand-off after a capability change', () => {
       source.indexOf('async function runTerminalWarmup('),
     );
     expect(main).toMatch(
-      /else if \(\s*takeSessionHistoryReinjection\(\s*effectiveGroup\.folder,\s*null,\s*!!sessions\[effectiveGroup\.folder\],\s*\)\s*\)\s*\{[\s\S]{0,400}intro: CAPABILITY_CHANGE_HISTORY_INTRO,/,
+      /resetForInteractionMode \|\|[\s\S]{0,120}takeSessionHistoryReinjection\(\s*effectiveGroup\.folder,\s*null,\s*!!sessions\[effectiveGroup\.folder\],\s*\)\s*\)\s*\{[\s\S]{0,800}: CAPABILITY_CHANGE_HISTORY_INTRO,/,
     );
     const agent = source.slice(
       source.indexOf('async function processAgentConversation('),

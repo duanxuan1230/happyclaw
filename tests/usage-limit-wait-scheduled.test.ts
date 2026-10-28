@@ -97,7 +97,6 @@ describe('a scheduled run out of usage everywhere waits for the reset', () => {
           providerFailureTerminal: false,
           inputTurnCompleted: false,
           providerUsageLimitResumeAt: resumeAt,
-          providerUsageLimitWaitCount: 1,
         };
       },
     );

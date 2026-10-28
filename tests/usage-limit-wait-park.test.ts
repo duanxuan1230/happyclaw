@@ -66,11 +66,14 @@ function harness() {
     broadcastFollowUpBatchUpdate: vi.fn(),
     broadcastUsageLimitWait: vi.fn(),
     deliverTerminalFailureNotice: vi.fn(async () => {}),
+    withdrawQueuedInputsOutsideAudience: vi.fn(),
+    enqueueReleasedFollowUp: vi.fn(),
   };
   const runtime = createRuntimeSourceHarness(globals);
   for (const name of [
     'usageLimitParkedMessageIds',
     'parkInputForUsageLimitWait',
+    'releaseQueuedFollowUpsToColdReader',
     'releaseUsageLimitWaitForNewInput',
   ]) {
     runtime.install(name);
@@ -147,6 +150,8 @@ describe('parking an input that waits for a usage-limit reset', () => {
       state: 'resumed',
       waitCount: 1,
     });
+    // The caller reads the batch itself; nothing else is scheduled.
+    expect(g.enqueueReleasedFollowUp).not.toHaveBeenCalled();
     // A second new input finds no wait to end.
     expect(g.releaseUsageLimitWaitForNewInput(LANE)).toBe(false);
   });
@@ -225,12 +230,12 @@ describe('usage-limit wait wiring in the conversation loops', () => {
     expect(source).toMatch(
       /queue\.setOnLaneDiscarded\(\(jid\) => \{\s*endUsageLimitWait\(jid, 'discarded'\);/,
     );
-    expect(source).toMatch(
-      /rearmUsageLimitWaitsAfterRestart\(\);\s*recoverDurableFollowUps\(\);/,
+    expect(source).toContain(
+      'recoverDurableFollowUps(new Set(rearmUsageLimitWaitsAfterRestart()));',
     );
     expect(
       slice('function recoverDurableFollowUps(', '// ── Usage-limit waits'),
-    ).toContain('if (isUsageLimitWaitPending(chatJid)) continue;');
+    ).toContain('if (waitingLanes.has(chatJid)) continue;');
     expect(source).toMatch(
       /keepCorrelationIds: listPendingUsageLimitWaits\(\)\.map\(/,
     );

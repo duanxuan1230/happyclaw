@@ -127,9 +127,6 @@ export function listCapabilityMutationRuntimeTargets(
   return Array.from(byFolder.values());
 }
 
-/** Session-reset reason recorded for the history hand-off. */
-export const CAPABILITY_CHANGE_RESET_REASON = 'capability_changed';
-
 /** Intro of the history re-injected into a session reset by this module. */
 export const CAPABILITY_CHANGE_HISTORY_INTRO =
   '检测到当前 workspace 可用的 Skill / MCP 已更新，底层模型 session 已重置以加载新的能力。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。';
@@ -145,10 +142,7 @@ function invalidateWorkspaceSessions(
   const deps = getWebDeps();
   for (const target of targets) {
     try {
-      markFolderSessionsForHistoryReinjection(
-        target.folder,
-        CAPABILITY_CHANGE_RESET_REASON,
-      );
+      markFolderSessionsForHistoryReinjection(target.folder);
     } catch (err) {
       // The hand-off is a courtesy; the reset itself must still happen.
       logger.warn(
@@ -172,11 +166,7 @@ export function invalidateSessionAfterRunnerExit(
   agentId: string | null,
 ): void {
   if (!getSession(groupFolder, agentId)) return;
-  markSessionForHistoryReinjection(
-    groupFolder,
-    agentId,
-    CAPABILITY_CHANGE_RESET_REASON,
-  );
+  markSessionForHistoryReinjection(groupFolder, agentId);
   deleteSession(groupFolder, agentId);
   const deps = getWebDeps();
   if (deps && !agentId) delete deps.sessions[groupFolder];

@@ -35,7 +35,7 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
   saveAgentMessageSnapshot: vi.fn(),
 }));
 
-const { formatResumeTime, useUsageLimitWaits, usageLimitWaitKey } =
+const { formatResumeTime, useUsageLimitWaits } =
   await import('../web/src/stores/usage-limit-waits');
 const { isMessageVisibleInTimeline, syncFollowUpContent } =
   await import('../web/src/lib/message-timeline');
@@ -62,9 +62,7 @@ describe('usage-limit waits on the Web', () => {
     store.replace([
       { chatJid: 'web:b', resumeAt: '2026-10-29T10:00:00.000Z', waitCount: 1 },
     ]);
-    expect(Object.keys(useUsageLimitWaits.getState().waits)).toEqual([
-      usageLimitWaitKey('web:b'),
-    ]);
+    expect(Object.keys(useUsageLimitWaits.getState().waits)).toEqual(['web:b']);
   });
 
   test('the resume time reads HH:MM today and names the day otherwise', () => {

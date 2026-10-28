@@ -184,7 +184,6 @@ describe('a usage wall on every usable connection waits for the reset', () => {
     expect(decide(output, 'provider-a', true)).toBe(false);
     expect(output.providerFailureTerminal).toBe(false);
     expect(output.inputTurnCompleted).toBe(false);
-    expect(output.providerUsageLimitWaitCount).toBe(1);
     expectResumeNear(output, now + HOUR);
     expect(store.getUsageLimitWait(scopeKey)).toMatchObject({
       inputKey: 'm-pool',
@@ -257,7 +256,7 @@ describe('a usage wall on every usable connection waits for the reset', () => {
       quarantine('provider-a', reset());
       const output = wall(input, reset());
       expect(decide(output, 'provider-a', false)).toBe(false);
-      expect(output.providerUsageLimitWaitCount).toBe(index + 1);
+      expect(store.getUsageLimitWait(scopeKey)?.waitCount).toBe(index + 1);
       // The user sends another message: the parked input runs at once with it.
       expect(wait.endUsageLimitWait(scopeKey, 'new_input')).toMatchObject({
         waitCount: index + 1,
@@ -274,7 +273,7 @@ describe('a usage wall on every usable connection waits for the reset', () => {
     quarantine('provider-a', reset());
     const again = wall('m-5', reset());
     expect(decide(again, 'provider-a', false)).toBe(false);
-    expect(again.providerUsageLimitWaitCount).toBe(1);
+    expect(store.getUsageLimitWait(scopeKey)?.waitCount).toBe(1);
     wait.resumeUsageLimitWait(scopeKey);
     wait.settleUsageLimitWaitAfterSuccess(scopeKey);
     expect(store.getUsageLimitWait(scopeKey)).toBeNull();
@@ -316,7 +315,6 @@ describe('resume timers', () => {
     park(2 * HOUR);
     vi.advanceTimersByTime(2 * HOUR - 1);
     expect(host.releaseLane).not.toHaveBeenCalled();
-    expect(wait.isUsageLimitWaitPending(scopeKey)).toBe(true);
     vi.advanceTimersByTime(1);
     expect(host.releaseLane).toHaveBeenCalledWith(scopeKey);
     expect(host.broadcast).toHaveBeenCalledWith(scopeKey, null);
@@ -338,8 +336,6 @@ describe('resume timers', () => {
     wait.bindUsageLimitWaitHost(host);
 
     expect(wait.rearmUsageLimitWaitsAfterRestart()).toContain(scopeKey);
-    expect(wait.isUsageLimitWaitPending(scopeKey)).toBe(true);
-    expect(wait.isUsageLimitWaitPending(expiredLane)).toBe(false);
     expect(store.getUsageLimitWait(expiredLane)?.state).toBe('resumed');
     expect(
       wait.listPendingUsageLimitWaits().map((row) => row.scopeKey),
