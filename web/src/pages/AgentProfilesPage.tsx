@@ -62,6 +62,7 @@ import {
   AgentCapabilityForm,
   capabilityFormError,
   capabilityFormFromProfile,
+  capabilityFormBinding,
   capabilityFormModelChanges,
   capabilityFormPolicy,
   type AgentCapabilityFormValue,
@@ -406,6 +407,19 @@ export function AgentProfilesPage() {
     ],
   );
 
+  // The preview resolves the unsaved binding and refetches when it changes.
+  const bindingConfigId = capabilities?.modelConfigId;
+  const bindingModel = capabilities?.model ?? null;
+  const previewBinding = useMemo(
+    () =>
+      bindingConfigId === undefined
+        ? undefined
+        : capabilityFormBinding({
+            modelConfigId: bindingConfigId,
+            model: bindingModel,
+          }),
+    [bindingConfigId, bindingModel],
+  );
   // What a save would send; the editor is dirty exactly when it is not empty.
   const pendingSave = useMemo(() => {
     if (!selected || !capabilities || !currentRuntimePolicy) return null;
@@ -1266,6 +1280,7 @@ export function AgentProfilesPage() {
                 <EffectiveCapabilitiesPreview
                   profileId={selected.id}
                   runtimePolicy={currentRuntimePolicy}
+                  modelBinding={previewBinding}
                   workspaces={governance?.workspaces ?? []}
                 />
               </ErrorBoundary>

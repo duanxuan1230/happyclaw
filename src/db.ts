@@ -10050,6 +10050,7 @@ export function createAgentProfile(input: {
       input.promptMode ??
       promptModeFromLegacyPreset(input.includeClaudePreset ?? true),
   });
+  assertAgentProfileNameAvailable(input.ownerUserId, input.name);
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(input.runtimePolicy);
   // Host Skills are an explicit grant; nothing inherits them by omission.
   runtimePolicy.skills.host ??= { mode: 'disabled', ids: [] };
@@ -10110,6 +10111,9 @@ export function updateAgentProfile(
   const existing = getAgentProfileForUser(profileId, ownerUserId);
   if (!existing) return undefined;
   const nextName = updates.name ?? existing.name;
+  if (nextName !== existing.name) {
+    assertAgentProfileNameAvailable(ownerUserId, nextName, profileId);
+  }
   const nextPromptMode =
     updates.promptMode ??
     (updates.includeClaudePreset === undefined
@@ -10284,9 +10288,43 @@ export function migrateAgentProfileWorkspacesAndArchive(
   }
 }
 
-/** Names compare after NFKC folding, ignoring case and surrounding space. */
+/**
+ * Names compare after NFKC folding without invisible characters (zero-width
+ * spaces, soft hyphens, joiners), ignoring case and surrounding space.
+ */
 function agentProfileNameKey(name: string): string {
-  return name.normalize('NFKC').trim().toLowerCase();
+  return name
+    .normalize('NFKC')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .trim()
+    .toLowerCase();
+}
+
+/** A name another active Agent of the same owner already uses. */
+export class AgentProfileNameTakenError extends Error {
+  constructor(
+    readonly requestedName: string,
+    readonly conflict: { id: string | null; name: string },
+  ) {
+    super(
+      `Agent name "${requestedName}" is already used by the Agent "${conflict.name}"; names compare case-insensitively after Unicode normalization and the built-in HappyClaw counts. Ask the user for a different name.`,
+    );
+    this.name = 'AgentProfileNameTakenError';
+  }
+}
+
+/** Every write that names an Agent goes through this, whatever its caller. */
+function assertAgentProfileNameAvailable(
+  ownerUserId: string,
+  name: string,
+  excludeProfileId?: string,
+): void {
+  const conflict = findAgentProfileNameConflict(
+    ownerUserId,
+    name,
+    excludeProfileId,
+  );
+  if (conflict) throw new AgentProfileNameTakenError(name, conflict);
 }
 
 /**

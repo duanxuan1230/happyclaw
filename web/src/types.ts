@@ -262,6 +262,8 @@ export interface AgentModelResolution {
   model_config_id: string | null;
   model_config_name: string | null;
   model: string | null;
+  /** The bound connection no longer exists, so every run fails. */
+  connection_missing?: boolean;
 }
 
 export interface AgentCapabilityPreview {

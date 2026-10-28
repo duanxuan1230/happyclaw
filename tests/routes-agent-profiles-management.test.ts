@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import {
   afterAll,
   beforeAll,
@@ -201,13 +202,65 @@ describe('Agent names', () => {
 
   test('an existing duplicate name does not block other edits', async () => {
     const a = db.createAgentProfile({ ownerUserId: MEMBER, name: 'Twin' });
-    const b = db.createAgentProfile({ ownerUserId: MEMBER, name: 'twin' });
+    const b = db.createAgentProfile({ ownerUserId: MEMBER, name: 'Twin B' });
+    // Saved before names had to be unique.
+    const raw = new Database(path.join(tmpStoreDir, 'messages.db'));
+    raw
+      .prepare('UPDATE agent_profiles SET name = ? WHERE id = ?')
+      .run('twin', b.id);
+    raw.close();
     const res = await call(`/${b.id}`, {
       method: 'PATCH',
       body: { agents_prompt: 'Still allowed', prompt_schema_version: 2 },
     });
     expect(res.status).toBe(200);
     expect(a.id).not.toBe(b.id);
+  });
+
+  test('every write path refuses a taken name, not only the routes', () => {
+    db.createAgentProfile({ ownerUserId: MEMBER, name: 'Guarded' });
+    expect(() =>
+      db.createAgentProfile({ ownerUserId: MEMBER, name: 'GUARDED' }),
+    ).toThrow(db.AgentProfileNameTakenError);
+    expect(() =>
+      db.createAgentProfile({ ownerUserId: MEMBER, name: 'HappyClaw' }),
+    ).toThrow(db.AgentProfileNameTakenError);
+    const other = db.createAgentProfile({
+      ownerUserId: MEMBER,
+      name: 'Guarded Two',
+    });
+    expect(() =>
+      db.updateAgentProfile(other.id, MEMBER, { name: 'guarded' }),
+    ).toThrow(db.AgentProfileNameTakenError);
+    expect(db.getAgentProfile(other.id)?.name).toBe('Guarded Two');
+  });
+
+  test('invisible characters neither pass validation nor dodge the check', async () => {
+    for (const name of ['Re\u200bviewer', 'Rev\u00adiewer', 'Re\u2060view']) {
+      const res = await call('/', { method: 'POST', body: { name } });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: '名称不能包含不可见字符',
+        code: 'INVALID_NAME',
+        field: 'name',
+      });
+    }
+    const target = db.createAgentProfile({
+      ownerUserId: MEMBER,
+      name: 'Visible',
+    });
+    const rename = await call(`/${target.id}`, {
+      method: 'PATCH',
+      body: { name: 'Visi\u200dble 2' },
+    });
+    expect(await rename.json()).toMatchObject({ code: 'INVALID_NAME' });
+    // A stored or Builder-written name with them still collides.
+    expect(
+      db.findAgentProfileNameConflict(MEMBER, 'Vis\u00adible'),
+    ).toMatchObject({ id: target.id });
+    expect(
+      db.findAgentProfileNameConflict(MEMBER, 'Happy\u200bClaw'),
+    ).toMatchObject({ name: 'HappyClaw' });
   });
 });
 
@@ -532,23 +585,36 @@ describe('export and import', () => {
     expect(retired.status).toBe(400);
   });
 
-  test('an admin keeps host grants on import', async () => {
+  test('an admin keeps host grants on import only after confirming them', async () => {
+    const data = {
+      format: 'happyclaw-agent',
+      version: 1,
+      agent: {
+        name: 'Admin Host Agent',
+        runtime_policy: {
+          context: { source: 'host_claude' },
+          skills: { host: { mode: 'inherit', ids: [] } },
+        },
+      },
+    };
+    const unconfirmed = await call('/import', {
+      method: 'POST',
+      user: ADMIN,
+      body: { data },
+    });
+    expect(unconfirmed.status).toBe(409);
+    expect(await unconfirmed.json()).toMatchObject({
+      code: 'AGENT_IMPORT_HOST_GRANTS',
+      grants: ['host_context', 'host_skills'],
+    });
+    expect(
+      db.findAgentProfileNameConflict(ADMIN, 'Admin Host Agent'),
+    ).toBeUndefined();
+
     const res = await call('/import', {
       method: 'POST',
       user: ADMIN,
-      body: {
-        data: {
-          format: 'happyclaw-agent',
-          version: 1,
-          agent: {
-            name: 'Admin Host Agent',
-            runtime_policy: {
-              context: { source: 'host_claude' },
-              skills: { host: { mode: 'inherit', ids: [] } },
-            },
-          },
-        },
-      },
+      body: { data, confirm_host_grants: true },
     });
     expect(res.status).toBe(201);
     const body = await res.json();
@@ -737,6 +803,7 @@ describe('governance and capability preview', () => {
       model_config_id: bound.id,
       model_config_name: 'Bound connection',
       model: 'bound-large',
+      connection_missing: false,
     });
 
     runtimeConfig.setDefaultModelConfig(bound.id);
@@ -749,6 +816,7 @@ describe('governance and capability preview', () => {
       model_config_id: bound.id,
       model_config_name: 'Bound connection',
       model: 'bound-default',
+      connection_missing: false,
     });
 
     registerWorkspace('picked-ws', MEMBER, unbound.id);
@@ -760,5 +828,104 @@ describe('governance and capability preview', () => {
       model: 'bound-large',
     });
     runtimeConfig.setDefaultModelConfig(null);
+  });
+
+  test('resolves the unsaved binding of the same preview and flags a deleted connection', async () => {
+    const saved = runtimeConfig.createProvider({
+      name: 'Saved connection',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://saved.example.test',
+      anthropicAuthToken: 'saved-token',
+      anthropicModel: 'saved-default',
+      models: [{ id: 'saved-default' }, { id: 'saved-large' }],
+      enabled: true,
+    });
+    const draft = runtimeConfig.createProvider({
+      name: 'Draft connection',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://draft.example.test',
+      anthropicAuthToken: 'draft-token',
+      anthropicModel: 'draft-default',
+      models: [{ id: 'draft-default' }, { id: 'draft-fast' }],
+      enabled: true,
+    });
+    const profile = db.createAgentProfile({
+      ownerUserId: MEMBER,
+      name: 'Unsaved Binding',
+      modelConfigId: saved.id,
+      model: 'saved-large',
+    });
+    const resolve = async (body: Record<string, unknown>) => {
+      const res = await call(`/${profile.id}/effective-capabilities`, {
+        method: 'POST',
+        body,
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    expect(
+      (await resolve({ model_config_id: draft.id, model: 'draft-fast' })).body
+        .model_resolution,
+    ).toMatchObject({
+      source: 'agent',
+      model_config_id: draft.id,
+      model: 'draft-fast',
+    });
+    // A new configuration without a model runs that configuration's default.
+    expect(
+      (await resolve({ model_config_id: draft.id })).body.model_resolution,
+    ).toMatchObject({ model_config_id: draft.id, model: 'draft-default' });
+    // Only the model changed: the saved configuration stays.
+    expect(
+      (await resolve({ model: 'saved-default' })).body.model_resolution,
+    ).toMatchObject({ model_config_id: saved.id, model: 'saved-default' });
+    expect((await resolve({ model_config_id: 42 })).status).toBe(400);
+
+    expect(
+      (await resolve({ model_config_id: 'deleted-connection', model: null }))
+        .body.model_resolution,
+    ).toEqual({
+      source: 'agent',
+      model_config_id: 'deleted-connection',
+      model_config_name: null,
+      model: null,
+      connection_missing: true,
+    });
+  });
+
+  test('a scoped MCP reference with a 128-character id survives export and import', async () => {
+    const longId = `m${'x'.repeat(127)}`;
+    seedUserMcp(ADMIN, [longId]);
+    const source = db.createAgentProfile({
+      ownerUserId: ADMIN,
+      name: 'Long MCP',
+      runtimePolicy: { mcp: { mode: 'custom', ids: [longId] } },
+    });
+    const exported = await (
+      await call(`/${source.id}/export`, { user: ADMIN })
+    ).json();
+    expect(exported.agent.runtime_policy.mcp.ids).toEqual([`user:${longId}`]);
+    const imported = await call('/import', {
+      method: 'POST',
+      user: ADMIN,
+      body: { data: exported, name: 'Long MCP 2' },
+    });
+    expect(imported.status).toBe(201);
+    expect((await imported.json()).profile.runtime_policy.mcp).toEqual({
+      mode: 'custom',
+      ids: [`user:${longId}`],
+    });
+    // The id itself is still capped.
+    const tooLong = await call('/', {
+      method: 'POST',
+      user: ADMIN,
+      body: {
+        name: 'Too Long MCP',
+        runtime_policy: {
+          mcp: { mode: 'custom', ids: [`user:${'y'.repeat(129)}`] },
+        },
+      },
+    });
+    expect(tooLong.status).toBe(400);
   });
 });
