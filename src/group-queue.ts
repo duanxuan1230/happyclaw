@@ -301,6 +301,8 @@ export class GroupQueue {
   private onUnacknowledgedIpcDeliveriesFn:
     | ((groupJid: string, receipts: IpcDeliveryReceipt[]) => void)
     | null = null;
+  /** Host cleanup for a lane whose work an ordinary stop discards. */
+  private onLaneDiscardedFn: ((groupJid: string) => void) | null = null;
   /** Host veto for reclaiming an idle runner: work it still owes a lane. */
   private idleReclaimBlockerFn: ((groupJid: string) => boolean) | null = null;
   /** Serialization keys whose stops wait for the current query to end. */
@@ -835,6 +837,15 @@ export class GroupQueue {
    */
   setIdleRunnerReclaimBlocker(fn: (groupJid: string) => boolean): void {
     this.idleReclaimBlockerFn = fn;
+  }
+
+  /**
+   * An ordinary stop (Stop button, /clear, /fresh, deleting a workspace or
+   * Session) discards the lane's work, including work the host keeps outside
+   * GroupQueue such as an input waiting for a usage-limit reset.
+   */
+  setOnLaneDiscarded(fn: (groupJid: string) => void): void {
+    this.onLaneDiscardedFn = fn;
   }
 
   /**
@@ -2609,6 +2620,11 @@ export class GroupQueue {
       requestedState.pendingMessages = false;
       this.discardPendingTasks(requestedState, groupJid);
       this.clearRetryTimer(requestedState);
+      try {
+        this.onLaneDiscardedFn?.(groupJid);
+      } catch (err) {
+        logger.error({ groupJid, err }, 'onLaneDiscarded callback failed');
+      }
     } else if (!this.parkTaskForMutation(requestedState, groupJid)) {
       requestedState.pendingMessages = true;
       this.waitingGroups.add(groupJid);

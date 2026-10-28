@@ -102,6 +102,15 @@ Public：
 - `GET /api/follow-ups`
 - `POST /api/follow-ups/:messageId/action`
 
+当一次运行可用的全部连接都撞了用量上限、且上游给出了重置时刻时，输入不会失败：
+该会话（lane）待处理的输入被放回 durable 队列（`delivery_status: 'queued'`，照常可
+编辑、排序、取消），在重置时刻后 60 秒加 0–30 秒抖动自动继续。同一会话最多连续等待
+3 次、单次不超过 7 天，超出则按原方式失败；新消息、`send_now`（`promote`）立即结束
+等待并与排队输入合批，`/break`、取消最后一条排队输入、停止、`/clear`、`/fresh`、删除
+工作区或会话取消等待。来源是 IM 的输入在开始等待时收到一条说明（同一输入只发一次）。
+定时任务的独立运行改为 `task_runs.status = 'retry_wait'`，`available_at` 为继续时刻，
+不消耗运行的重试预算。
+
 `model-selection` 以 `agentId`（GET 查询参数、PUT 请求体）区分 Runtime Session，
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
 `default.source` 取值 `agent`（智能体绑定）、`workspace_env`（工作区自带 Provider
@@ -981,6 +990,10 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 - `stream_event`
 - `stream_snapshot`，连接建立时推送进行中回合的快照（含推理文本尾部、推理计时、
   活动工具、子 Agent 状态和轨迹）
+- `active_run_snapshot`，连接建立时推送；`usageLimitWaits[]`
+  （`{ chatJid, agentId?, resumeAt, waitCount }`）列出正在等待用量重置的会话
+- `usage_limit_wait`，`{ chatJid, agentId?, resumeAt, waitCount? }`：会话开始等待
+  用量重置；`resumeAt: null` 表示等待结束
 - `agent_status`
 - `terminal_output`
 - `terminal_started`

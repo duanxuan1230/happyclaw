@@ -658,15 +658,29 @@ import {
   clearStreamingSnapshot,
   broadcastFollowUpUpdate,
   broadcastMessageTrace,
+  broadcastUsageLimitWait,
 } from './web.js';
 import { ProactiveCommentaryRelay } from './process-commentary.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
 import { skillMutationTurnRejection } from './skill-ipc-authorization.js';
-import { takeSessionHistoryReinjection } from './runtime-state-store.js';
+import {
+  getUsageLimitWait,
+  takeSessionHistoryReinjection,
+} from './runtime-state-store.js';
 import {
   CAPABILITY_CHANGE_HISTORY_INTRO,
   invalidateSessionAfterRunnerExit,
 } from './capability-runtime-mutation.js';
+import {
+  armUsageLimitResume,
+  bindUsageLimitWaitHost,
+  endUsageLimitWait,
+  formatUsageLimitResumeTime,
+  formatUsageLimitWaitNotice,
+  isUsageLimitWaitPending,
+  listPendingUsageLimitWaits,
+  rearmUsageLimitWaitsAfterRestart,
+} from './usage-limit-wait.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import {
@@ -2030,6 +2044,16 @@ function promoteFollowUp(
     return { ok: false, message: '这条排队消息已被处理或取消。' };
   }
   broadcastFollowUpUpdate(chatJid);
+  if (!activeRunId && endUsageLimitWait(chatJid, 'new_input')) {
+    // Sending a parked input now ends its usage-limit wait early.
+    releaseQueuedFollowUpsToColdReader(chatJid);
+    return {
+      ok: true,
+      state: 'queued',
+      message: '已结束等待，正在重新发送。',
+      item,
+    };
+  }
   if (!activeRunId) {
     dispatchQueuedFollowUpFamily(chatJid);
     return {
@@ -2064,6 +2088,10 @@ function settleCancelledFollowUp(
     [item.id],
     'Queued input cancelled',
   );
+  // Nothing left to resume: the lane no longer waits for a usage reset.
+  if (listQueuedFollowUps(chatJid).length === 0) {
+    endUsageLimitWait(chatJid, 'cancelled');
+  }
   broadcastFollowUpUpdate(chatJid, {
     id: item.id,
     delivery_status: 'cancelled',
@@ -2206,13 +2234,130 @@ function releaseQueuedFollowUpsToColdReader(chatJid: string): void {
   const recoveryRunId = `recovery:${crypto.randomUUID()}`;
   const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
   if (items.length === 0) return;
-  releaseQueuedFollowUpBatch(items, recoveryRunId);
+  const deliveryUpdatedAt = new Date().toISOString();
+  const released = releaseQueuedFollowUpBatch(
+    items,
+    recoveryRunId,
+    deliveryUpdatedAt,
+  );
+  broadcastFollowUpBatchUpdate(
+    chatJid,
+    released ? items : [],
+    recoveryRunId,
+    deliveryUpdatedAt,
+  );
   enqueueReleasedFollowUp(items[items.length - 1]);
 }
 
 function recoverDurableFollowUps(): void {
   for (const chatJid of getQueuedFollowUpChatJids()) {
+    // A lane waiting for a usage-limit reset resumes on its own timer.
+    if (isUsageLimitWaitPending(chatJid)) continue;
     releaseQueuedFollowUpsToColdReader(chatJid);
+  }
+}
+
+// ── Usage-limit waits (policy and timers: src/usage-limit-wait.ts) ──
+
+/**
+ * The durable inputs a waiting provider failure parks: the failed batch and
+ * everything else still pending in the lane, so only input that arrives
+ * after the wait began can end it.
+ */
+function usageLimitParkedMessageIds(
+  laneJid: string,
+  output: ContainerOutput,
+  batch: readonly { id: string }[],
+): string[] {
+  const covered = (output.ipcReceipts ?? []).flatMap((receipt) =>
+    (receipt.coveredCursors ?? [receipt.cursor]).map((cursor) => cursor.id),
+  );
+  const pending = getMessagesSince(
+    laneJid,
+    lastCommittedCursor[laneJid] || EMPTY_CURSOR,
+  ).map((message) => message.id);
+  return [
+    ...new Set([
+      ...(covered.length > 0 ? covered : batch.map((message) => message.id)),
+      ...pending,
+    ]),
+  ];
+}
+
+/**
+ * Put an input waiting for a usage-limit reset back in its lane's durable
+ * queue, where it stays visible, editable, reorderable and cancellable until
+ * the resume timer releases it, and tell its channel once when it continues.
+ * Returns the note for the input's streaming card.
+ */
+function parkInputForUsageLimitWait(input: {
+  laneJid: string;
+  agentId: string | null;
+  inputId: string;
+  messageIds: readonly string[];
+  replySourceImJid: string | null;
+  turnScope: string;
+  presentation: 'native' | 'default';
+}): string | null {
+  const wait = getUsageLimitWait(input.laneJid);
+  if (!wait || wait.state !== 'waiting') return null;
+  for (const messageId of input.messageIds) {
+    setMessageFollowUp(input.laneJid, messageId, {
+      mode: 'queue',
+      status: 'queued',
+      // "Send now" names the run it steers; a parked input has none running.
+      runId: `usage-limit:${input.inputId}`,
+    });
+  }
+  broadcastFollowUpUpdate(input.laneJid);
+  armUsageLimitResume(wait);
+  broadcastUsageLimitWait(input.laneJid, wait);
+  if (input.replySourceImJid) {
+    // Keyed by the input: later waits of the same input send nothing.
+    void deliverTerminalFailureNotice({
+      logicalChatJid: input.laneJid,
+      scopeKey: input.turnScope,
+      targetJid: input.replySourceImJid,
+      originalInputTurnId: input.inputId,
+      noticeKey: 'usage-limit-wait',
+      text: formatUsageLimitWaitNotice(wait.resumeAt),
+      agentId: input.agentId,
+      presentation: input.presentation,
+    }).catch((err) =>
+      logger.warn(
+        { err, laneJid: input.laneJid },
+        'Usage-limit wait notice failed',
+      ),
+    );
+  }
+  return `额度用尽，预计 ${formatUsageLimitResumeTime(wait.resumeAt)} 自动继续`;
+}
+
+/** New input ends the lane's wait; returns true when parked inputs rejoin. */
+function releaseUsageLimitWaitForNewInput(laneJid: string): boolean {
+  if (!endUsageLimitWait(laneJid, 'new_input')) return false;
+  const runId = `usage-limit:${crypto.randomUUID()}`;
+  const items = claimNextQueuedFollowUpBatch(laneJid, runId);
+  if (items.length === 0) return false;
+  const deliveryUpdatedAt = new Date().toISOString();
+  const released = releaseQueuedFollowUpBatch(items, runId, deliveryUpdatedAt);
+  broadcastFollowUpBatchUpdate(
+    laneJid,
+    released ? items : [],
+    runId,
+    deliveryUpdatedAt,
+  );
+  return released;
+}
+
+/** A discarded wait takes the input it parked along. */
+function cancelQueuedInputsOfLane(laneJid: string): void {
+  const deliveryUpdatedAt = new Date().toISOString();
+  for (const item of cancelQueuedFollowUpsAtCutoff(
+    laneJid,
+    deliveryUpdatedAt,
+  )) {
+    settleCancelledFollowUp(laneJid, item, deliveryUpdatedAt);
   }
 }
 
@@ -7118,7 +7263,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Get the oldest pending messages since last agent interaction. A backlog
   // beyond one turn's bound is consumed by the follow-up check below.
   const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
-  const pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  let pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  if (
+    pendingWindow.messages.length > 0 &&
+    releaseUsageLimitWaitForNewInput(chatJid)
+  ) {
+    pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  }
   let missedMessages = pendingWindow.messages;
 
   if (missedMessages.length === 0) return true;
@@ -7516,6 +7668,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // active B appear committed when B later fails.
   const cursorCommittedInputTurns = new Set<string>();
   let providerFailoverPending = false;
+  /** Card note while the input waits for a usage-limit reset. */
+  let usageLimitWaitNote: string | null = null;
   let channelDeliveryNeedsManualReconciliation = false;
   let channelManualNoticesAcknowledged = true;
   let lastReplyMsgId: string | undefined;
@@ -9691,6 +9845,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             rollbackIdleMainCardReservation(providerFailureInputId);
             if (result.providerFailureTerminal !== true) {
               providerFailoverPending = true;
+              if (result.providerUsageLimitResumeAt !== undefined) {
+                await clearProcessingIndicatorForInput(providerFailureInputId);
+                usageLimitWaitNote = parkInputForUsageLimitWait({
+                  laneJid: chatJid,
+                  agentId: null,
+                  inputId: providerFailureInputId,
+                  messageIds: usageLimitParkedMessageIds(
+                    chatJid,
+                    result,
+                    missedMessages,
+                  ),
+                  replySourceImJid,
+                  turnScope: channelTurnScope(effectiveGroup.folder),
+                  presentation:
+                    interactionMode === 'proactive' ? 'native' : 'default',
+                });
+              }
               logger.warn(
                 {
                   group: group.name,
@@ -10780,7 +10951,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           await streamingSession.abort(heldNote).catch(() => {});
         } else if (providerFailoverPending) {
           await streamingSession
-            .abort('模型服务暂时异常，正在重试')
+            .abort(usageLimitWaitNote ?? '模型服务暂时异常，正在重试')
             .catch(() => {});
         } else if (hadError || !output || output.status === 'error') {
           await streamingSession.abort('处理出错').catch(() => {});
@@ -16782,7 +16953,14 @@ async function processAgentConversation(
   // Get the oldest pending messages; a longer backlog is consumed by the
   // agent-channel-next task enqueued below.
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
-  const pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  let pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  if (
+    pendingWindow.messages.length > 0 &&
+    releaseUsageLimitWaitForNewInput(virtualChatJid)
+  ) {
+    pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  }
   let missedMessages = pendingWindow.messages;
 
   // Owner gate (single chokepoint for all 5 call sites: normal dispatch,
@@ -18035,6 +18213,8 @@ async function processAgentConversation(
   const cursorCommittedInputTurns = new Set<string>();
   let retryUnfinishedTurn = false;
   let agentProviderFailoverPending = false;
+  /** Card note while the input waits for a usage-limit reset. */
+  let agentUsageLimitWaitNote: string | null = null;
   const rotateProviderAfterAgentTurn = shouldRotatePoolProviderAfterTurn(
     effectiveGroup.folder,
     agentProfile?.model_config_id,
@@ -18817,6 +18997,23 @@ async function processAgentConversation(
         retryUnfinishedTurn = !healthyAgentCompletedInputTurns.has(
           providerFailureInputId,
         );
+        if (output.providerUsageLimitResumeAt !== undefined) {
+          await clearAgentProcessingIndicatorForInput(providerFailureInputId);
+          agentUsageLimitWaitNote = parkInputForUsageLimitWait({
+            laneJid: virtualChatJid,
+            agentId,
+            inputId: providerFailureInputId,
+            messageIds: usageLimitParkedMessageIds(
+              virtualChatJid,
+              output,
+              missedMessages,
+            ),
+            replySourceImJid: replySourceImJid ?? null,
+            turnScope: channelTurnScope(effectiveGroup.folder, agentId),
+            presentation:
+              interactionMode === 'proactive' ? 'native' : 'default',
+          });
+        }
         logger.warn(
           { chatJid, agentId, inputTurnId: providerFailureInputId },
           'Agent provider failure kept retryable for failover',
@@ -19853,7 +20050,7 @@ async function processAgentConversation(
           await agentStreamingSession.abort(heldNote).catch(() => {});
         } else if (agentProviderFailoverPending) {
           await agentStreamingSession
-            .abort('模型服务暂时异常，正在重试')
+            .abort(agentUsageLimitWaitNote ?? '模型服务暂时异常，正在重试')
             .catch(() => {});
         } else if (hadError) {
           await agentStreamingSession.abort('处理出错').catch(() => {});
@@ -22825,6 +23022,8 @@ async function handleSessionBreak(input: {
       'Input cancelled by /break',
     );
   }
+  // The cutoff took the inputs a usage-limit wait had parked.
+  endUsageLimitWait(targetJid, 'cancelled');
 
   const { activeRunId, interrupted } = interruptActiveSessionRun(
     targetJid,
@@ -24361,6 +24560,10 @@ async function main(): Promise<void> {
           Date.now() - CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS,
         ).toISOString(),
         reason: 'retry_wait expired: no execution reclaimed this turn',
+        // A usage-limit wait can outlast the bound; its input runs again.
+        keepCorrelationIds: listPendingUsageLimitWaits().map(
+          (wait) => wait.inputKey,
+        ),
       });
       if (cancelled > 0) {
         logger.info({ cancelled }, 'Cancelled stale retry_wait channel turns');
@@ -24384,6 +24587,15 @@ async function main(): Promise<void> {
   });
   queue.setOnQueryIdle((chatJid) => {
     dispatchQueuedFollowUpFamily(chatJid);
+  });
+  bindUsageLimitWaitHost({
+    releaseLane: releaseQueuedFollowUpsToColdReader,
+    hasQueuedInput: (jid) => listQueuedFollowUps(jid).length > 0,
+    discardQueuedInput: cancelQueuedInputsOfLane,
+    broadcast: broadcastUsageLimitWait,
+  });
+  queue.setOnLaneDiscarded((jid) => {
+    endUsageLimitWait(jid, 'discarded');
   });
   // An idle runner that still owes its lane queued input or a running
   // background agent keeps its container slot.
@@ -24582,6 +24794,8 @@ async function main(): Promise<void> {
   // A restart has no live query that can emit an idle transition. Release one
   // durable item per chat into the normal cold-start path; the remaining items
   // stay queued and are promoted one-by-one after each completed query.
+  // Lanes still waiting for a usage-limit reset get their timers back first.
+  rearmUsageLimitWaitsAfterRestart();
   recoverDurableFollowUps();
   const schedulerDeps: import('./task-scheduler.js').SchedulerDependencies = {
     registeredGroups: () => registeredGroups,

@@ -40,6 +40,7 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
     const globals: Record<string, unknown> = {
       logger,
       cancelStaleRetryWaitChannelTurns,
+      listPendingUsageLimitWaits: () => [{ inputKey: 'om_waiting' }],
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS');
@@ -49,6 +50,10 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
     expect(cancelStaleRetryWaitChannelTurns).toHaveBeenCalledTimes(1);
     const [{ updatedBefore }] = cancelStaleRetryWaitChannelTurns.mock
       .calls[0] as unknown as [{ updatedBefore: string }];
+    // An input waiting for a usage-limit reset keeps its Turn.
+    expect(cancelStaleRetryWaitChannelTurns.mock.calls[0]).toEqual([
+      expect.objectContaining({ keepCorrelationIds: ['om_waiting'] }),
+    ]);
     const age = before - Date.parse(updatedBefore);
     expect(age).toBeGreaterThanOrEqual(6 * 60 * 60 * 1000 - 1000);
     expect(age).toBeLessThanOrEqual(6 * 60 * 60 * 1000 + 1000);
@@ -78,6 +83,8 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
       registeredGroups: {},
       getRegisteredGroup: () => undefined,
       cancelRetryWaitChannelTurnsForInputs,
+      listQueuedFollowUps: () => [],
+      endUsageLimitWait: vi.fn(),
     };
     const harness = createRuntimeSourceHarness(globals);
     for (const name of [
@@ -100,6 +107,11 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
         agentId: 'session-1',
         correlationIds: ['om_q'],
       }),
+    );
+    // The last queued input gone: a usage-limit wait has nothing to resume.
+    expect(globals.endUsageLimitWait).toHaveBeenCalledWith(
+      'web:ws#agent:session-1',
+      'cancelled',
     );
   });
 

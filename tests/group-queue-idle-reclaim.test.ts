@@ -192,3 +192,24 @@ describe('deferring a mutation stop to the end of the current query', () => {
     expect(started).toEqual(['web:other', 'web:other']);
   });
 });
+
+describe('an ordinary stop discards lane work kept outside GroupQueue', () => {
+  test('stop, reset and delete report the lane; a mutation stop does not', async () => {
+    const { queue } = harness();
+    const discarded: string[] = [];
+    queue.setOnLaneDiscarded((jid) => discarded.push(jid));
+
+    await queue.stopGroup('web:idle-lane');
+    expect(discarded).toEqual(['web:idle-lane']);
+
+    queue.enqueueMessageCheck('web:busy');
+    await tick();
+    const token = queue.pauseGroupsForMutation(['web:busy']);
+    await queue.stopGroup('web:busy', {
+      force: true,
+      preserveQueuedWork: true,
+    });
+    queue.resumeGroupsAfterMutation(token);
+    expect(discarded).toEqual(['web:idle-lane']);
+  });
+});

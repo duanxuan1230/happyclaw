@@ -169,6 +169,7 @@ import {
   normalizeImageAttachments,
   toAgentImages,
 } from './message-attachments.js';
+import { listPendingUsageLimitWaits } from './usage-limit-wait.js';
 
 // --- App Setup ---
 
@@ -1704,12 +1705,26 @@ function setupWebSocket(server: any): WebSocketServer {
           phase: hasStreamSnapshot ? 'running' : 'preparing',
         });
       }
+      const usageLimitWaits = listPendingUsageLimitWaits()
+        .map((wait) => {
+          const [baseChatJid, agentId] = wait.scopeKey.split('#agent:');
+          const allowed = getGroupAllowedUserIds(baseChatJid);
+          if (allowed === null || !allowed.has(userId)) return null;
+          return {
+            chatJid: normalizeHomeJid(baseChatJid),
+            ...(agentId ? { agentId } : {}),
+            resumeAt: wait.resumeAt,
+            waitCount: wait.waitCount,
+          };
+        })
+        .filter((wait) => wait !== null);
       try {
         ws.send(
           JSON.stringify({
             type: 'active_run_snapshot',
             runs,
             queuedChatJids,
+            usageLimitWaits,
           } satisfies WsMessageOut),
         );
       } catch {
@@ -2696,6 +2711,26 @@ export function broadcastFollowUpUpdate(
     ...(transition ? { transition } : {}),
   };
   safeBroadcast(msg, isHostGroupJid(baseChatJid), allowedUserIds);
+}
+
+/** Tell clients a Session's usage-limit wait started (resumeAt) or ended. */
+export function broadcastUsageLimitWait(
+  laneJid: string,
+  wait: { resumeAt: string; waitCount: number } | null,
+): void {
+  const [baseChatJid, agentId] = laneJid.split('#agent:');
+  const msg: WsMessageOut = {
+    type: 'usage_limit_wait',
+    chatJid: normalizeHomeJid(baseChatJid),
+    ...(agentId ? { agentId } : {}),
+    resumeAt: wait?.resumeAt ?? null,
+    ...(wait ? { waitCount: wait.waitCount } : {}),
+  };
+  safeBroadcast(
+    msg,
+    isHostGroupJid(baseChatJid),
+    getGroupAllowedUserIds(baseChatJid),
+  );
 }
 
 export function broadcastTyping(chatJid: string, isTyping: boolean): void {

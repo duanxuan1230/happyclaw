@@ -121,7 +121,14 @@ import {
   decideTaskRunNotice,
   formatTaskRecoveryNotice,
 } from './task-failure-notice.js';
-import type { TaskFailureNoticeState } from './runtime-state-store.js';
+import {
+  clearUsageLimitWait,
+  type TaskFailureNoticeState,
+} from './runtime-state-store.js';
+import {
+  formatUsageLimitResumeTime,
+  usageLimitWaitScopeKey,
+} from './usage-limit-wait.js';
 
 export function shouldFinalizeScheduledRunOutput(
   output: Pick<
@@ -1161,10 +1168,13 @@ async function runTaskInner(
   let lastOutputTime = startTime;
   let runLogFinalized = false;
   let durableWorkspaceIntentStored = false;
+  /** Set when the run went back to retry_wait to outlast a usage limit. */
+  let waitingForUsageReset = false;
   let preparedDurableWorkspaceCommit: (() => boolean) | null = null;
 
   const commitDurableWorkspaceIntent = (): boolean => {
     if (durableWorkspaceIntentStored) return true;
+    if (waitingForUsageReset) return false;
     if (
       !deps.storeResultAndNotify ||
       !options?.durableRun ||
@@ -1423,6 +1433,43 @@ async function runTaskInner(
     );
 
     if (idleTimer) clearTimeout(idleTimer);
+
+    if (output.providerUsageLimitResumeAt !== undefined) {
+      // Every connection is out of usage until a known reset: hand the
+      // occurrence back to task_runs, which claims it again at that time.
+      const resumeAt = new Date(
+        output.providerUsageLimitResumeAt,
+      ).toISOString();
+      const durableRun = options?.durableRun;
+      if (
+        durableRun &&
+        releaseTaskRunForRetry(
+          durableRun.id,
+          durableRun.lease_owner,
+          durableRun.lease_token,
+          resumeAt,
+          'Usage limit reached; waiting for the reset',
+          { countsAsAttempt: false },
+        )
+      ) {
+        waitingForUsageReset = true;
+        error = `模型服务额度已用尽，预计 ${formatUsageLimitResumeTime(resumeAt)} 自动重试本次运行。`;
+        lastOutputTime = Date.now();
+        logger.warn(
+          { taskId: task.id, runId: durableRun.id, resumeAt },
+          'Scheduled run waits for a usage-limit reset',
+        );
+        return;
+      }
+      // Nothing can resume this run later: it fails as before.
+      clearUsageLimitWait(
+        usageLimitWaitScopeKey({
+          chatJid: workspace.jid,
+          taskRunId: options?.taskRunId,
+          isScheduledTask: true,
+        }),
+      );
+    }
 
     if (!output.providerFailure && output.inputTurnCompleted === true) {
       scheduledInputCompleted = true;

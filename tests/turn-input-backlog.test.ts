@@ -96,6 +96,8 @@ function createLane(kind: 'main' | 'agent') {
     resolveScheduledGroupDeliveryContract,
     agentBuilderTurnScope,
     getMessagesSinceBounded: db.getMessagesSinceBounded,
+    // No lane here waits for a usage-limit reset.
+    releaseUsageLimitWaitForNewInput: () => false,
     getMessagesSince: db.getMessagesSince,
     resolveMessageCursorSequence: db.resolveMessageCursorSequence,
     registeredGroups: { [chatJid]: group },
