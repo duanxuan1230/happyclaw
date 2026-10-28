@@ -1578,6 +1578,7 @@ async function prepareFollowUp(
     item.chat_jid,
     runtime.effectiveGroup,
     runtime.effectiveGroup.created_by,
+    runtime.agentId,
   );
   if (!expandContext) return { messages: items, replies: [] };
   const { toSend, replies } = await expandMessagesIfNeeded(
@@ -2347,6 +2348,15 @@ function parkInputForUsageLimitWait(input: {
     );
   }
   return `额度用尽，预计 ${formatUsageLimitResumeTime(wait.resumeAt)} 自动继续`;
+}
+
+function isScheduledTaskPromptMessage(message: {
+  source_kind?: string | null;
+  task_id?: string | null;
+}): boolean {
+  return (
+    message.source_kind === 'scheduled_task_prompt' || Boolean(message.task_id)
+  );
 }
 
 /**
@@ -6864,6 +6874,7 @@ function buildExpandContext(
   chatJid: string,
   group: RegisteredGroup,
   ownerOverride?: string | null,
+  agentId?: string | null,
 ): ExpandContext | null {
   const ownerId = ownerOverride ?? group.created_by;
   if (
@@ -6875,12 +6886,20 @@ function buildExpandContext(
     // downgraded owner cannot bypass the runHostAgent gate.
     return null;
   }
+  const resolvedAgentId =
+    agentId ??
+    (chatJid.includes('#agent:')
+      ? chatJid.slice(chatJid.indexOf('#agent:') + '#agent:'.length) || null
+      : null);
   return makeExpandContext({
     chatJid,
     groupFolder: group.folder,
     ownerId,
     executionMode: group.executionMode,
-    customCwd: group.customCwd,
+    customCwd:
+      (group.executionMode || 'container') === 'host'
+        ? resolveWorkspaceProjectRoot(group, { agentId: resolvedAgentId })
+        : group.customCwd,
     groupsDir: GROUPS_DIR,
     containerName: queue.getActiveContainerName(chatJid),
   });
@@ -7276,8 +7295,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
   let pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
   // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  // Scheduled-task prompts join an active wait instead of waking the lane.
   if (
-    pendingWindow.messages.length > 0 &&
+    pendingWindow.messages.some((m) => !isScheduledTaskPromptMessage(m)) &&
     releaseUsageLimitWaitForNewInput(chatJid)
   ) {
     pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
@@ -7311,6 +7331,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (pendingWindow.truncated) queue.enqueueMessageCheck(chatJid);
       return true;
     }
+  }
+
+  const activeWait = getUsageLimitWait(chatJid);
+  if (
+    activeWait?.state === 'waiting' &&
+    missedMessages.every((m) => isScheduledTaskPromptMessage(m))
+  ) {
+    for (const msg of missedMessages) {
+      setMessageFollowUp(chatJid, msg.id, {
+        mode: 'queue',
+        status: 'queued',
+        runId: `usage-limit:${activeWait.inputKey}`,
+      });
+    }
+    broadcastFollowUpUpdate(chatJid);
+    if (pendingWindow.truncated) queue.enqueueMessageCheck(chatJid);
+    return true;
   }
 
   const interactionBatch = selectRuntimeInteractionBatch(
@@ -7466,6 +7503,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Recovery mode: session was cleared to prevent session ghost, so inject
   // recent conversation history to give the fresh session context.
   const isRecovery = recoveryGroups.delete(chatJid);
+  const capabilityReset = takeSessionHistoryReinjection(
+    effectiveGroup.folder,
+    null,
+    !!sessions[effectiveGroup.folder],
+  );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
   if (isRecovery) {
@@ -7489,11 +7531,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     resetForAgentProfile ||
     resetForInteractionMode ||
     // A Skill/MCP change reset the SDK session; the conversation goes on.
-    takeSessionHistoryReinjection(
-      effectiveGroup.folder,
-      null,
-      !!sessions[effectiveGroup.folder],
-    )
+    capabilityReset
   ) {
     historyContext = buildRecentConversationHistoryContext(
       chatJid,
@@ -7669,10 +7707,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let providerFailoverPending = false;
   /** Card note while the input waits for a usage-limit reset. */
   let usageLimitWaitNote: string | null = null;
+  let parkedForUsageLimitWait = false;
   let channelDeliveryNeedsManualReconciliation = false;
   let channelManualNoticesAcknowledged = true;
   let lastReplyMsgId: string | undefined;
   const queryTaskIds = new Set<string>();
+  const nonSubagentTaskIds = new Set<string>();
   // Sub-agent Tasks are checkpointed against the DB input whose turn launched
   // them, so a replay of that input can reuse their finished answers.
   const batchMessageIds = new Set(missedMessages.map((message) => message.id));
@@ -8354,9 +8394,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
+        const visibility = resolveProcessVisibility();
+        const commentaryEvent: StreamEvent = {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: text.slice(0, 4000),
+          turnId: inputTurnId,
+          inputTurnId,
+          sessionId: activeSessionId,
+        };
+        turnTraces.observe(inputTurnId, commentaryEvent);
+        if (interactionMode === 'assistant' || visibility === 'full') {
+          broadcastStreamEvent(chatJid, commentaryEvent);
+        }
         const progressStatus = projectProgressStatusForWeb(
           interactionMode,
-          resolveProcessVisibility(),
+          visibility,
           text,
           { turnId: inputTurnId, sessionId: activeSessionId },
         );
@@ -9317,9 +9370,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               result,
               lastProcessed.id,
             );
-            // The turn's process is kept for turn_traces whatever the Web is
-            // shown live; the tracker applies the mode's own limits.
-            turnTraces.observe(outputInputTurnId, result.streamEvent);
             const processVisibility = resolveProcessVisibility();
             // Every Web frame names the input it answers, the `turn_id` of the
             // final row: a warm turn's presentation `turnId` is the Runner's
@@ -9335,8 +9385,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               inputStreamEvent,
               outputInputTurnId,
             )) {
+              turnTraces.observe(outputInputTurnId, note);
               broadcastStreamEvent(chatJid, note);
             }
+            // The turn's process is kept for turn_traces whatever the Web is
+            // shown live; the tracker applies the mode's own limits.
+            turnTraces.observe(outputInputTurnId, result.streamEvent);
             const webStreamEvent = projectSdkStreamEventForWeb(
               interactionMode,
               processVisibility,
@@ -9570,11 +9624,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
             // Persist SDK Task lifecycle to DB so tabs survive page refresh
             const se = result.streamEvent;
+            const isNonSubagentTask = [
+              'local_bash',
+              'monitor',
+              'mcp_task',
+            ].includes(se.taskType ?? '');
+            if (isNonSubagentTask) {
+              if (se.toolUseId) nonSubagentTaskIds.add(se.toolUseId);
+              if (se.taskId) nonSubagentTaskIds.add(se.taskId);
+            }
             if (
-              (se.eventType === 'task_start' && se.toolUseId) ||
-              (se.eventType === 'tool_use_start' &&
-                se.toolName === 'Task' &&
-                se.toolUseId)
+              !isNonSubagentTask &&
+              ((se.eventType === 'task_start' && se.toolUseId) ||
+                (se.eventType === 'tool_use_start' &&
+                  se.toolName === 'Task' &&
+                  se.toolUseId))
             ) {
               try {
                 const taskId = se.toolUseId;
@@ -9671,7 +9735,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 );
               }
             }
-            if (se.eventType === 'task_notification' && se.taskId) {
+            if (
+              se.eventType === 'task_notification' &&
+              se.taskId &&
+              !isNonSubagentTask &&
+              !nonSubagentTaskIds.has(se.taskId) &&
+              (!se.toolUseId || !nonSubagentTaskIds.has(se.toolUseId))
+            ) {
               try {
                 const status =
                   se.taskStatus === 'completed' ? 'completed' : 'error';
@@ -9844,12 +9914,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             rollbackIdleMainCardReservation(providerFailureInputId);
             if (result.providerFailureTerminal !== true) {
               providerFailoverPending = true;
+              const parkedInputMessageId =
+                admittedWarmMainInputs.get(providerFailureInputId)
+                  ?.inputMessageId ??
+                result.ipcReceipts?.[result.ipcReceipts.length - 1]?.cursor
+                  ?.id ??
+                providerFailureInputId;
               if (result.providerUsageLimitResumeAt !== undefined) {
+                parkedForUsageLimitWait = true;
                 await clearProcessingIndicatorForInput(providerFailureInputId);
                 usageLimitWaitNote = parkInputForUsageLimitWait({
                   laneJid: chatJid,
                   agentId: null,
-                  inputId: providerFailureInputId,
+                  inputId: parkedInputMessageId,
                   messageIds: usageLimitParkedMessageIds(
                     chatJid,
                     result,
@@ -11719,6 +11796,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (healthyCompletedInputTurns.has(ipcReplyTurnTracker.inputTurnId)) {
     commitCursor();
     await clearProcessingIndicatorForInput(ipcReplyTurnTracker.inputTurnId);
+    return true;
+  }
+  if (parkedForUsageLimitWait) {
+    recoveryGroups.delete(chatJid);
     return true;
   }
   logger.warn(
@@ -14307,7 +14388,14 @@ function runSelfCapabilityMutation<T>(
     (runnerJid) => {
       invalidateSessionAfterRunnerExit(sourceGroup, ipcAgentId);
       // After the exited runner's own teardown has finished.
-      queueMicrotask(() => releaseQueuedFollowUpsToColdReader(runnerJid));
+      queueMicrotask(() => {
+        const jids = ipcAgentId
+          ? [runnerJid]
+          : [...new Set([runnerJid, ...getJidsByFolder(sourceGroup)])];
+        for (const jid of jids) {
+          releaseQueuedFollowUpsToColdReader(jid);
+        }
+      });
     },
     mutate,
   );
@@ -16978,11 +17066,33 @@ async function processAgentConversation(
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
   let pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
   // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  // Scheduled-task prompts join an active wait instead of waking the lane.
   if (
-    pendingWindow.messages.length > 0 &&
+    pendingWindow.messages.some((m) => !isScheduledTaskPromptMessage(m)) &&
     releaseUsageLimitWaitForNewInput(virtualChatJid)
   ) {
     pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  } else if (pendingWindow.messages.length > 0) {
+    const activeWait = getUsageLimitWait(virtualChatJid);
+    if (
+      activeWait?.state === 'waiting' &&
+      pendingWindow.messages.every((m) => isScheduledTaskPromptMessage(m))
+    ) {
+      for (const msg of pendingWindow.messages) {
+        setMessageFollowUp(virtualChatJid, msg.id, {
+          mode: 'queue',
+          status: 'queued',
+          runId: `usage-limit:${activeWait.inputKey}`,
+        });
+      }
+      broadcastFollowUpUpdate(virtualChatJid);
+      if (pendingWindow.truncated) {
+        queue.enqueueTask(virtualChatJid, `agent-channel-next:${agentId}`, () =>
+          processAgentConversation(chatJid, agentId),
+        );
+      }
+      return true;
+    }
   }
   let missedMessages = pendingWindow.messages;
 
@@ -17084,6 +17194,7 @@ async function processAgentConversation(
       virtualChatJid,
       effectiveGroup,
       effectiveGroup.created_by,
+      agentId,
     );
     if (fallbackExpandCtx) {
       const { toSend, replies } = await expandMessagesIfNeeded(
@@ -17190,6 +17301,11 @@ async function processAgentConversation(
   // an empty conversation.
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
   let currentAgentSessionId = sessionId;
+  const capabilityReset = takeSessionHistoryReinjection(
+    effectiveGroup.folder,
+    agentId,
+    !!sessionId,
+  );
   // Inject history when the SDK session is fresh, or when a proactive provider
   // switch (sticky binding unhealthy/disabled) will clear the existing session
   // inside the runner — otherwise the new provider's first turn loses context.
@@ -17197,6 +17313,7 @@ async function processAgentConversation(
     !sessionId ||
     resetForAgentProfile ||
     resetForInteractionMode ||
+    capabilityReset ||
     willClearSessionOnProviderSwitch(
       effectiveGroup.folder,
       agentId,
@@ -17205,11 +17322,6 @@ async function processAgentConversation(
     );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
-  const capabilityReset = takeSessionHistoryReinjection(
-    effectiveGroup.folder,
-    agentId,
-    !!sessionId,
-  );
   if (startsFreshSession) {
     historyContext = buildRecentConversationHistoryContext(
       virtualChatJid,
@@ -17888,9 +18000,22 @@ async function processAgentConversation(
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
+        const visibility = resolveProcessVisibility();
+        const commentaryEvent: StreamEvent = {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: text.slice(0, 4000),
+          turnId: inputTurnId,
+          inputTurnId,
+          sessionId: currentAgentSessionId,
+        };
+        turnTraces.observe(inputTurnId, commentaryEvent);
+        if (interactionMode === 'assistant' || visibility === 'full') {
+          broadcastStreamEvent(chatJid, commentaryEvent, agentId);
+        }
         const progressStatus = projectProgressStatusForWeb(
           interactionMode,
-          resolveProcessVisibility(),
+          visibility,
           text,
           { turnId: inputTurnId, sessionId: currentAgentSessionId },
         );
@@ -18238,6 +18363,7 @@ async function processAgentConversation(
   let agentProviderFailoverPending = false;
   /** Card note while the input waits for a usage-limit reset. */
   let agentUsageLimitWaitNote: string | null = null;
+  let parkedForUsageLimitWait = false;
   const rotateProviderAfterAgentTurn = shouldRotatePoolProviderAfterTurn(
     effectiveGroup.folder,
     agentProfile?.model_config_id,
@@ -18702,7 +18828,6 @@ async function processAgentConversation(
         output,
         lastProcessed.id,
       );
-      turnTraces.observe(outputInputTurnId, output.streamEvent);
       const processVisibility = resolveProcessVisibility();
       // Every Web frame names the input it answers (see the main Session).
       const inputStreamEvent: StreamEvent = {
@@ -18716,8 +18841,10 @@ async function processAgentConversation(
         inputStreamEvent,
         outputInputTurnId,
       )) {
+        turnTraces.observe(outputInputTurnId, note);
         broadcastStreamEvent(chatJid, note, agentId);
       }
+      turnTraces.observe(outputInputTurnId, output.streamEvent);
       const webStreamEvent = projectSdkStreamEventForWeb(
         interactionMode,
         processVisibility,
@@ -19017,15 +19144,20 @@ async function processAgentConversation(
       rollbackIdleAgentCardReservation(providerFailureInputId);
       if (output.providerFailureTerminal !== true) {
         agentProviderFailoverPending = true;
-        retryUnfinishedTurn = !healthyAgentCompletedInputTurns.has(
-          providerFailureInputId,
-        );
+        const parkedInputMessageId =
+          admittedWarmAgentInputs.get(providerFailureInputId)?.inputMessageId ??
+          output.ipcReceipts?.[output.ipcReceipts.length - 1]?.cursor?.id ??
+          providerFailureInputId;
+        retryUnfinishedTurn =
+          output.providerUsageLimitResumeAt === undefined &&
+          !healthyAgentCompletedInputTurns.has(providerFailureInputId);
         if (output.providerUsageLimitResumeAt !== undefined) {
+          parkedForUsageLimitWait = true;
           await clearAgentProcessingIndicatorForInput(providerFailureInputId);
           agentUsageLimitWaitNote = parkInputForUsageLimitWait({
             laneJid: virtualChatJid,
             agentId,
-            inputId: providerFailureInputId,
+            inputId: parkedInputMessageId,
             messageIds: usageLimitParkedMessageIds(
               virtualChatJid,
               output,
@@ -20557,6 +20689,9 @@ async function processAgentConversation(
     ipcWatcherManager?.unwatchRuntime(effectiveGroup.folder, { agentId });
   }
 
+  if (parkedForUsageLimitWait) {
+    retryUnfinishedTurn = false;
+  }
   return !retryUnfinishedTurn;
 }
 
@@ -24592,9 +24727,18 @@ async function main(): Promise<void> {
         ).toISOString(),
         reason: 'retry_wait expired: no execution reclaimed this turn',
         // A usage-limit wait can outlast the bound; its input runs again.
-        keepCorrelationIds: listPendingUsageLimitWaits().map(
-          (wait) => wait.inputKey,
-        ),
+        keepCorrelationIds: [
+          ...new Set(
+            listPendingUsageLimitWaits().flatMap((wait) => [
+              wait.inputKey,
+              ...listQueuedFollowUps(wait.scopeKey).map((item) => item.id),
+              ...getMessagesSince(
+                wait.scopeKey,
+                lastCommittedCursor[wait.scopeKey] || EMPTY_CURSOR,
+              ).map((message) => message.id),
+            ]),
+          ),
+        ],
       });
       if (cancelled > 0) {
         logger.info({ cancelled }, 'Cancelled stale retry_wait channel turns');
@@ -24746,14 +24890,15 @@ async function main(): Promise<void> {
   );
   // Billing: user-level concurrent container limit
   queue.setUserConcurrentLimitChecker((groupJid: string) => {
-    if (!isBillingEnabled()) return { allowed: true };
     const baseJid = stripVirtualJidSuffix(groupJid);
-    const group = registeredGroups[baseJid];
-    if (!group?.created_by) return { allowed: true };
-    const owner = getUserById(group.created_by);
-    if (!owner || owner.role === 'admin') return { allowed: true };
+    const group = registeredGroups[baseJid] ?? getRegisteredGroup(baseJid);
+    const userId = group?.created_by ?? null;
+    if (!isBillingEnabled()) return { allowed: true, userId };
+    if (!userId) return { allowed: true, userId: null };
+    const owner = getUserById(userId);
+    if (!owner || owner.role === 'admin') return { allowed: true, userId };
     const limit = getUserConcurrentContainerLimit(owner.id, owner.role);
-    if (limit == null) return { allowed: true };
+    if (limit == null) return { allowed: true, userId: owner.id };
     // Count active containers for this user (including task virtual JIDs)
     let userActive = 0;
     for (const [jid, g] of Object.entries(registeredGroups)) {
@@ -24761,7 +24906,7 @@ async function main(): Promise<void> {
       if (queue.hasDirectActiveRunner(jid)) userActive++;
       userActive += queue.countActiveTaskRunners(jid);
     }
-    return { allowed: userActive < limit };
+    return { allowed: userActive < limit, userId: owner.id };
   });
   // Recovery: when agent process exits with unconsumed IPC messages,
   // re-enqueue processAgentConversation to pick them up. See issue #240.
@@ -24784,6 +24929,9 @@ async function main(): Promise<void> {
       clearPersistedIpcDeliveriesForChats(chatJids);
       for (const deliveryJid of chatJids) {
         rewindNextPullCursorToCommitted(deliveryJid);
+        if (getUsageLimitWait(deliveryJid)?.state === 'waiting') {
+          continue;
+        }
         const agentSep = deliveryJid.indexOf('#agent:');
         if (agentSep < 0) {
           recoveryGroups.add(deliveryJid);

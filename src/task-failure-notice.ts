@@ -18,7 +18,16 @@ export function normalizeTaskFailureError(error: string): string {
       '#',
     )
     .replace(/\b[0-9a-f]{12,}\b/gi, '#')
-    .replace(/\d+(?:\.\d+)?/g, '#')
+    .replace(
+      /\b\d{4}-\d{2}-\d{2}(?:[t\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?)?\b/gi,
+      '#',
+    )
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, '#')
+    .replace(
+      /\b\d+(?:\.\d+)?\s*(?:ns|us|µs|ms|s|sec|seconds?|m|min|minutes?|h|hr|hours?)\b/gi,
+      '#',
+    )
+    .replace(/\b\d{4,}\b/g, '#')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase()

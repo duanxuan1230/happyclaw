@@ -171,6 +171,33 @@ describe('scheduled task failure notice de-duplication', () => {
     expect(normalizeTaskFailureError('connection refused')).not.toBe(
       normalizeTaskFailureError('permission denied'),
     );
+    expect(normalizeTaskFailureError('HTTP 429 Too Many Requests')).not.toBe(
+      normalizeTaskFailureError('HTTP 401 Unauthorized'),
+    );
+    expect(normalizeTaskFailureError('HTTP 429')).not.toBe(
+      normalizeTaskFailureError('HTTP 401'),
+    );
+    expect(normalizeTaskFailureError('exit code 1')).not.toBe(
+      normalizeTaskFailureError('exit code 137'),
+    );
+  });
+
+  test('distinct HTTP status codes and exit codes trigger a new notification', () => {
+    const httpTask = 'decision-http-status-task';
+    expect(
+      decideTaskRunNotice({ taskId: httpTask, error: 'HTTP 429' }),
+    ).toEqual({ kind: 'notify_failure' });
+    expect(
+      decideTaskRunNotice({ taskId: httpTask, error: 'HTTP 401' }),
+    ).toEqual({ kind: 'notify_failure' });
+
+    const exitTask = 'decision-exit-code-task';
+    expect(
+      decideTaskRunNotice({ taskId: exitTask, error: 'exit code 1' }),
+    ).toEqual({ kind: 'notify_failure' });
+    expect(
+      decideTaskRunNotice({ taskId: exitTask, error: 'exit code 137' }),
+    ).toEqual({ kind: 'notify_failure' });
   });
 
   test('notifies once per streak, again on a new error, and once on recovery', () => {

@@ -295,7 +295,7 @@ export class GroupQueue {
       ) => void)
     | null = null;
   private userConcurrentLimitFn:
-    | ((groupJid: string) => { allowed: boolean })
+    | ((groupJid: string) => { allowed: boolean; userId?: string | null })
     | null = null;
   private onUnconsumedAgentIpcFn:
     | ((groupJid: string, agentId: string) => void)
@@ -827,7 +827,7 @@ export class GroupQueue {
   }
 
   setUserConcurrentLimitChecker(
-    fn: (groupJid: string) => { allowed: boolean },
+    fn: (groupJid: string) => { allowed: boolean; userId?: string | null },
   ): void {
     this.userConcurrentLimitFn = fn;
   }
@@ -982,6 +982,10 @@ export class GroupQueue {
     return null;
   }
 
+  private getUserId(groupJid: string): string | null {
+    return this.userConcurrentLimitFn?.(groupJid)?.userId ?? null;
+  }
+
   /**
    * Container slots bound execution, not warm runners. When work waits for a
    * slot and the container pool is full, close the runner that has been idle
@@ -989,17 +993,37 @@ export class GroupQueue {
    * exits. Host runners are never reclaimed: Host mode has no global process
    * pool (CLAUDE.md §4). Returns true when a runner was asked to close.
    */
-  private reclaimIdleContainerRunner(): boolean {
+  private reclaimIdleContainerRunner(waitingGroupJid?: string): boolean {
     if (this.shuttingDown) return false;
-    if (
-      this.activeContainerCount < getSystemSettings().maxConcurrentContainers
-    ) {
+    const globalAtLimit =
+      this.activeContainerCount >= getSystemSettings().maxConcurrentContainers;
+    const blockedJid =
+      waitingGroupJid ??
+      [...this.waitingGroups].find(
+        (jid) => !this.isHostMode(jid) && !this.hasCapacityFor(jid),
+      );
+    const userLimitCheck =
+      blockedJid && !this.isHostMode(blockedJid) && this.userConcurrentLimitFn
+        ? this.userConcurrentLimitFn(blockedJid)
+        : undefined;
+    const userAtLimit = userLimitCheck ? !userLimitCheck.allowed : false;
+    if (!globalAtLimit && !userAtLimit) {
       return false;
     }
+    const waitingUserId =
+      userAtLimit && blockedJid ? this.getUserId(blockedJid) : null;
     let closing = 0;
     const idle: Array<{ jid: string; state: GroupState }> = [];
     for (const [jid, state] of this.groups) {
-      if (state.active && state.closing === 'reclaim') closing++;
+      if (state.active && state.closing === 'reclaim') {
+        if (
+          globalAtLimit ||
+          !waitingUserId ||
+          this.getUserId(jid) === waitingUserId
+        ) {
+          closing++;
+        }
+      }
       if (this.isIdleContainerRunner(jid, state)) idle.push({ jid, state });
     }
     if (idle.length === 0) return false;
@@ -1017,16 +1041,30 @@ export class GroupQueue {
         (state.pendingMessages || state.pendingTasks.length > 0) &&
         !runnerKeys.has(this.getSerializationKey(jid)) &&
         !this.isHostMode(jid) &&
-        !this.isMutationPaused(jid)
+        !this.isMutationPaused(jid) &&
+        (globalAtLimit ||
+          !waitingUserId ||
+          this.getUserId(jid) === waitingUserId)
       ) {
         demand++;
       }
     }
     if (closing >= demand) return false;
     // Longest idle first; the costlier checks run only until one passes.
-    idle.sort((a, b) => (a.state.idleSince ?? 0) - (b.state.idleSince ?? 0));
-    const victim = idle.find(({ jid, state }) =>
-      this.owesNoWorkOutsideQueue(jid, state),
+    idle.sort((a, b) => {
+      if (waitingUserId) {
+        const aSameUser = this.getUserId(a.jid) === waitingUserId ? 0 : 1;
+        const bSameUser = this.getUserId(b.jid) === waitingUserId ? 0 : 1;
+        if (aSameUser !== bSameUser) return aSameUser - bSameUser;
+      }
+      return (a.state.idleSince ?? 0) - (b.state.idleSince ?? 0);
+    });
+    const victim = idle.find(
+      ({ jid, state }) =>
+        (globalAtLimit ||
+          !waitingUserId ||
+          this.getUserId(jid) === waitingUserId) &&
+        this.owesNoWorkOutsideQueue(jid, state),
     );
     if (!victim) return false;
     victim.state.closing = 'reclaim';
@@ -1645,6 +1683,7 @@ export class GroupQueue {
     if (this.isMutationPaused(groupJid)) return false;
     const state = this.resolveActiveState(groupJid);
     if (!state) return false;
+    if (state.closing) return false;
     // Task-runner exclusion mirrors sendMessage(). Conversation agents
     // (`#agent:` virtual JIDs) DO accept IPC messages — exempt them.
     if (state.activeRunnerIsTask && !groupJid.includes('#agent:')) {
@@ -1729,7 +1768,7 @@ export class GroupQueue {
         },
         'At concurrency limit, message queued',
       );
-      this.reclaimIdleContainerRunner();
+      this.reclaimIdleContainerRunner(groupJid);
       return;
     }
 
@@ -1820,7 +1859,7 @@ export class GroupQueue {
         },
         'At concurrency limit, task queued',
       );
-      this.reclaimIdleContainerRunner();
+      this.reclaimIdleContainerRunner(groupJid);
       return true;
     }
 

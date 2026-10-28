@@ -27,6 +27,7 @@ export interface ProviderPoolMember {
 interface ModelQuarantine {
   since: number;
   until: number | null;
+  reportedResetAt?: number | null;
 }
 
 /**
@@ -82,6 +83,7 @@ export interface ProviderHealthStatus {
    * Null means "no upstream signal — use the configured interval".
    */
   quarantinedUntil: number | null;
+  reportedResetAt?: number | null;
   activeSessionCount: number;
 }
 
@@ -101,6 +103,7 @@ function makeHealthStatus(profileId: string): ProviderHealthStatus {
     lastSuccessAt: null,
     unhealthySince: null,
     quarantinedUntil: null,
+    reportedResetAt: null,
     activeSessionCount: 0,
   };
 }
@@ -120,6 +123,16 @@ function normalizeResetStamp(
   if (ms <= now) return null;
   // Guard against absurd stamps (>24h) quarantining an account for days.
   return Math.min(ms, now + MAX_QUARANTINE_MS);
+}
+
+function normalizeReportedResetStamp(
+  resetsAt: number | null | undefined,
+  now: number,
+): number | null {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return null;
+  const ms = resetsAt < 1e11 ? resetsAt * 1000 : resetsAt;
+  if (ms <= now) return null;
+  return ms;
 }
 
 // ─── ProviderPool 类 ──────────────────────────────────────
@@ -183,9 +196,11 @@ export class ProviderPool {
     if (!trimmed) return;
     const now = Date.now();
     const until = normalizeResetStamp(quarantineUntil, now);
+    const reportedResetAt = normalizeReportedResetStamp(quarantineUntil, now);
     this.modelQuarantine.set(modelKey(profileId, trimmed), {
       since: now,
       until,
+      reportedResetAt,
     });
     logger.warn(
       {
@@ -303,7 +318,7 @@ export class ProviderPool {
       let accountAt = now;
       if (health && !health.healthy) {
         if (health.quarantinedUntil === null) continue;
-        accountAt = health.quarantinedUntil;
+        accountAt = health.reportedResetAt ?? health.quarantinedUntil;
       }
       let tierAt: number | null = null;
       for (const tier of tiers) {
@@ -312,7 +327,7 @@ export class ProviderPool {
         const entry = model
           ? this.modelQuarantine.get(modelKey(member.profileId, model))
           : undefined;
-        const at = !entry ? now : entry.until;
+        const at = !entry ? now : (entry.reportedResetAt ?? entry.until);
         if (at !== null && (tierAt === null || at < tierAt)) tierAt = at;
       }
       if (tierAt === null) continue;
@@ -413,6 +428,7 @@ export class ProviderPool {
       health.healthy = true;
       health.unhealthySince = null;
       health.quarantinedUntil = null;
+      health.reportedResetAt = null;
       logger.info({ profileId }, 'Provider recovered after success report');
     }
   }
@@ -436,7 +452,13 @@ export class ProviderPool {
     // Always take the latest upstream signal: a repeated rejection carries a
     // fresher reset stamp than the one recorded when the provider first failed.
     const reportedUntil = normalizeResetStamp(quarantineUntil, now);
-    if (reportedUntil !== null) health.quarantinedUntil = reportedUntil;
+    if (reportedUntil !== null) {
+      health.quarantinedUntil = reportedUntil;
+      health.reportedResetAt = normalizeReportedResetStamp(
+        quarantineUntil,
+        now,
+      );
+    }
 
     if (health.healthy && health.consecutiveErrors >= this.unhealthyThreshold) {
       health.healthy = false;
@@ -490,6 +512,7 @@ export class ProviderPool {
         health.consecutiveErrors = 0;
         health.unhealthySince = null;
         health.quarantinedUntil = null;
+        health.reportedResetAt = null;
         logger.info(
           { profileId: member.profileId },
           'Provider auto-recovered after recovery interval',
