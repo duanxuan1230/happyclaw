@@ -68,12 +68,9 @@ describe('Agent prompt and capability frontend contract', () => {
     });
   });
 
-  test('offers a usable four-part creation wizard, template, and version diff', () => {
+  test('offers a usable four-part creation wizard and template', () => {
     const page = read('web/src/pages/AgentProfilesPage.tsx');
     const editor = read('web/src/components/agents/AgentPromptEditor.tsx');
-    const history = read(
-      'web/src/components/agents/AgentPromptVersionHistory.tsx',
-    );
 
     expect(page).toMatch(
       /基本信息[\s\S]*四段提示词[\s\S]*宿主机配置[\s\S]*Skills \/ MCP[\s\S]*确认创建/,
@@ -82,9 +79,6 @@ describe('Agent prompt and capability frontend contract', () => {
     expect(page).toContain('提示词完成度');
     expect(editor).toContain('一键填入推荐模板');
     expect(editor).toContain('DEFAULT_AGENT_PROMPTS');
-    expect(history).toContain('对比当前');
-    expect(history).toContain('changedSections');
-    expect(history).toContain('<PromptSnapshot');
   });
 
   test('governs host Skills independently from host Prompt and Rules', () => {

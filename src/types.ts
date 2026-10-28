@@ -362,17 +362,6 @@ export interface AgentProfilePrompts {
   prompt_mode: AgentProfilePromptMode;
 }
 
-export interface AgentProfilePromptVersion extends AgentProfilePrompts {
-  id: string;
-  agent_profile_id: string;
-  version: number;
-  name: string;
-  identity_hash: string;
-  change_source: 'create' | 'update' | 'restore' | 'migration';
-  restored_from_version: number | null;
-  created_at: string;
-}
-
 /** Durable Workspace↔AgentProfile binding and its interaction contract. */
 export interface WorkspaceAgentProfileBinding {
   group_folder: string;

@@ -427,8 +427,8 @@ data/
 - 用户与认证：`users`、`user_sessions`、`invite_codes`、`auth_audit_log`
 - 工作区与会话：`registered_groups`、`sessions`、`workspaces`、
   `workspace_runtime_sessions`、`session_model_selections`
-- Agent：`agent_profiles`、`agent_profile_prompt_versions`、
-  `agent_builder_drafts`、`workspace_agent_profiles`、`agents`
+- Agent：`agent_profiles`、`agent_builder_drafts`、`workspace_agent_profiles`、
+  `agents`
 - 渠道：`channel_accounts`、`channel_mounts`、`agent_channel_mounts`、
   `im_context_bindings`
 - 消息与调度：`chats`、`messages`、`scheduled_tasks`、`task_runs`、

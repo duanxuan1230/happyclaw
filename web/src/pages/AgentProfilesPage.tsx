@@ -68,7 +68,6 @@ import {
 } from '../components/agents/AgentSection';
 import { AgentPromptAssistant } from '../components/agents/AgentPromptAssistant';
 import { AgentPromptEditor } from '../components/agents/AgentPromptEditor';
-import { AgentPromptVersionHistory } from '../components/agents/AgentPromptVersionHistory';
 import { EffectiveCapabilitiesPreview } from '../components/agents/EffectiveCapabilitiesPreview';
 import { AgentGovernanceSection } from '../components/agents/AgentGovernanceSection';
 import {
@@ -272,8 +271,6 @@ export function AgentProfilesPage() {
     refreshProfile,
     loadProfileGovernance,
     retryRuntimeCleanup,
-    loadPromptVersions,
-    restorePromptVersion,
     governanceByProfile,
     governanceLoading,
     governanceErrors,
@@ -1380,9 +1377,6 @@ export function AgentProfilesPage() {
                   <span className="min-w-0 flex-1 truncate">
                     {profile.name}
                   </span>
-                  <span className="shrink-0 text-micro font-normal text-faint-foreground tabular-nums max-lg:hidden">
-                    v{profile.version}
-                  </span>
                 </button>
               );
             })
@@ -1533,15 +1527,7 @@ export function AgentProfilesPage() {
                   <h1 className="truncate text-title-sm text-foreground">
                     {name.trim() || '新智能体'}
                   </h1>
-                  {draftMode ? (
-                    <Badge variant="neutral">草稿</Badge>
-                  ) : (
-                    selected && (
-                      <Badge variant="neutral" className="max-sm:hidden">
-                        v{selected.version}
-                      </Badge>
-                    )
-                  )}
+                  {draftMode && <Badge variant="neutral">草稿</Badge>}
                   {hasUnsavedChanges && (
                     <Badge variant="outline" dot="warning">
                       有未保存修改
@@ -1943,42 +1929,21 @@ export function AgentProfilesPage() {
                   onOpenAssistant={draftMode ? undefined : setAssistantSection}
                 />
                 {!draftMode && selected && (
-                  <>
-                    <AgentPromptAssistant
-                      key={selected.id}
-                      profileId={selected.id}
-                      agentName={name.trim() || selected.name}
-                      currentPrompts={currentPrompts}
-                      activeSection={assistantSection}
-                      onApply={setCurrentPrompts}
-                    />
-                    <AgentPromptVersionHistory
-                      profileId={selected.id}
-                      currentVersion={selected.version}
-                      currentPrompts={currentPrompts}
-                      loadVersions={loadPromptVersions}
-                      restoreVersion={restorePromptVersion}
-                      confirmDiscardUnsavedChanges={
-                        confirmDiscardUnsavedChanges
-                      }
-                      onRestored={(profile) => {
-                        setCurrentPrompts({
-                          identity_prompt: profile.identity_prompt,
-                          soul_prompt: profile.soul_prompt,
-                          agents_prompt: profile.agents_prompt,
-                          tools_prompt: profile.tools_prompt,
-                        });
-                        setPromptMode(profile.prompt_mode);
-                      }}
-                    />
-                  </>
+                  <AgentPromptAssistant
+                    key={selected.id}
+                    profileId={selected.id}
+                    agentName={name.trim() || selected.name}
+                    currentPrompts={currentPrompts}
+                    activeSection={assistantSection}
+                    onApply={setCurrentPrompts}
+                  />
                 )}
               </div>
 
               {draftMode && draftStep === 5 && (
                 <AgentSection
                   title="确认创建"
-                  description="检查核心设置。创建后仍可随时修改并通过版本历史回退提示词。"
+                  description="检查核心设置。创建后仍可随时修改。"
                 >
                   <SettingsGroup>
                     <dl className="divide-y divide-surface-border">

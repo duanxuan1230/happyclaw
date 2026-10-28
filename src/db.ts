@@ -14,7 +14,6 @@ import {
   AgentBuilderDraft,
   AgentProfilePromptMode,
   AgentProfilePrompts,
-  AgentProfilePromptVersion,
   AgentProfileRuntimePolicy,
   AgentKind,
   AgentStatus,
@@ -1217,25 +1216,6 @@ export function initDatabase(
     CREATE INDEX IF NOT EXISTS idx_agent_profiles_owner
       ON agent_profiles(owner_user_id, status);
 
-    CREATE TABLE IF NOT EXISTS agent_profile_prompt_versions (
-      id TEXT PRIMARY KEY,
-      agent_profile_id TEXT NOT NULL,
-      version INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      identity_prompt TEXT NOT NULL DEFAULT '',
-      soul_prompt TEXT NOT NULL DEFAULT '',
-      agents_prompt TEXT NOT NULL DEFAULT '',
-      tools_prompt TEXT NOT NULL DEFAULT '',
-      prompt_mode TEXT NOT NULL DEFAULT 'append',
-      identity_hash TEXT NOT NULL,
-      change_source TEXT NOT NULL DEFAULT 'update',
-      restored_from_version INTEGER,
-      created_at TEXT NOT NULL,
-      UNIQUE(agent_profile_id, version)
-    );
-    CREATE INDEX IF NOT EXISTS idx_agent_profile_prompt_versions_profile
-      ON agent_profile_prompt_versions(agent_profile_id, version DESC);
-
     CREATE TABLE IF NOT EXISTS agent_builder_drafts (
       id TEXT PRIMARY KEY,
       owner_user_id TEXT NOT NULL,
@@ -2325,26 +2305,6 @@ export function initDatabase(
     'confirmation_phrase',
     "TEXT NOT NULL DEFAULT ''",
   );
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_profile_prompt_versions (
-      id TEXT PRIMARY KEY,
-      agent_profile_id TEXT NOT NULL,
-      version INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      identity_prompt TEXT NOT NULL DEFAULT '',
-      soul_prompt TEXT NOT NULL DEFAULT '',
-      agents_prompt TEXT NOT NULL DEFAULT '',
-      tools_prompt TEXT NOT NULL DEFAULT '',
-      prompt_mode TEXT NOT NULL DEFAULT 'append',
-      identity_hash TEXT NOT NULL,
-      change_source TEXT NOT NULL DEFAULT 'update',
-      restored_from_version INTEGER,
-      created_at TEXT NOT NULL,
-      UNIQUE(agent_profile_id, version)
-    );
-    CREATE INDEX IF NOT EXISTS idx_agent_profile_prompt_versions_profile
-      ON agent_profile_prompt_versions(agent_profile_id, version DESC);
-  `);
   if (promptSchemaVersion < 48) {
     const legacyRows = prepareCached(
       'SELECT * FROM agent_profiles',
@@ -2381,17 +2341,6 @@ export function initDatabase(
           identityHash,
           String(row.id),
         );
-        insertAgentProfilePromptVersionSnapshot({
-          profileId: String(row.id),
-          version: Number(row.version ?? 1),
-          name: String(row.name ?? ''),
-          prompts,
-          identityHash,
-          changeSource: 'migration',
-          createdAt: String(
-            row.updated_at ?? row.created_at ?? new Date().toISOString(),
-          ),
-        });
       }
     })();
   }
@@ -2850,6 +2799,10 @@ export function initDatabase(
   } else {
     dropStrayRouterCursorBlobs();
   }
+
+  // v83 -> v84: Agents no longer keep a prompt history. The pre-migration
+  // backup still holds the old snapshots.
+  db.exec('DROP TABLE IF EXISTS agent_profile_prompt_versions');
 
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
@@ -9548,92 +9501,6 @@ export function computeAgentProfileIdentityHash(
     .digest('hex');
 }
 
-function mapAgentProfilePromptVersionRow(
-  row: Record<string, unknown>,
-): AgentProfilePromptVersion {
-  return {
-    id: String(row.id),
-    agent_profile_id: String(row.agent_profile_id),
-    version: Number(row.version),
-    name: String(row.name),
-    identity_prompt: String(row.identity_prompt ?? ''),
-    soul_prompt: String(row.soul_prompt ?? ''),
-    agents_prompt: String(row.agents_prompt ?? ''),
-    tools_prompt: String(row.tools_prompt ?? ''),
-    prompt_mode: row.prompt_mode === 'replace' ? 'replace' : 'append',
-    identity_hash: String(row.identity_hash),
-    change_source:
-      row.change_source === 'create' ||
-      row.change_source === 'restore' ||
-      row.change_source === 'migration'
-        ? row.change_source
-        : 'update',
-    restored_from_version:
-      row.restored_from_version == null
-        ? null
-        : Number(row.restored_from_version),
-    created_at: String(row.created_at),
-  };
-}
-
-function insertAgentProfilePromptVersionSnapshot(input: {
-  profileId: string;
-  version: number;
-  name: string;
-  prompts: AgentProfilePrompts;
-  identityHash: string;
-  changeSource: AgentProfilePromptVersion['change_source'];
-  restoredFromVersion?: number | null;
-  createdAt?: string;
-}): void {
-  prepareCached(`INSERT OR IGNORE INTO agent_profile_prompt_versions (
-      id, agent_profile_id, version, name,
-      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-      identity_hash, change_source, restored_from_version, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    crypto.randomUUID(),
-    input.profileId,
-    input.version,
-    input.name,
-    input.prompts.identity_prompt,
-    input.prompts.soul_prompt,
-    input.prompts.agents_prompt,
-    input.prompts.tools_prompt,
-    input.prompts.prompt_mode,
-    input.identityHash,
-    input.changeSource,
-    input.restoredFromVersion ?? null,
-    input.createdAt ?? new Date().toISOString(),
-  );
-}
-
-export function listAgentProfilePromptVersions(
-  profileId: string,
-  ownerUserId: string,
-): AgentProfilePromptVersion[] {
-  const profile = getAgentProfileForUser(profileId, ownerUserId);
-  if (!profile) return [];
-  const rows = prepareCached(`SELECT * FROM agent_profile_prompt_versions
-       WHERE agent_profile_id = ? ORDER BY version DESC`).all(
-    profileId,
-  ) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentProfilePromptVersionRow);
-}
-
-export function getAgentProfilePromptVersion(
-  profileId: string,
-  ownerUserId: string,
-  version: number,
-): AgentProfilePromptVersion | undefined {
-  const profile = getAgentProfileForUser(profileId, ownerUserId);
-  if (!profile) return undefined;
-  const row = prepareCached(`SELECT * FROM agent_profile_prompt_versions
-       WHERE agent_profile_id = ? AND version = ?`).get(profileId, version) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? mapAgentProfilePromptVersionRow(row) : undefined;
-}
-
 function mapAgentProfileRow(row: Record<string, unknown>): AgentProfile {
   const name = String(row.name);
   const persistedIncludeClaudePreset =
@@ -9949,37 +9816,26 @@ export function getOrCreateDefaultAgentProfile(userId: string): AgentProfile {
     name,
   );
   const runtimePolicyJson = serializeAgentProfileRuntimePolicy(runtimePolicy);
-  db.transaction(() => {
-    prepareCached(`INSERT INTO agent_profiles (
-        id, owner_user_id, name,
-        identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-        include_claude_preset, runtime_policy, identity_hash, version,
-        is_default, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'active', ?, ?)`).run(
-      id,
-      userId,
-      name,
-      prompts.identity_prompt,
-      prompts.soul_prompt,
-      prompts.agents_prompt,
-      prompts.tools_prompt,
-      prompts.prompt_mode,
-      includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
-      runtimePolicyJson,
-      identityHash,
-      now,
-      now,
-    );
-    insertAgentProfilePromptVersionSnapshot({
-      profileId: id,
-      version: 1,
-      name,
-      prompts,
-      identityHash,
-      changeSource: 'create',
-      createdAt: now,
-    });
-  })();
+  prepareCached(`INSERT INTO agent_profiles (
+      id, owner_user_id, name,
+      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
+      include_claude_preset, runtime_policy, identity_hash, version,
+      is_default, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'active', ?, ?)`).run(
+    id,
+    userId,
+    name,
+    prompts.identity_prompt,
+    prompts.soul_prompt,
+    prompts.agents_prompt,
+    prompts.tools_prompt,
+    prompts.prompt_mode,
+    includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
+    runtimePolicyJson,
+    identityHash,
+    now,
+    now,
+  );
   return getAgentProfile(id)!;
 }
 
@@ -10028,41 +9884,30 @@ export function createAgentProfile(input: {
     runtimePolicy,
     input.name,
   );
-  db.transaction(() => {
-    prepareCached(`INSERT INTO agent_profiles (
-        id, owner_user_id, name,
-        identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-        include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
-        is_default, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
-      id,
-      input.ownerUserId,
-      input.name,
-      prompts.identity_prompt,
-      prompts.soul_prompt,
-      prompts.agents_prompt,
-      prompts.tools_prompt,
-      prompts.prompt_mode,
-      includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
-      input.avatarEmoji ?? null,
-      input.avatarColor ?? null,
-      input.modelConfigId ?? null,
-      (input.modelConfigId && input.model) || null,
-      runtimePolicyJson,
-      identityHash,
-      now,
-      now,
-    );
-    insertAgentProfilePromptVersionSnapshot({
-      profileId: id,
-      version: 1,
-      name: input.name,
-      prompts,
-      identityHash,
-      changeSource: 'create',
-      createdAt: now,
-    });
-  })();
+  prepareCached(`INSERT INTO agent_profiles (
+      id, owner_user_id, name,
+      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
+      include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
+      is_default, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
+    id,
+    input.ownerUserId,
+    input.name,
+    prompts.identity_prompt,
+    prompts.soul_prompt,
+    prompts.agents_prompt,
+    prompts.tools_prompt,
+    prompts.prompt_mode,
+    includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
+    input.avatarEmoji ?? null,
+    input.avatarColor ?? null,
+    input.modelConfigId ?? null,
+    (input.modelConfigId && input.model) || null,
+    runtimePolicyJson,
+    identityHash,
+    now,
+    now,
+  );
   return getAgentProfile(id)!;
 }
 
@@ -10084,8 +9929,6 @@ export function updateAgentProfile(
     /** Null runs the configuration's default; another configuration clears it. */
     model?: string | null;
     runtimePolicy?: RuntimePolicyInput | AgentProfileRuntimePolicy | null;
-    changeSource?: AgentProfilePromptVersion['change_source'];
-    restoredFromVersion?: number | null;
   },
 ): AgentProfile | undefined {
   const existing = getAgentProfileForUser(profileId, ownerUserId);
@@ -10141,60 +9984,37 @@ export function updateAgentProfile(
     nextName,
   );
   const identityChanged = nextHash !== existing.identity_hash;
-  const promptChanged =
-    nextPrompts.identity_prompt !== existing.identity_prompt ||
-    nextPrompts.soul_prompt !== existing.soul_prompt ||
-    nextPrompts.agents_prompt !== existing.agents_prompt ||
-    nextPrompts.tools_prompt !== existing.tools_prompt ||
-    nextPrompts.prompt_mode !== existing.prompt_mode;
+  // The version is the Agent's runtime revision: it advances with anything
+  // that changes how its runs behave so existing SDK sessions are invalidated.
   const nextVersion =
     identityChanged || modelConfigChanged || modelChanged
       ? existing.version + 1
       : existing.version;
   const now = new Date().toISOString();
-  db.transaction(() => {
-    prepareCached(`UPDATE agent_profiles
-       SET name = ?, identity_prompt = ?, soul_prompt = ?, agents_prompt = ?, tools_prompt = ?,
-           prompt_mode = ?, include_claude_preset = ?, avatar_emoji = ?, avatar_color = ?, avatar_url = ?, model_config_id = ?,
-           model = ?, runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
-       WHERE id = ? AND owner_user_id = ? AND status = 'active'`).run(
-      nextName,
-      nextPrompts.identity_prompt,
-      nextPrompts.soul_prompt,
-      nextPrompts.agents_prompt,
-      nextPrompts.tools_prompt,
-      nextPrompts.prompt_mode,
-      includeClaudePresetForMode(nextPrompts.prompt_mode) ? 1 : 0,
-      nextAvatarEmoji,
-      nextAvatarColor,
-      nextAvatarUrl,
-      nextModelConfigId,
-      nextModel,
-      serializeAgentProfileRuntimePolicy(nextRuntimePolicy),
-      nextHash,
-      nextVersion,
-      now,
-      profileId,
-      ownerUserId,
-    );
-    // Runtime identity versions intentionally also advance for name and
-    // capability-policy changes so existing SDK sessions are invalidated.
-    // Prompt history, however, is a history of the four prompt sections and
-    // prompt mode only; recording unrelated identity versions here would show
-    // duplicate prompt revisions in the editor.
-    if (promptChanged) {
-      insertAgentProfilePromptVersionSnapshot({
-        profileId,
-        version: nextVersion,
-        name: nextName,
-        prompts: nextPrompts,
-        identityHash: nextHash,
-        changeSource: updates.changeSource ?? 'update',
-        restoredFromVersion: updates.restoredFromVersion,
-        createdAt: now,
-      });
-    }
-  })();
+  prepareCached(`UPDATE agent_profiles
+     SET name = ?, identity_prompt = ?, soul_prompt = ?, agents_prompt = ?, tools_prompt = ?,
+         prompt_mode = ?, include_claude_preset = ?, avatar_emoji = ?, avatar_color = ?, avatar_url = ?, model_config_id = ?,
+         model = ?, runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
+     WHERE id = ? AND owner_user_id = ? AND status = 'active'`).run(
+    nextName,
+    nextPrompts.identity_prompt,
+    nextPrompts.soul_prompt,
+    nextPrompts.agents_prompt,
+    nextPrompts.tools_prompt,
+    nextPrompts.prompt_mode,
+    includeClaudePresetForMode(nextPrompts.prompt_mode) ? 1 : 0,
+    nextAvatarEmoji,
+    nextAvatarColor,
+    nextAvatarUrl,
+    nextModelConfigId,
+    nextModel,
+    serializeAgentProfileRuntimePolicy(nextRuntimePolicy),
+    nextHash,
+    nextVersion,
+    now,
+    profileId,
+    ownerUserId,
+  );
   return getAgentProfile(profileId);
 }
 

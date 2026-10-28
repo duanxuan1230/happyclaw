@@ -413,8 +413,6 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 - `POST|DELETE /api/agent-profiles/:id/avatar`
 - `POST /api/agent-profiles/:id/refine-prompt`
 - `GET /api/agent-profiles/:id/workspaces`
-- `GET /api/agent-profiles/:id/prompt-versions`
-- `POST /api/agent-profiles/:id/prompt-versions/:version/restore`
 - `POST /api/agent-profiles/:id/effective-capabilities`
 
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次

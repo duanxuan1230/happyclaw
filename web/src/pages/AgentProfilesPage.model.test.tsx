@@ -31,8 +31,6 @@ vi.mock('../stores/agent-profiles', () => ({
       runtime_cleanup_pending: false,
     })),
     retryRuntimeCleanup: vi.fn(),
-    loadPromptVersions: vi.fn(async () => []),
-    restorePromptVersion: vi.fn(),
     governanceByProfile: {},
     governanceLoading: {},
     governanceErrors: {},
@@ -79,9 +77,6 @@ vi.mock('../components/agents/AgentPromptAssistant', () => ({
 }));
 vi.mock('../components/agents/AgentPromptEditor', () => ({
   AgentPromptEditor: () => null,
-}));
-vi.mock('../components/agents/AgentPromptVersionHistory', () => ({
-  AgentPromptVersionHistory: () => null,
 }));
 vi.mock('../components/agents/EffectiveCapabilitiesPreview', () => ({
   EffectiveCapabilitiesPreview: () => null,

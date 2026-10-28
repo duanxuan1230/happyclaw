@@ -65,7 +65,6 @@ describe('Agent profile frontend write contract', () => {
       governanceByProfile: {},
       governanceLoading: {},
       governanceErrors: {},
-      promptVersionsByProfile: {},
       loading: false,
       profilesError: null,
       error: null,

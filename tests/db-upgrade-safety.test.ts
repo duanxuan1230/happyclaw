@@ -203,6 +203,8 @@ describe('schema version head', () => {
     // order they happened (schema-v82-turn-steps.test.ts).
     // v83: agent_profiles.model, the model an Agent picks within its model
     // configuration (schema-v83-agent-model.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(83);
+    // v84: drop agent_profile_prompt_versions; Agents keep no prompt history
+    // (schema-v84-drop-agent-prompt-versions.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
   });
 });

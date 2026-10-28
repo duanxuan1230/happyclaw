@@ -37,14 +37,12 @@ import {
 import {
   archiveAgentProfile,
   createAgentProfile,
-  getAgentProfilePromptVersion,
   getAgentProfileForUser,
   getAllRegisteredGroups,
   getOrCreateDefaultAgentProfile,
   getWorkspaceAgentProfileId,
   listAgentChannelMountsForProfile,
   listAgentProfilesForUser,
-  listAgentProfilePromptVersions,
   listWorkspaceRuntimeSessionsByWorkspace,
   mergeAgentProfileRuntimePolicy,
   normalizeAgentProfileRuntimePolicy,
@@ -723,109 +721,6 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
       }),
   );
 });
-
-agentProfileRoutes.get('/:id/prompt-versions', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const id = c.req.param('id');
-  const profile = getAgentProfileForUser(id, user.id);
-  if (!profile) return c.json({ error: '智能体配置不存在' }, 404);
-  return c.json({ versions: listAgentProfilePromptVersions(id, user.id) });
-});
-
-agentProfileRoutes.post(
-  '/:id/prompt-versions/:version/restore',
-  authMiddleware,
-  async (c) => {
-    const user = c.get('user') as AuthUser;
-    const id = c.req.param('id');
-    const version = Number(c.req.param('version'));
-    if (!Number.isSafeInteger(version) || version < 1) {
-      return c.json({ error: 'Invalid prompt version' }, 400);
-    }
-
-    return withAgentProfileLocks([id], async () => {
-      const existing = getAgentProfileForUser(id, user.id);
-      if (!existing) return c.json({ error: '智能体配置不存在' }, 404);
-      const target = getAgentProfilePromptVersion(id, user.id, version);
-      if (!target) return c.json({ error: 'Prompt version not found' }, 404);
-
-      const promptChanged =
-        target.identity_prompt !== existing.identity_prompt ||
-        target.soul_prompt !== existing.soul_prompt ||
-        target.agents_prompt !== existing.agents_prompt ||
-        target.tools_prompt !== existing.tools_prompt ||
-        target.prompt_mode !== existing.prompt_mode;
-      const commit = () =>
-        updateAgentProfile(id, user.id, {
-          identityPrompt: target.identity_prompt,
-          soulPrompt: target.soul_prompt,
-          agentsPrompt: target.agents_prompt,
-          toolsPrompt: target.tools_prompt,
-          promptMode: target.prompt_mode,
-          changeSource: 'restore',
-          restoredFromVersion: version,
-        });
-
-      let profile;
-      let invalidatedRuntimeJids = 0;
-      const deps = getWebDeps();
-      const profileWorkspaces = deps
-        ? listWorkspaceGroupsForAgentProfile(user.id, id)
-        : [];
-      const runtimeWasSafetyBlocked =
-        deps != null &&
-        profileWorkspaces.some(
-          ({ jid }) => deps.queue.isGroupRuntimeSafetyBlocked?.(jid) ?? false,
-        );
-      const shouldQuiesce = promptChanged || runtimeWasSafetyBlocked;
-      const workspaces = shouldQuiesce ? profileWorkspaces : [];
-      if (shouldQuiesce && deps && workspaces.length > 0) {
-        try {
-          const result = await quiesceWorkspaceRunnersAroundCommit(
-            deps,
-            workspaces.map((workspace) => ({
-              folder: workspace.group.folder,
-              primaryJid: workspace.jid,
-            })),
-            {
-              reason: `Agent profile ${id} prompt version restored`,
-              onPostCommitFailure: (runtimeJids) =>
-                deps.queue.blockGroupsForRuntimeSafety?.(
-                  runtimeJids,
-                  `Agent profile ${id} runtime cleanup failed after prompt restore`,
-                ),
-            },
-            commit,
-          );
-          profile = result.value;
-          invalidatedRuntimeJids = result.runtimeJids.length;
-          deps.queue.unblockGroupsForRuntimeSafety?.(result.runtimeJids);
-        } catch (err) {
-          if (!(err instanceof WorkspaceRuntimeQuiesceError)) throw err;
-          return c.json(
-            {
-              error: err.persisted
-                ? 'Prompt version was restored, but runtime cleanup failed; retry the same request'
-                : 'Failed to quiesce active workspaces; prompt version was not restored',
-              persisted: err.persisted,
-              retryable: true,
-              profile: err.persisted ? err.committedValue : undefined,
-            },
-            503,
-          );
-        }
-      } else {
-        profile = promptChanged ? commit() : existing;
-      }
-
-      return c.json({
-        profile,
-        restored_from_version: version,
-        invalidated_runtime_jids: invalidatedRuntimeJids,
-      });
-    });
-  },
-);
 
 agentProfileRoutes.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;

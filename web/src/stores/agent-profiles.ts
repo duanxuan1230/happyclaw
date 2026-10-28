@@ -6,7 +6,6 @@ import type {
   AgentProfileGovernance,
   AgentProfilePromptMode,
   AgentProfilePrompts,
-  AgentProfilePromptVersion,
   AgentProfileRuntimePolicy,
   AgentProfileRuntimePolicyPatch,
   GroupInfo,
@@ -41,10 +40,6 @@ interface AgentProfilesState {
   governanceByProfile: Record<string, AgentProfileGovernance | undefined>;
   governanceLoading: Record<string, boolean | undefined>;
   governanceErrors: Record<string, string | undefined>;
-  promptVersionsByProfile: Record<
-    string,
-    AgentProfilePromptVersion[] | undefined
-  >;
   loading: boolean;
   profilesError: string | null;
   error: string | null;
@@ -52,8 +47,6 @@ interface AgentProfilesState {
   refreshProfile: (id: string) => Promise<AgentProfile>;
   loadProfileGovernance: (id: string) => Promise<AgentProfileGovernance>;
   retryRuntimeCleanup: (id: string) => Promise<void>;
-  loadPromptVersions: (id: string) => Promise<AgentProfilePromptVersion[]>;
-  restorePromptVersion: (id: string, version: number) => Promise<AgentProfile>;
   generateProfileDraft: (description: string) => Promise<AgentProfileDraft>;
   refineProfilePrompt: (
     id: string,
@@ -111,7 +104,6 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
   governanceByProfile: {},
   governanceLoading: {},
   governanceErrors: {},
-  promptVersionsByProfile: {},
   loading: false,
   profilesError: null,
   error: null,
@@ -214,36 +206,6 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       },
       error: null,
     }));
-  },
-
-  loadPromptVersions: async (id) => {
-    const data = await api.get<{ versions: AgentProfilePromptVersion[] }>(
-      `/api/agent-profiles/${encodeURIComponent(id)}/prompt-versions`,
-    );
-    set((state) => ({
-      promptVersionsByProfile: {
-        ...state.promptVersionsByProfile,
-        [id]: data.versions,
-      },
-    }));
-    return data.versions;
-  },
-
-  restorePromptVersion: async (id, version) => {
-    const data = await api.post<{
-      profile: AgentProfile;
-      restored_from_version: number;
-    }>(
-      `/api/agent-profiles/${encodeURIComponent(id)}/prompt-versions/${version}/restore`,
-      {},
-    );
-    set((state) => ({
-      profiles: state.profiles.map((profile) =>
-        profile.id === id ? data.profile : profile,
-      ),
-    }));
-    await get().loadPromptVersions(id);
-    return data.profile;
   },
 
   generateProfileDraft: async (description) => {
@@ -400,11 +362,6 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
         ),
         governanceErrors: Object.fromEntries(
           Object.entries(state.governanceErrors).filter(([key]) => key !== id),
-        ),
-        promptVersionsByProfile: Object.fromEntries(
-          Object.entries(state.promptVersionsByProfile).filter(
-            ([key]) => key !== id,
-          ),
         ),
         error: null,
       }));
