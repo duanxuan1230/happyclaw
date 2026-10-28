@@ -98,10 +98,8 @@ import {
   HOST_EXECUTION_FORBIDDEN_ERROR,
 } from './host-execution-policy.js';
 import { resolveEffectiveAgentProfile } from './agent-profile-runtime.js';
-import {
-  buildAgentProfilePrompt,
-  hasAgentProfilePrompts,
-} from './agent-profile-prompts.js';
+import { hasAgentProfilePrompts } from './agent-profile-prompts.js';
+import { toRunnerAgentProfile } from './runner-agent-profile.js';
 import {
   isInternalOnlyAgentOutput,
   SCHEDULED_TASK_SILENT_COMPLETION_NOTICE,
@@ -198,23 +196,6 @@ function pauseUnsafeScriptTask(
   if (!current || !scriptTaskRuntimePolicyError(current, deps)) return;
   updateTask(taskId, { status: 'paused', next_run: null });
   notifyTaskSchedulerChanged();
-}
-
-function toRunnerAgentProfile(profile: AgentProfile | undefined) {
-  profile = resolveEffectiveAgentProfile(profile);
-  if (!profile) return undefined;
-  return {
-    id: profile.id,
-    name: profile.name,
-    version: profile.version,
-    isDefault: profile.is_default,
-    identityHash: profile.identity_hash,
-    identityPrompt: buildAgentProfilePrompt(profile),
-    includeClaudePreset: profile.prompt_mode === 'append',
-    modelConfigId: profile.model_config_id,
-    model: profile.model,
-    runtimePolicy: profile.runtime_policy,
-  };
 }
 
 function taskSessionNeedsAgentProfileReset(

@@ -503,10 +503,8 @@ import {
 } from './channel-account-migration.js';
 import { resolveChannelAccountFallbackWorkspace } from './channel-account-routing.js';
 import { testChannelAccountCredentials } from './channel-account-connectivity.js';
-import {
-  buildAgentProfilePrompt,
-  hasAgentProfilePrompts,
-} from './agent-profile-prompts.js';
+import { hasAgentProfilePrompts } from './agent-profile-prompts.js';
+import { toRunnerAgentProfile } from './runner-agent-profile.js';
 import {
   getFeishuProviderConfigWithSource,
   getTelegramProviderConfig,
@@ -2496,25 +2494,6 @@ function resolveOwnerHomeFolder(group: RegisteredGroup): string {
     return getUserHomeGroup(group.created_by)?.folder || group.folder;
   }
   return group.folder;
-}
-
-function toContainerAgentProfile(
-  profile: AgentProfile | undefined,
-): ContainerInput['agentProfile'] | undefined {
-  profile = resolveEffectiveAgentProfile(profile);
-  if (!profile) return undefined;
-  return {
-    id: profile.id,
-    name: profile.name,
-    version: profile.version,
-    isDefault: profile.is_default,
-    identityHash: profile.identity_hash,
-    identityPrompt: buildAgentProfilePrompt(profile),
-    includeClaudePreset: profile.prompt_mode === 'append',
-    modelConfigId: profile.model_config_id,
-    model: profile.model,
-    runtimePolicy: profile.runtime_policy,
-  };
 }
 
 function resolveHappyClawOwnerProfileForTurn(input: {
@@ -11728,7 +11707,7 @@ async function runAgent(
     );
   }
   const sessionId = sessions[group.folder];
-  const containerAgentProfile = toContainerAgentProfile(resolvedAgentProfile);
+  const containerAgentProfile = toRunnerAgentProfile(resolvedAgentProfile);
   const rotateProviderAfterTurn = shouldRotatePoolProviderAfterTurn(
     group.folder,
     resolvedAgentProfile?.model_config_id,
@@ -19488,7 +19467,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
-      agentProfile: toContainerAgentProfile(agentProfile),
+      agentProfile: toRunnerAgentProfile(agentProfile),
     };
 
     // Write tasks/groups snapshots
