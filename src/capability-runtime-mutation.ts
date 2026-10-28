@@ -17,6 +17,7 @@ import {
   markFolderSessionsForHistoryReinjection,
   markSessionForHistoryReinjection,
 } from './runtime-state-store.js';
+import { logger } from './logger.js';
 import { getWebDeps } from './web-context.js';
 
 export type CapabilityMutationImpact =
@@ -143,10 +144,18 @@ function invalidateWorkspaceSessions(
 ): void {
   const deps = getWebDeps();
   for (const target of targets) {
-    markFolderSessionsForHistoryReinjection(
-      target.folder,
-      CAPABILITY_CHANGE_RESET_REASON,
-    );
+    try {
+      markFolderSessionsForHistoryReinjection(
+        target.folder,
+        CAPABILITY_CHANGE_RESET_REASON,
+      );
+    } catch (err) {
+      // The hand-off is a courtesy; the reset itself must still happen.
+      logger.warn(
+        { err, folder: target.folder },
+        'Failed to record the history hand-off for reset sessions',
+      );
+    }
     deleteWorkspaceSessions(target.folder);
     if (deps) delete deps.sessions[target.folder];
   }
