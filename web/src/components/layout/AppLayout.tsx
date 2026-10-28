@@ -185,6 +185,7 @@ export function AppLayout() {
             data.resultSummary,
             data.kind,
             data.titleGenerating,
+            data.worktree,
           );
       }
     });

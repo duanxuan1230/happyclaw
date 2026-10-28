@@ -894,6 +894,14 @@ export interface SubAgent {
   last_active_at?: string | null;
 }
 
+/** A session's own git worktree as the API and `agent_status` show it. */
+export interface SessionWorktreeInfo {
+  branch: string;
+  base_commit: string;
+  status: 'active' | 'broken';
+  broken_reason: string | null;
+}
+
 export interface ImContextBinding {
   source_jid: string;
   context_type: 'thread';
@@ -998,6 +1006,8 @@ export type WsMessageOut =
       prompt: string;
       resultSummary?: string;
       titleGenerating?: boolean;
+      /** Present for a session that owns a git worktree. */
+      worktree?: SessionWorktreeInfo;
     }
   | {
       type: 'runner_state';

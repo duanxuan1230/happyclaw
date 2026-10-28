@@ -105,6 +105,42 @@ describe('session worktrees in the chat store', () => {
     );
   });
 
+  it('takes the worktree branch from agent_status and keeps it on later updates', () => {
+    const worktree = {
+      branch: 'happyclaw/s9',
+      base_commit: 'abc',
+      status: 'active' as const,
+      broken_reason: null,
+    };
+    // Another tab created the session: this tab only sees the broadcast.
+    useChatStore
+      .getState()
+      .handleAgentStatus(
+        JID,
+        's9',
+        'idle',
+        '新对话',
+        '',
+        undefined,
+        'conversation',
+        undefined,
+        worktree,
+      );
+    expect(useChatStore.getState().agents[JID][0].worktree).toEqual(worktree);
+    useChatStore
+      .getState()
+      .handleAgentStatus(
+        JID,
+        's9',
+        'running',
+        '新对话',
+        '',
+        undefined,
+        'conversation',
+      );
+    expect(useChatStore.getState().agents[JID][0].worktree).toEqual(worktree);
+  });
+
   it('reports uncommitted worktree changes instead of failing a session delete', async () => {
     api.delete.mockRejectedValueOnce(
       dirtyError({

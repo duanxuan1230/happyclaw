@@ -61,6 +61,8 @@ import agentProfileRoutes from './routes/agent-profiles.js';
 import workspaceRoutes from './routes/workspaces.js';
 import turnTraceRoutes from './routes/turn-traces.js';
 import gitReviewRoutes from './routes/git-review.js';
+import { toSessionWorktreePayload } from './session-worktree.js';
+import { getSessionWorktree } from './session-worktree-store.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
@@ -3587,6 +3589,11 @@ export function broadcastAgentStatus(
   const allowedUserIds = getGroupAllowedUserIds(chatJid);
   // Resolve kind from DB if not provided
   const resolvedKind = kind || getAgent(agentId)?.kind;
+  // Every tab learns a session's worktree branch from its status updates.
+  const worktree =
+    resultSummary === '__removed__'
+      ? null
+      : toSessionWorktreePayload(getSessionWorktree(agentId));
   const msg: WsMessageOut = {
     type: 'agent_status',
     chatJid: jid,
@@ -3597,6 +3604,7 @@ export function broadcastAgentStatus(
     prompt,
     resultSummary,
     titleGenerating,
+    ...(worktree ? { worktree } : {}),
   };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
