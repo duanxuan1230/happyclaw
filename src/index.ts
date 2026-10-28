@@ -661,6 +661,7 @@ import {
 } from './web.js';
 import { ProactiveCommentaryRelay } from './process-commentary.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
+import { skillMutationTurnRejection } from './skill-ipc-authorization.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import {
@@ -14042,6 +14043,26 @@ function writeTaskResult(
   }
 }
 
+/** Refusal for a Skill install/uninstall from a turn the owner did not start. */
+function skillMutationTurnRejectionFor(
+  sourceGroup: string,
+  ipcAgentId: string | null,
+  ipcTaskId: string | null,
+  ownerUserId: string,
+): string | null {
+  return skillMutationTurnRejection({
+    registry: activeAgentBuilderTurns,
+    sourceFolder: sourceGroup,
+    turnScope: agentBuilderTurnScope(sourceGroup, ipcAgentId),
+    isolatedTaskRun: !!ipcTaskId,
+    ownerUserId,
+    loadPersistedInput: getAgentBuilderInputMessage,
+    getGroup: (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+    getFolderJids: getJidsByFolder,
+    getChannelType,
+  });
+}
+
 async function processTaskIpc(
   data: {
     type: string;
@@ -15990,6 +16011,26 @@ async function processTaskIpc(
           break;
         }
 
+        const installRejection = skillMutationTurnRejectionFor(
+          sourceGroup,
+          ipcAgentId,
+          ipcTaskId,
+          userId,
+        );
+        if (installRejection) {
+          logger.warn(
+            { sourceGroup, ipcAgentId, ipcTaskId, pkg },
+            'Rejected install_skill from a turn the workspace owner did not start',
+          );
+          fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+          writeExclusiveIpcResult(
+            tasksDir,
+            resultFilePath,
+            JSON.stringify({ success: false, error: installRejection }),
+          );
+          break;
+        }
+
         try {
           const result = await installSkillForUser(userId, pkg);
           fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
@@ -16061,6 +16102,26 @@ async function processTaskIpc(
           });
           fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
           writeExclusiveIpcResult(tasksDir, resultFilePath, errorResult);
+          break;
+        }
+
+        const uninstallRejection = skillMutationTurnRejectionFor(
+          sourceGroup,
+          ipcAgentId,
+          ipcTaskId,
+          userId,
+        );
+        if (uninstallRejection) {
+          logger.warn(
+            { sourceGroup, ipcAgentId, ipcTaskId, skillId },
+            'Rejected uninstall_skill from a turn the workspace owner did not start',
+          );
+          fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
+          writeExclusiveIpcResult(
+            tasksDir,
+            resultFilePath,
+            JSON.stringify({ success: false, error: uninstallRejection }),
+          );
           break;
         }
 
