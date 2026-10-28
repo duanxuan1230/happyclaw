@@ -14,6 +14,7 @@ import {
   createSessionWorktree,
   dirtyWorktreesConflict,
   findDirtySessionWorktrees,
+  refreshSessionWorktreeStatus,
   removeSessionWorktree,
   toSessionWorktreePayload,
   WorktreeUnavailableError,
@@ -400,11 +401,13 @@ async function createRequestedWorktree(
   }
 }
 
+/** The workspace's worktrees, rechecked on disk so the list shows broken and
+ * recovered checkouts as they are now. */
 function worktreesBySession(folder: string): Map<string, SessionWorktree> {
   return new Map(
     listSessionWorktreesByFolder(folder).map((record) => [
       record.agent_id,
-      record,
+      refreshSessionWorktreeStatus(record),
     ]),
   );
 }
@@ -473,16 +476,7 @@ async function releaseSessionWorktree(
       force: input.force,
     });
     if (result && !result.removed) {
-      return c.json(
-        dirtyWorktreesConflict([
-          {
-            agentId: input.sessionId,
-            branch: result.branch,
-            dirtyFiles: result.dirtyFiles,
-          },
-        ]),
-        409,
-      );
+      return c.json(dirtyWorktreesConflict([result.risk]), 409);
     }
     return null;
   } catch (error) {

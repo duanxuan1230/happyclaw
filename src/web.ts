@@ -61,7 +61,10 @@ import agentProfileRoutes from './routes/agent-profiles.js';
 import workspaceRoutes from './routes/workspaces.js';
 import turnTraceRoutes from './routes/turn-traces.js';
 import gitReviewRoutes from './routes/git-review.js';
-import { toSessionWorktreePayload } from './session-worktree.js';
+import {
+  resolveWorkspaceProjectRoot,
+  toSessionWorktreePayload,
+} from './session-worktree.js';
 import { getSessionWorktree } from './session-worktree-store.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
@@ -437,7 +440,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
     if (!deps) return c.json({ error: 'Server not initialized' }, 500);
     try {
       const snapshot = await captureWorkspaceSnapshot(
-        group.customCwd || path.join(GROUPS_DIR, group.folder),
+        resolveWorkspaceProjectRoot(group, { agentId }),
       );
       const handoff = formatFreshWindowHandoff({
         notes: freshCommand.notes,
@@ -2020,8 +2023,7 @@ function setupWebSocket(server: any): WebSocketServer {
               : chatJid;
             try {
               const snapshot = await captureWorkspaceSnapshot(
-                targetGroup.customCwd ||
-                  path.join(GROUPS_DIR, targetGroup.folder),
+                resolveWorkspaceProjectRoot(targetGroup, { agentId }),
               );
               const handoff = formatFreshWindowHandoff({
                 notes: wsFreshCommand.notes,

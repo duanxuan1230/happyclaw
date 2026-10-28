@@ -143,6 +143,14 @@ export function markSessionWorktreeBroken(
   ).run(reason, new Date().toISOString(), agentId);
 }
 
+export function markSessionWorktreeActive(agentId: string): void {
+  statement(
+    `UPDATE session_worktrees
+         SET status = 'active', broken_reason = NULL, updated_at = ?
+       WHERE agent_id = ?`,
+  ).run(new Date().toISOString(), agentId);
+}
+
 export function deleteSessionWorktreeRecord(agentId: string): void {
   statement('DELETE FROM session_worktrees WHERE agent_id = ?').run(agentId);
 }

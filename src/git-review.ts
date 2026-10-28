@@ -2,9 +2,12 @@
  * Read-only git inspection for the Review panel and session worktrees.
  *
  * Every git call goes through `runGit`: execFile-style argument arrays (no
- * shell), a timeout, a byte cap on stdout, no terminal prompts, and
- * GIT_OPTIONAL_LOCKS=0 so a status refresh never takes index.lock while an
- * Agent is running git in the same checkout. Nothing here talks to a remote.
+ * shell), a timeout, a byte cap on stdout, no terminal prompts, and no
+ * optional locks so a status refresh never takes index.lock while an Agent is
+ * running git in the same checkout. Reads never let the repository's own
+ * config run a command (see READ_ONLY_GIT_ARGS and neutralFilterArgs).
+ * Nothing here talks to a remote, though LFS or partial-clone repositories
+ * may fetch on demand while a worktree is added.
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -40,6 +43,23 @@ export interface GitRunResult {
   exitCode: number;
 }
 
+/**
+ * A repository's config can name commands git runs while reading it: an
+ * fsmonitor, hooks, optional-lock writers. A container Agent controls
+ * data/groups/<folder>/.git/config, and HappyClaw must never execute what it
+ * planted, so every call but `worktree add` turns these off.
+ */
+const READ_ONLY_GIT_ARGS = [
+  '--no-optional-locks',
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.hooksPath=/dev/null',
+];
+
+/** Diff options that keep textconv and external diff drivers from running. */
+export const NO_DIFF_DRIVERS = ['--no-textconv', '--no-ext-diff'];
+
 export async function runGit(
   cwd: string,
   args: string[],
@@ -48,6 +68,13 @@ export async function runGit(
     maxBytes?: number;
     /** Exit codes treated as success (git diff --no-index exits 1). */
     okExitCodes?: number[];
+    /** Extra `-c` pairs, e.g. from neutralFilterArgs. */
+    config?: string[];
+    /**
+     * Keep git's default behaviour (hooks, fsmonitor) for a write the user
+     * asked for in their own repository: `worktree add`.
+     */
+    trustRepoConfig?: boolean;
   } = {},
 ): Promise<GitRunResult> {
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
@@ -56,7 +83,15 @@ export async function runGit(
   return new Promise((resolve, reject) => {
     const child = spawn(
       'git',
-      ['-c', 'core.quotePath=false', '-C', cwd, ...args],
+      [
+        ...(options.trustRepoConfig ? [] : READ_ONLY_GIT_ARGS),
+        ...(options.config ?? []),
+        '-c',
+        'core.quotePath=false',
+        '-C',
+        cwd,
+        ...args,
+      ],
       {
         env: {
           ...process.env,
@@ -126,6 +161,40 @@ export async function runGit(
       resolve({ stdout, truncated: false, exitCode: code });
     });
   });
+}
+
+/**
+ * `-c` overrides that turn every configured filter driver (LFS included)
+ * into a no-op, so comparing work-tree files never runs a clean, smudge or
+ * process command from the repository's config. Reading config runs nothing.
+ */
+export async function neutralFilterArgs(cwd: string): Promise<string[]> {
+  let keys: string[];
+  try {
+    const result = await runGit(
+      cwd,
+      ['config', '--null', '--name-only', '--get-regexp', '^filter\\.'],
+      { maxBytes: 64 * 1024, okExitCodes: [0, 1] },
+    );
+    keys = result.stdout.split('\0').filter(Boolean);
+  } catch {
+    return [];
+  }
+  const names = new Set(
+    keys
+      .filter((key) => key.lastIndexOf('.') > 'filter.'.length)
+      .map((key) => key.slice('filter.'.length, key.lastIndexOf('.'))),
+  );
+  return [...names].flatMap((name) => [
+    '-c',
+    `filter.${name}.clean=cat`,
+    '-c',
+    `filter.${name}.smudge=cat`,
+    '-c',
+    `filter.${name}.process=`,
+    '-c',
+    `filter.${name}.required=false`,
+  ]);
 }
 
 export interface GitRepoLocation {
@@ -389,10 +458,11 @@ async function countUntrackedLines(
  * against HEAD. Both the number of files and the raw output are capped.
  */
 export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
+  const config = await neutralFilterArgs(root);
   const status = await runGit(
     root,
     ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'],
-    { maxBytes: GIT_STATUS_MAX_BYTES },
+    { maxBytes: GIT_STATUS_MAX_BYTES, config },
   );
   const parsed = parsePorcelainV2(status.stdout);
   const totalFiles = parsed.files.length;
@@ -401,8 +471,8 @@ export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
   if (files.some((file) => file.status !== 'untracked')) {
     const numstat = await runGit(
       root,
-      ['diff', '--numstat', '-z', '-M', '--no-ext-diff', base],
-      { maxBytes: GIT_STATUS_MAX_BYTES },
+      ['diff', '--numstat', '-z', '-M', ...NO_DIFF_DRIVERS, base],
+      { maxBytes: GIT_STATUS_MAX_BYTES, config },
     );
     const stats = parseNumstat(numstat.stdout);
     for (const file of files) {
@@ -499,10 +569,11 @@ export async function readGitFileDiff(
     requestedOrigPath && requestedOrigPath !== requestedPath
       ? normalizeRepoPath(root, requestedOrigPath)
       : undefined;
+  const config = await neutralFilterArgs(root);
   const status = await runGit(
     root,
     ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', filePath],
-    { maxBytes: 64 * 1024 },
+    { maxBytes: 64 * 1024, config },
   );
   const entry = parsePorcelainV2(status.stdout).files.find(
     (file) => file.path === filePath,
@@ -526,12 +597,12 @@ export async function readGitFileDiff(
         'diff',
         '--no-index',
         '--no-color',
-        '--no-ext-diff',
+        ...NO_DIFF_DRIVERS,
         '--',
         '/dev/null',
         filePath,
       ],
-      { maxBytes: GIT_DIFF_MAX_BYTES, okExitCodes: [0, 1] },
+      { maxBytes: GIT_DIFF_MAX_BYTES, okExitCodes: [0, 1], config },
     );
   } else {
     const head = await resolveHeadCommit(root);
@@ -541,14 +612,14 @@ export async function readGitFileDiff(
       [
         'diff',
         '--no-color',
-        '--no-ext-diff',
+        ...NO_DIFF_DRIVERS,
         '-M',
         base,
         '--',
         ...(origPath ? [origPath] : []),
         filePath,
       ],
-      { maxBytes: GIT_DIFF_MAX_BYTES },
+      { maxBytes: GIT_DIFF_MAX_BYTES, config },
     );
   }
   const binary = /^Binary files .* differ$/m.test(result.stdout);

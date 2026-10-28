@@ -2,7 +2,10 @@ import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
 import { confirmDialog } from '../stores/confirm';
-import { confirmDiscardWorktreeChanges } from '../lib/session-worktree';
+import {
+  confirmDiscardWorktreeChanges,
+  WORKTREE_IGNORED_FILES_NOTE,
+} from '../lib/session-worktree';
 import type { AgentInfo } from '../types';
 
 /**
@@ -66,7 +69,7 @@ export function useSessionActions() {
         const confirmed = await confirmDialog({
           title: '删除会话',
           message: agent?.worktree
-            ? `确定删除「${name}」吗？会话的对话记录会一并删除，无法恢复；它的独立 worktree 目录会被移除，分支 ${agent.worktree.branch} 保留。`
+            ? `确定删除「${name}」吗？会话的对话记录会一并删除，无法恢复；它的独立 worktree 目录会被移除，分支 ${agent.worktree.branch} 保留。${WORKTREE_IGNORED_FILES_NOTE}`
             : `确定删除「${name}」吗？会话的对话记录会一并删除，无法恢复。工作区文件不受影响。`,
           confirmText: '删除',
           variant: 'danger',

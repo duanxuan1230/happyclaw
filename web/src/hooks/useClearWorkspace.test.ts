@@ -14,6 +14,7 @@ describe('workspaceRebuildMessage', () => {
     expect(message).not.toContain('工作目录文件');
     expect(message).toContain('自定义工作目录 /srv/repo 中的文件不会被删除');
     expect(message).toContain('会话的独立 worktree 目录（分支保留）');
+    expect(message).toContain('被 .gitignore 忽略的文件');
   });
 
   it('deletes the HappyClaw-managed directory otherwise', () => {

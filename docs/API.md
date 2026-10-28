@@ -395,8 +395,13 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 - `GET /api/groups/:jid/workdir/peers?agentId=`
 
 访问检查与文件接口相同：看不到的工作区返回 404，宿主机工作区需要宿主机执行权限
-（403）。git 只对宿主机模式的工作区执行，命令使用参数数组、有超时与输出上限，不访问
-网络。Docker 工作区的仓库配置和 hook 由容器内的 Agent 控制，不在宿主机上执行。
+（403）。git 只对宿主机模式的工作区执行，命令使用参数数组、有超时与输出上限。宿主机上的
+只读 git 调用（这里的 status、diff，删除 worktree 前的改动检查，`/fresh` 的工作区快照）
+一律关闭 fsmonitor、hooks、textconv、外部 diff 和仓库配置的 filter（clean、smudge、
+process），也不取可选锁：Docker 工作区的 `.git/config` 由容器内的 Agent 控制，读取时不
+执行其中配置的任何命令。只有用户发起的 `worktree add` 保持 git 默认行为（运行仓库自己的
+hook）。HappyClaw 本身不访问网络，但 LFS 或 partial clone 仓库在 `worktree add` 和 diff
+时可能按需访问远端。
 
 `git/status` 读取会话的 worktree，或工作目录所在的仓库（`data/groups/{folder}` 只认它
 自己的仓库），返回 200：
@@ -495,10 +500,12 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
   git 失败返回 500 `WORKTREE_CREATE_FAILED`。响应与 `GET` 列表的会话带
   `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
   或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
-- 删除带 worktree 的会话会移除 worktree 目录、保留分支；有未提交改动（含未跟踪文件）
-  时返回 409
-  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files"}]}`，
-  带 `?force_worktree=true` 确认后才丢弃。删除工作区和 `clear-history` 同理（409 相同），
+- 删除带 worktree 的会话会移除 worktree 目录、保留分支。可能丢失内容时返回 409
+  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules"}]}`：
+  有未提交改动（含未跟踪文件）；目录还在但状态读不出（`.git` 丢失或 git 失败，按有改动
+  处理）；或初始化过子模块（子模块的本地提交存放在 worktree 的管理目录，会随之删除）。被
+  `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。worktree 被
+  标为 `broken` 后，目录恢复时（下次运行或列出会话时重新检查）回到 `active`。删除工作区和 `clear-history` 同理（409 相同），
   确认参数为 `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
   （409 `WORKTREE_SESSIONS_EXIST`）。
 - 工作区绑定只接受原生话题群（飞书话题群或 Telegram Forum）。
@@ -640,6 +647,12 @@ owner 明确拒绝首次设置时可提交
 - `PATCH|DELETE /api/groups/:jid/workspace-config/mcp-servers/:id`
 
 读操作要求访问工作区，写操作要求工作区 owner。
+
+项目能力以工作区的项目根为准，运行时、能力预览和这些接口一致：宿主机模式的自定义目录
+（会话有独立 worktree 时为 worktree），否则 `data/groups/{folder}`。宿主机自定义目录
+工作区因此会加载该目录 `.mcp.json` 和 `.claude/settings.json`、`.claude/settings.local.json`
+中声明的 MCP，以及从该目录向上到 git 根的 `.claude/skills`；它们属于项目上下文层
+（CLAUDE.md §5），与系统、用户 MCP 叠加。
 
 `workspace-config/skills/install` 的 `package` 规则与 `POST /api/skills/install`
 相同：URL 形式只接受 github.com 仓库或 tree 链接，其他主机返回 400。
