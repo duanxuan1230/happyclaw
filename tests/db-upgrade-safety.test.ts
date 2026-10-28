@@ -206,7 +206,8 @@ describe('schema version head', () => {
     // v84: drop agent_profile_prompt_versions; Agents keep no prompt history
     // (schema-v84-drop-agent-prompt-versions.test.ts). Same step:
     // workspace_memory_recall_fts, the bigram/word index memory recall ranks
-    // by (schema-v84-memory-recall-index.test.ts).
+    // by (schema-v84-memory-recall-index.test.ts); session_worktrees, the git
+    // worktree a Runtime Session runs in (schema-v84-session-worktrees.test.ts).
     expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
   });
 });
