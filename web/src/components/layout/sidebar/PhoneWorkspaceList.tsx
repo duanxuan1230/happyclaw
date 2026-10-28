@@ -34,7 +34,8 @@ import {
   getPrimaryAgentWorkspaceRows,
 } from '../../../utils/agent-product';
 import type { AgentDisplayIdentity } from '../../../utils/agent-identity';
-import type { AgentInfo } from '../../../types';
+import type { AgentInfo, SessionWorktreeInfo } from '../../../types';
+import { WorktreeBranchTag } from '../../chat/WorktreeBranchTag';
 import type { GroupEntry } from '../../../utils/group-utils';
 import {
   AgentAvatar,
@@ -167,11 +168,15 @@ export function PhoneWorkspaceList({
     setWorkspaceExpanded(jid, expanded),
   );
   const createWorkspaceSession = useStableCallback(
-    async (group: GroupEntry) => {
-      const session = await createSession(group.jid);
-      if (!session) return;
+    async (
+      group: GroupEntry,
+      options?: { name?: string; worktree?: boolean },
+    ) => {
+      const session = await createSession(group.jid, options);
+      if (!session) return false;
       openWorkspaceSession(navigateTo, group, session.id);
       requestComposerFocus();
+      return true;
     },
   );
   const menuActions = useMemo<WorkspaceMenuActions>(
@@ -370,6 +375,7 @@ function WorkspaceSessions({
                   : undefined
             }
             linked={(session.linked_im_groups?.length ?? 0) > 0}
+            worktree={session.worktree}
             onOpen={() => open(session.id)}
             menu={
               canModify && !isNativeManagedSession(session) ? (
@@ -416,6 +422,7 @@ function PhoneSessionRow({
   time,
   busy,
   linked = false,
+  worktree,
   onOpen,
   menu,
 }: {
@@ -425,6 +432,7 @@ function PhoneSessionRow({
   /** Shown as a spinner in place of the time while the session works. */
   busy?: string;
   linked?: boolean;
+  worktree?: SessionWorktreeInfo | null;
   onOpen: () => void;
   menu?: ReactNode;
 }) {
@@ -444,6 +452,9 @@ function PhoneSessionRow({
           >
             {title}
           </button>
+          {worktree && (
+            <WorktreeBranchTag worktree={worktree} className="max-w-28" />
+          )}
           {linked && (
             <Link2
               className="size-3.5 shrink-0 text-faint-foreground"

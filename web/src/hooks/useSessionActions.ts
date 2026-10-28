@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
 import { confirmDialog } from '../stores/confirm';
+import { describeDirtyWorktrees } from '../lib/session-worktree';
 import type { AgentInfo } from '../types';
 
 /**
@@ -14,11 +15,19 @@ export function useSessionActions() {
   const deleteAgentAction = useChatStore((s) => s.deleteAgentAction);
 
   const createSession = useCallback(
-    async (groupJid: string): Promise<AgentInfo | null> => {
+    async (
+      groupJid: string,
+      options?: { name?: string; worktree?: boolean },
+    ): Promise<AgentInfo | null> => {
       if (creatingSession) return null;
       setCreatingSession(true);
       try {
-        const agent = await createConversation(groupJid, '');
+        const agent = await createConversation(
+          groupJid,
+          options?.name ?? '',
+          undefined,
+          { worktree: options?.worktree },
+        );
         if (!agent) {
           toast.error(useChatStore.getState().error || '创建 Web 会话失败');
           return null;
@@ -34,7 +43,8 @@ export function useSessionActions() {
   /**
    * Sessions still bound to an IM channel must be unbound first; in that case
    * `onNeedsUnbind` opens the binding dialog instead of deleting. Otherwise the
-   * user confirms first, since deletion drops the session's history.
+   * user confirms first, since deletion drops the session's history. A
+   * worktree with uncommitted changes asks once more before they are lost.
    */
   const deleteSession = useCallback(
     (groupJid: string, id: string, onNeedsUnbind: (id: string) => void) => {
@@ -52,15 +62,30 @@ export function useSessionActions() {
         return;
       }
       void (async () => {
+        const name = agent?.name || '会话';
         const confirmed = await confirmDialog({
           title: '删除会话',
-          message: `确定删除「${agent?.name || '会话'}」吗？会话的对话记录会一并删除，无法恢复。工作区文件不受影响。`,
+          message: agent?.worktree
+            ? `确定删除「${name}」吗？会话的对话记录会一并删除，无法恢复；它的独立 worktree 目录会被移除，分支 ${agent.worktree.branch} 保留。`
+            : `确定删除「${name}」吗？会话的对话记录会一并删除，无法恢复。工作区文件不受影响。`,
           confirmText: '删除',
           variant: 'danger',
         });
         if (!confirmed) return;
-        const ok = await deleteAgentAction(groupJid, id);
-        if (!ok) {
+        let result = await deleteAgentAction(groupJid, id);
+        if (typeof result === 'object') {
+          const discard = await confirmDialog({
+            title: '丢弃未提交的改动？',
+            message: describeDirtyWorktrees([result.worktreeDirty]),
+            confirmText: '丢弃并删除',
+            variant: 'danger',
+          });
+          if (!discard) return;
+          result = await deleteAgentAction(groupJid, id, {
+            forceWorktree: true,
+          });
+        }
+        if (result !== true) {
           toast.error(useChatStore.getState().error || '删除会话失败');
         }
       })();

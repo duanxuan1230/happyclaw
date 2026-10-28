@@ -14,6 +14,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  GitBranch,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -46,6 +47,8 @@ import {
   resolveAgentDisplayIdentity,
 } from '../../../utils/agent-identity';
 import { sidebarRowClass } from './SidebarItem';
+import { NewSessionDialog } from '../../chat/NewSessionDialog';
+import { useOpenedOnce } from '../../../lib/preloaded-component';
 
 const COLLAPSED_AGENTS_KEY = 'happyclaw:collapsed-agent-sections';
 
@@ -118,8 +121,14 @@ export interface WorkspaceActions {
   onClearHistory: (jid: string, name: string) => void;
   onDelete?: (jid: string, name: string) => void;
   onTogglePin?: (jid: string) => void;
-  /** Create a session in the workspace and open it (desktop tree). */
-  onCreateSession?: (group: GroupEntry) => Promise<void>;
+  /**
+   * Create a session in the workspace and open it; resolves whether it was
+   * created. Options come from the new-session dialog.
+   */
+  onCreateSession?: (
+    group: GroupEntry,
+    options?: { name?: string; worktree?: boolean },
+  ) => Promise<boolean>;
   /** Open the create-workspace dialog with this agent preselected. */
   onCreateWorkspace?: (agentProfileId: string) => void;
   /** Open the agent's settings. */
@@ -737,76 +746,101 @@ export function WorkspaceRowMenu({
     !!agentId && (!!actions.onCreateWorkspace || !!actions.onOpenAgent);
   const canCreateSession =
     withCreateSession && canModify && !!actions.onCreateSession;
+  // Worktrees are a host feature, so only those who can run on the host see
+  // the option; the dialog explains when this workspace cannot have one.
+  const canHost = useAuthStore((s) => s.user?.role === 'admin');
+  const canCreateWorktreeSession =
+    canModify && canHost && !!actions.onCreateSession;
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const newSessionMounted = useOpenedOnce(newSessionOpen);
   // The row stands for its agent, so name the workspace in its actions.
   const noun = agentId ? '工作区' : '';
   if (!hasWorkspaceItems && !hasAgentItems) return null;
   return (
-    <RowMenu label={`${displayName}的更多操作`} touch={touch}>
-      {canCreateSession && (
-        <>
-          <DropdownMenuItem
-            onClick={() => void actions.onCreateSession!(group)}
-          >
-            <Plus />
-            {createSessionLabel(group)}
+    <>
+      <RowMenu label={`${displayName}的更多操作`} touch={touch}>
+        {(canCreateSession || canCreateWorktreeSession) && (
+          <>
+            {canCreateSession && (
+              <DropdownMenuItem
+                onClick={() => void actions.onCreateSession!(group)}
+              >
+                <Plus />
+                {createSessionLabel(group)}
+              </DropdownMenuItem>
+            )}
+            {canCreateWorktreeSession && (
+              <DropdownMenuItem onClick={() => setNewSessionOpen(true)}>
+                <GitBranch />
+                新建独立 worktree 会话…
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+          </>
+        )}
+        {canPin && (
+          <DropdownMenuItem onClick={() => actions.onTogglePin!(group.jid)}>
+            <Pin />
+            {group.pinned_at ? '取消固定' : '固定'}
           </DropdownMenuItem>
-          <DropdownMenuSeparator />
-        </>
-      )}
-      {canPin && (
-        <DropdownMenuItem onClick={() => actions.onTogglePin!(group.jid)}>
-          <Pin />
-          {group.pinned_at ? '取消固定' : '固定'}
-        </DropdownMenuItem>
-      )}
-      {canModify && actions.onRename && (
-        <DropdownMenuItem
-          onClick={() => actions.onRename!(group.jid, group.name)}
-        >
-          <Pencil />
-          重命名{noun}
-        </DropdownMenuItem>
-      )}
-      {canModify && (
-        <>
-          {(canPin || actions.onRename) && <DropdownMenuSeparator />}
+        )}
+        {canModify && actions.onRename && (
           <DropdownMenuItem
-            onClick={() => actions.onClearHistory(group.jid, displayName)}
+            onClick={() => actions.onRename!(group.jid, group.name)}
           >
-            <RotateCcw />
-            重建工作区
+            <Pencil />
+            重命名{noun}
           </DropdownMenuItem>
-        </>
-      )}
-      {!isHome && canModify && actions.onDelete && (
-        <DropdownMenuItem
-          variant="destructive"
-          onClick={() => actions.onDelete!(group.jid, group.name)}
-        >
-          <Trash2 />
-          删除{noun}
-        </DropdownMenuItem>
-      )}
-      {hasAgentItems && (
-        <>
-          {hasWorkspaceItems && <DropdownMenuSeparator />}
-          {actions.onCreateWorkspace && (
+        )}
+        {canModify && (
+          <>
+            {(canPin || actions.onRename) && <DropdownMenuSeparator />}
             <DropdownMenuItem
-              onClick={() => actions.onCreateWorkspace!(agentId!)}
+              onClick={() => actions.onClearHistory(group.jid, displayName)}
             >
-              <FolderPlus />
-              新建工作区
+              <RotateCcw />
+              重建工作区
             </DropdownMenuItem>
-          )}
-          {actions.onOpenAgent && (
-            <DropdownMenuItem onClick={() => actions.onOpenAgent!(agentId!)}>
-              <Bot />
-              智能体设置
-            </DropdownMenuItem>
-          )}
-        </>
+          </>
+        )}
+        {!isHome && canModify && actions.onDelete && (
+          <DropdownMenuItem
+            variant="destructive"
+            onClick={() => actions.onDelete!(group.jid, group.name)}
+          >
+            <Trash2 />
+            删除{noun}
+          </DropdownMenuItem>
+        )}
+        {hasAgentItems && (
+          <>
+            {hasWorkspaceItems && <DropdownMenuSeparator />}
+            {actions.onCreateWorkspace && (
+              <DropdownMenuItem
+                onClick={() => actions.onCreateWorkspace!(agentId!)}
+              >
+                <FolderPlus />
+                新建工作区
+              </DropdownMenuItem>
+            )}
+            {actions.onOpenAgent && (
+              <DropdownMenuItem onClick={() => actions.onOpenAgent!(agentId!)}>
+                <Bot />
+                智能体设置
+              </DropdownMenuItem>
+            )}
+          </>
+        )}
+      </RowMenu>
+      {newSessionMounted && (
+        <NewSessionDialog
+          open={newSessionOpen}
+          groupJid={group.jid}
+          onClose={() => setNewSessionOpen(false)}
+          onCreate={(options) => actions.onCreateSession!(group, options)}
+        />
       )}
-    </RowMenu>
+    </>
   );
 }
 
@@ -822,7 +856,7 @@ function CreateSessionButton({
   onCreate,
 }: {
   label: string;
-  onCreate: () => Promise<void>;
+  onCreate: () => Promise<unknown>;
 }) {
   const [pending, setPending] = useState(false);
   return (

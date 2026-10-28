@@ -1,6 +1,11 @@
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
+import { confirmDialog } from '../stores/confirm';
+import {
+  describeDirtyWorktrees,
+  workspaceWorktreesDirtyFromError,
+} from '../lib/session-worktree';
 import type { WorkspaceDeleteImpact } from '../types';
 
 export interface DeleteWorkspaceState {
@@ -83,7 +88,24 @@ export function useDeleteWorkspace(
       // The user has confirmed that deletion may clean up channel bindings.
       // Always send the flag so a binding created after preflight is handled
       // consistently instead of turning this into another manual retry loop.
-      await deleteFlow(deletedJid, { unbindChannels: true });
+      try {
+        await deleteFlow(deletedJid, { unbindChannels: true });
+      } catch (error) {
+        // Session worktrees hold uncommitted work the deletion would remove.
+        const dirty = workspaceWorktreesDirtyFromError(error);
+        if (!dirty) throw error;
+        const discard = await confirmDialog({
+          title: '丢弃未提交的改动？',
+          message: describeDirtyWorktrees(dirty),
+          confirmText: '丢弃并删除',
+          variant: 'danger',
+        });
+        if (!discard) return;
+        await deleteFlow(deletedJid, {
+          unbindChannels: true,
+          forceWorktrees: true,
+        });
+      }
       inspectionSequence.current += 1;
       setDeleteState(EMPTY_STATE);
       toast.success(

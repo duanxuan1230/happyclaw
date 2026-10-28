@@ -110,12 +110,32 @@ export function formatUploadRetryStatus(
   return null;
 }
 
+/**
+ * The Runtime Session whose worktree a workspace's file panel, `@` picker and
+ * composer uploads use: a session with its own worktree runs there, so its
+ * files live there. Absent means the workspace directory.
+ */
+const fileScopeSessions = new Map<string, string>();
+
+/** `/api/groups/:jid/<suffix>` in the workspace's current file scope. */
+export function workspaceFilesUrl(
+  jid: string,
+  suffix: string,
+  params?: URLSearchParams,
+): string {
+  const query = new URLSearchParams(params);
+  const agentId = fileScopeSessions.get(jid);
+  if (agentId) query.set('agentId', agentId);
+  const search = query.toString();
+  return `/api/groups/${encodeURIComponent(jid)}/${suffix}${search ? `?${search}` : ''}`;
+}
+
 /** One directory level of a workspace (`dir` is workspace-relative). */
 export function listWorkspaceFiles(jid: string, dir: string) {
   const params = new URLSearchParams();
   if (dir) params.set('path', dir);
   return api.get<{ files: FileEntry[]; currentPath: string }>(
-    `/api/groups/${encodeURIComponent(jid)}/files?${params}`,
+    workspaceFilesUrl(jid, 'files', params),
   );
 }
 
@@ -166,6 +186,11 @@ interface FileState {
     filePath: string,
     content: string,
   ) => Promise<boolean>;
+  /**
+   * Point the workspace's file views at a worktree session (or back at the
+   * workspace with null); a change restarts the listing at the root.
+   */
+  setFileScopeSession: (jid: string, agentId: string | null) => void;
 }
 
 export function toBase64Url(str: string): string {
@@ -192,7 +217,10 @@ export const useFileStore = create<FileState>((set, get) => ({
     try {
       const targetPath =
         path !== undefined ? path : get().currentPath[jid] || '';
+      const scope = fileScopeSessions.get(jid);
       const data = await listWorkspaceFiles(jid, targetPath);
+      // The listing belongs to a scope the panel already left.
+      if (fileScopeSessions.get(jid) !== scope) return;
 
       set((s) => ({
         files: { ...s.files, [jid]: data.files },
@@ -231,7 +259,7 @@ export const useFileStore = create<FileState>((set, get) => ({
 
     const targetBase =
       basePath !== undefined ? basePath : get().currentPath[jid] || '';
-    const apiUrl = `/api/groups/${encodeURIComponent(jid)}/files`;
+    const apiUrl = workspaceFilesUrl(jid, 'files');
     let uploadedBytes = 0;
     let requestStarted = false;
 
@@ -365,9 +393,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   deleteFile: async (jid: string, filePath: string) => {
     try {
       const encoded = toBase64Url(filePath);
-      await api.delete(
-        `/api/groups/${encodeURIComponent(jid)}/files/${encoded}`,
-      );
+      await api.delete(workspaceFilesUrl(jid, `files/${encoded}`));
 
       const currentPath = get().currentPath[jid] || '';
       await get().loadFiles(jid, currentPath);
@@ -382,7 +408,7 @@ export const useFileStore = create<FileState>((set, get) => ({
 
   createDirectory: async (jid: string, parentPath: string, name: string) => {
     try {
-      await api.post(`/api/groups/${encodeURIComponent(jid)}/directories`, {
+      await api.post(workspaceFilesUrl(jid, 'directories'), {
         path: parentPath,
         name,
       });
@@ -408,7 +434,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     try {
       const encoded = toBase64Url(filePath);
       const data = await api.get<{ content: string }>(
-        `/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}`,
+        workspaceFilesUrl(jid, `files/content/${encoded}`),
       );
       return data.content;
     } catch (err) {
@@ -419,13 +445,27 @@ export const useFileStore = create<FileState>((set, get) => ({
     }
   },
 
+  setFileScopeSession: (jid: string, agentId: string | null) => {
+    if ((fileScopeSessions.get(jid) ?? null) === agentId) return;
+    if (agentId) fileScopeSessions.set(jid, agentId);
+    else fileScopeSessions.delete(jid);
+    const wasLoaded = jid in get().files;
+    set((s) => {
+      const files = { ...s.files };
+      const currentPath = { ...s.currentPath };
+      delete files[jid];
+      delete currentPath[jid];
+      return { files, currentPath };
+    });
+    if (wasLoaded) void get().loadFiles(jid, '');
+  },
+
   saveFileContent: async (jid: string, filePath: string, content: string) => {
     try {
       const encoded = toBase64Url(filePath);
-      await api.put(
-        `/api/groups/${encodeURIComponent(jid)}/files/content/${encoded}`,
-        { content },
-      );
+      await api.put(workspaceFilesUrl(jid, `files/content/${encoded}`), {
+        content,
+      });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save file';

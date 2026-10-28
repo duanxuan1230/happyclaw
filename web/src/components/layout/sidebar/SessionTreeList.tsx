@@ -16,7 +16,8 @@ import {
   messagePreview,
   sessionActivityAt,
 } from '../../../lib/session-presentation';
-import type { AgentInfo } from '../../../types';
+import type { AgentInfo, SessionWorktreeInfo } from '../../../types';
+import { WorktreeBranchTag } from '../../chat/WorktreeBranchTag';
 import type { GroupEntry } from '../../../utils/group-utils';
 import { sidebarRowClass } from './SidebarItem';
 import { RowMenu, revealOnRowHover, rowIconButtonClass } from './WorkspaceTree';
@@ -151,6 +152,7 @@ export const SessionTreeList = memo(function SessionTreeList({
                   running={session.status === 'running'}
                   titleGenerating={session.title_generating}
                   linked={(session.linked_im_groups?.length ?? 0) > 0}
+                  worktree={session.worktree}
                   time={formatSessionTime(sessionActivityAt(session))}
                   onSelect={() =>
                     openWorkspaceSession(navigate, group, session.id)
@@ -208,6 +210,7 @@ function SessionRow({
   running = false,
   titleGenerating = false,
   linked = false,
+  worktree,
   time,
   onSelect,
   onDelete,
@@ -221,6 +224,7 @@ function SessionRow({
   running?: boolean;
   titleGenerating?: boolean;
   linked?: boolean;
+  worktree?: SessionWorktreeInfo | null;
   time?: string;
   onSelect: () => void;
   /** Shown next to the menu on hover; the handler asks for confirmation. */
@@ -246,6 +250,9 @@ function SessionRow({
         className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left outline-none"
       >
         <span className="truncate">{name}</span>
+        {worktree && (
+          <WorktreeBranchTag worktree={worktree} className="max-w-24" />
+        )}
         {linked && (
           <Link2
             className="size-3 shrink-0 text-faint-foreground"

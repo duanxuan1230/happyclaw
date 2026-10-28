@@ -21,7 +21,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import type { AgentInfo } from '../../types';
+import type { AgentInfo, SessionWorktreeInfo } from '../../types';
+import { WorktreeBranchTag } from './WorktreeBranchTag';
 import {
   buildSessionMeta,
   isNativeManagedSession,
@@ -223,6 +224,7 @@ export function SessionSidebar({
                     running={session.status === 'running'}
                     titleGenerating={session.title_generating}
                     linkedCount={session.linked_im_groups?.length ?? 0}
+                    worktree={session.worktree}
                     canModify={canModify}
                     readonlyTitle={nativeManaged}
                     onSelect={() => onSelectSession(session.id)}
@@ -285,6 +287,7 @@ function SessionRow({
   running = false,
   titleGenerating = false,
   linkedCount = 0,
+  worktree,
   canModify,
   readonlyTitle = false,
   onSelect,
@@ -299,6 +302,7 @@ function SessionRow({
   running?: boolean;
   titleGenerating?: boolean;
   linkedCount?: number;
+  worktree?: SessionWorktreeInfo | null;
   canModify: boolean;
   readonlyTitle?: boolean;
   onSelect: () => void;
@@ -346,8 +350,11 @@ function SessionRow({
           >
             {name}
           </span>
-          <span className="mt-0.5 block truncate text-caption text-muted-foreground">
-            {meta}
+          <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
+            {worktree && (
+              <WorktreeBranchTag worktree={worktree} className="max-w-32" />
+            )}
+            <span className="truncate">{meta}</span>
           </span>
         </span>
       </button>

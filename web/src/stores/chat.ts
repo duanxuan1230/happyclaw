@@ -58,6 +58,11 @@ import {
   type ClientActiveRuns,
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
+import {
+  workspaceWorktreesDirtyFromError,
+  worktreeDirtyFromError,
+  type WorktreeDirtyInfo,
+} from '../lib/session-worktree';
 import { markdownTail } from '../lib/markdown-blocks';
 import { hasListedSteps } from '../lib/process-steps';
 import {
@@ -1123,7 +1128,14 @@ interface ChatState {
   ) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
-  clearHistory: (jid: string) => Promise<boolean>;
+  /**
+   * Rebuild the workspace. Session worktrees with uncommitted changes refuse
+   * it until `forceWorktrees` confirms discarding them.
+   */
+  clearHistory: (
+    jid: string,
+    options?: { forceWorktrees?: boolean },
+  ) => Promise<boolean | { worktreesDirty: WorktreeDirtyInfo[] }>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
   handleMessageDeleted: (
     messageChatJid: string,
@@ -1153,7 +1165,7 @@ interface ChatState {
   inspectDeleteFlow: (jid: string) => Promise<WorkspaceDeleteImpact>;
   deleteFlow: (
     jid: string,
-    options?: { unbindChannels?: boolean },
+    options?: { unbindChannels?: boolean; forceWorktrees?: boolean },
   ) => Promise<void>;
   /**
    * Load the reasoning and execution trace the server kept of a finished
@@ -1197,13 +1209,22 @@ interface ChatState {
   ) => void;
   // Sub-agent actions
   loadAgents: (jid: string, opts?: { force?: boolean }) => Promise<void>;
-  deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
+  /**
+   * Resolves true when deleted. A session whose worktree has uncommitted
+   * changes is kept until `forceWorktree` confirms discarding them.
+   */
+  deleteAgentAction: (
+    jid: string,
+    agentId: string,
+    options?: { forceWorktree?: boolean },
+  ) => Promise<boolean | { worktreeDirty: WorktreeDirtyInfo }>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
   createConversation: (
     jid: string,
     name?: string,
     description?: string,
+    options?: { worktree?: boolean },
   ) => Promise<AgentInfo | null>;
   renameConversation: (
     jid: string,
@@ -3779,13 +3800,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return succeeded;
   },
 
-  clearHistory: async (jid: string) => {
+  clearHistory: async (jid: string, options = {}) => {
     // Set clearing lock BEFORE the API call to block polling & WS injection
     set((s) => ({ clearing: { ...s.clearing, [jid]: true } }));
 
     try {
       await api.post<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/clear-history`,
+        `/api/groups/${encodeURIComponent(jid)}/clear-history${
+          options.forceWorktrees ? '?force_worktrees=true' : ''
+        }`,
       );
 
       void deleteGroupMessageSnapshots(jid);
@@ -3887,15 +3910,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       useFileStore.getState().loadFiles(jid);
       return true;
     } catch (err) {
+      const worktreesDirty = workspaceWorktreesDirtyFromError(err);
       // Release clearing lock on failure
       set((s) => {
         const { [jid]: _, ...nextClearing } = s.clearing;
         return {
           clearing: nextClearing,
-          error: extractErrorMessage(err),
+          ...(worktreesDirty ? {} : { error: extractErrorMessage(err) }),
         };
       });
-      return false;
+      return worktreesDirty ? { worktreesDirty } : false;
     }
   },
 
@@ -4221,7 +4245,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteFlow: async (jid: string, options = {}) => {
     try {
-      const query = options.unbindChannels ? '?unbind_channels=true' : '';
+      const params = new URLSearchParams();
+      if (options.unbindChannels) params.set('unbind_channels', 'true');
+      if (options.forceWorktrees) params.set('force_worktrees', 'true');
+      const search = params.toString();
+      const query = search ? `?${search}` : '';
       await api.delete<{ success: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}${query}`,
       );
@@ -5752,10 +5780,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 删除子 Agent
-  deleteAgentAction: async (jid, agentId) => {
+  deleteAgentAction: async (jid, agentId, options) => {
     try {
       await api.delete(
-        `/api/groups/${encodeURIComponent(jid)}/sessions/${agentId}`,
+        `/api/groups/${encodeURIComponent(jid)}/sessions/${agentId}${
+          options?.forceWorktree ? '?force_worktree=true' : ''
+        }`,
       );
       void deleteAgentMessageSnapshot(jid, agentId);
       clearSdkTaskCleanupTimer(agentId);
@@ -5797,7 +5827,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : '删除会话失败' });
+      const dirty = worktreeDirtyFromError(err);
+      if (dirty) return { worktreeDirty: dirty };
+      set({ error: extractErrorMessage(err) || '删除会话失败' });
       return false;
     }
   },
@@ -5825,18 +5857,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // -- Conversation agent actions --
 
-  createConversation: async (jid, name, description?) => {
+  createConversation: async (jid, name, description?, options?) => {
     try {
       const data = await api.post<{ session?: AgentInfo; agent?: AgentInfo }>(
         `/api/groups/${encodeURIComponent(jid)}/sessions`,
-        { name, description },
+        { name, description, ...(options?.worktree ? { worktree: true } : {}) },
       );
       const created = data.session ?? data.agent;
       if (!created) throw new Error('创建会话失败');
       set((s) => {
         const existing = s.agents[jid] || [];
-        // WS agent_status broadcast may have already added it
-        if (existing.some((a) => a.id === created.id)) return s;
+        // WS agent_status broadcast may have already added it, without the
+        // worktree only the creation response carries.
+        if (existing.some((a) => a.id === created.id)) {
+          return {
+            agents: {
+              ...s.agents,
+              [jid]: existing.map((a) =>
+                a.id === created.id
+                  ? { ...a, worktree: created.worktree ?? null }
+                  : a,
+              ),
+            },
+          };
+        }
         return { agents: { ...s.agents, [jid]: [...existing, created] } };
       });
       return created;
