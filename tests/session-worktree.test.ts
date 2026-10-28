@@ -280,6 +280,88 @@ describe('session worktree lifecycle', () => {
       worktrees.sessionWorktreeRunError(record, 'worktree has no .git entry'),
     ).toContain(record.worktree_path);
   });
+
+  test('.worktreeinclude copies matched untracked ignored files and skips non-matching or symlinked files', async () => {
+    const repo = makeRepo('repo-include', {
+      'README.md': 'hello\n',
+      '.gitignore': '.env*\nconfig/local.json\nsecret.key\n',
+      '.worktreeinclude': '.env*\nconfig/local.json\n',
+    });
+    fs.writeFileSync(path.join(repo, '.env'), 'API_KEY=dev\n');
+    fs.writeFileSync(path.join(repo, '.env.local'), 'LOCAL=1\n');
+    fs.mkdirSync(path.join(repo, 'config'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repo, 'config', 'local.json'),
+      '{"debug":true}\n',
+    );
+    // Ignored by .gitignore but NOT in .worktreeinclude.
+    fs.writeFileSync(path.join(repo, 'secret.key'), 'top-secret\n');
+    // Untracked and not ignored.
+    fs.writeFileSync(path.join(repo, 'scratch.txt'), 'scratch\n');
+    // Symlink matching .worktreeinclude must be skipped.
+    fs.symlinkSync(
+      path.join(repo, 'secret.key'),
+      path.join(repo, '.env.symlink'),
+    );
+
+    const record = await worktrees.createSessionWorktree({
+      group: hostGroup('ws-include', repo),
+      chatJid: 'web:ws-include',
+      agentId: '12121212-0000-0000-0000-000000000000',
+    });
+
+    expect(
+      fs.readFileSync(path.join(record.worktree_path, '.env'), 'utf8'),
+    ).toBe('API_KEY=dev\n');
+    expect(
+      fs.readFileSync(path.join(record.worktree_path, '.env.local'), 'utf8'),
+    ).toBe('LOCAL=1\n');
+    expect(
+      fs.readFileSync(
+        path.join(record.worktree_path, 'config', 'local.json'),
+        'utf8',
+      ),
+    ).toBe('{"debug":true}\n');
+    expect(fs.existsSync(path.join(record.worktree_path, 'secret.key'))).toBe(
+      false,
+    );
+    expect(fs.existsSync(path.join(record.worktree_path, 'scratch.txt'))).toBe(
+      false,
+    );
+    expect(fs.existsSync(path.join(record.worktree_path, '.env.symlink'))).toBe(
+      false,
+    );
+  });
+
+  test('a failed git worktree add cleans up the partial worktree directory and branch', async () => {
+    const repo = makeRepo('repo-fail-add', {
+      '.gitattributes': '*.txt filter=failclean\n',
+      'a.txt': 'hello\n',
+    });
+    // Configure a required smudge filter that fails during worktree checkout
+    // AFTER git worktree add has already created the directory and branch.
+    git(repo, 'config', 'filter.failclean.smudge', 'false');
+    git(repo, 'config', 'filter.failclean.required', 'true');
+
+    const agentId = 'abababab-0000-0000-0000-000000000000';
+    const expectedPath = path.join(dataDir, 'worktrees', 'ws-fail', agentId);
+
+    await expect(
+      worktrees.createSessionWorktree({
+        group: hostGroup('ws-fail', repo),
+        chatJid: 'web:ws-fail',
+        agentId,
+      }),
+    ).rejects.toMatchObject({
+      name: 'SessionWorktreeError',
+      code: 'GIT_WORKTREE_ADD_FAILED',
+    });
+
+    expect(fs.existsSync(expectedPath)).toBe(false);
+    expect(store.getSessionWorktree(agentId)).toBeUndefined();
+    expect(git(repo, 'worktree', 'list')).not.toContain(expectedPath);
+    expect(git(repo, 'branch', '--list', 'happyclaw/abababab')).toBe('');
+  });
 });
 
 describe('managed path guard', () => {

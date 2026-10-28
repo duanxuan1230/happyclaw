@@ -135,6 +135,84 @@ describe('readGitStatus', () => {
       }),
     ]);
   });
+
+  test('supports baseCommit, baseAhead and scope=branch for committed + working changes', async () => {
+    const repo = makeRepo('branch-scope');
+    const baseCommit = git(repo, 'rev-parse', 'HEAD');
+
+    // Commit 1: modify a.txt and add committed.txt
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a\nb\ncommitted\n');
+    fs.writeFileSync(path.join(repo, 'committed.txt'), 'line1\nline2\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'commit 1');
+
+    // Commit 2: rename old.txt -> moved.txt
+    git(repo, 'mv', 'old.txt', 'moved.txt');
+    git(repo, 'commit', '-qm', 'commit 2');
+
+    // Working tree: clean -> working scope has 0 files, but baseAhead is 2
+    const workingClean = await readGitStatus(repo, {
+      baseCommit,
+      scope: 'working',
+    });
+    expect(workingClean).toMatchObject({
+      baseCommit,
+      baseAhead: 2,
+      scope: 'working',
+      files: [],
+      total_files: 0,
+    });
+
+    // Branch scope shows all committed changes since baseCommit
+    const branchClean = await readGitStatus(repo, {
+      baseCommit,
+      scope: 'branch',
+    });
+    expect(branchClean).toMatchObject({
+      baseCommit,
+      baseAhead: 2,
+      scope: 'branch',
+      total_files: 3,
+    });
+    const byPathClean = Object.fromEntries(
+      branchClean.files.map((f) => [f.path, f]),
+    );
+    expect(byPathClean['a.txt']).toMatchObject({
+      status: 'modified',
+      additions: 1,
+      deletions: 0,
+    });
+    expect(byPathClean['committed.txt']).toMatchObject({
+      status: 'added',
+      additions: 2,
+      deletions: 0,
+    });
+    expect(byPathClean['moved.txt']).toMatchObject({
+      status: 'renamed',
+      orig_path: 'old.txt',
+    });
+
+    // Now add an uncommitted edit and an untracked file in the working tree
+    fs.writeFileSync(path.join(repo, 'untracked-branch.txt'), 'u1\n');
+    const branchDirty = await readGitStatus(repo, {
+      baseCommit,
+      scope: 'branch',
+    });
+    expect(branchDirty.files.map((f) => f.path).sort()).toEqual([
+      'a.txt',
+      'committed.txt',
+      'moved.txt',
+      'untracked-branch.txt',
+    ]);
+
+    // readGitFileDiff in branch scope diffs committed files against baseCommit
+    const committedDiff = await readGitFileDiff(repo, 'committed.txt', {
+      baseCommit,
+      scope: 'branch',
+    });
+    expect(committedDiff.diff).toContain('+line1\n+line2');
+    expect(committedDiff.untracked).toBe(false);
+  });
 });
 
 describe('readGitFileDiff', () => {

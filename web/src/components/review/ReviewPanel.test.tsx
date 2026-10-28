@@ -573,6 +573,105 @@ describe('ReviewPanel', () => {
       '+from rename',
     );
   });
+
+  test('auto-switches to branch scope when working tree has 0 files and baseAhead > 0, and supports manual scope toggle', async () => {
+    const worktreeMeta = {
+      branch: 'happyclaw/s1',
+      base_commit: '1111111111111111111111111111111111111111',
+      status: 'active' as const,
+      broken_reason: null,
+    };
+    respond((url) => {
+      if (url.pathname !== STATUS_URL) return undefined;
+      const scope = url.searchParams.get('scope') ?? 'working';
+      if (scope === 'working') {
+        return okStatus({
+          worktree: worktreeMeta,
+          branch: 'happyclaw/s1',
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          baseCommit: worktreeMeta.base_commit,
+          baseAhead: 2,
+          scope: 'working',
+          files: [],
+          total_files: 0,
+        });
+      }
+      return okStatus({
+        worktree: worktreeMeta,
+        branch: 'happyclaw/s1',
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        baseCommit: worktreeMeta.base_commit,
+        baseAhead: 2,
+        scope: 'branch',
+        files: [
+          {
+            path: 'src/committed.ts',
+            status: 'added',
+            index_status: 'A',
+            worktree_status: '.',
+            additions: 15,
+            deletions: 0,
+            binary: false,
+          },
+        ],
+        total_files: 1,
+      });
+    });
+    respond((url) => {
+      if (url.pathname !== '/api/groups/web%3Aws/git/diff') return undefined;
+      return {
+        state: 'ok',
+        path: 'src/committed.ts',
+        diff: '@@ -0,0 +1 @@\n+export const committed = true;\n',
+        binary: false,
+        truncated: false,
+        untracked: false,
+      };
+    });
+
+    const view = await render('s1');
+
+    // Initial load fetched working (0 files, baseAhead=2) and automatically switched to branch
+    const statusUrls = calls(STATUS_URL);
+    expect(statusUrls).toHaveLength(2);
+    expect(statusUrls[0].searchParams.get('scope')).toBeNull();
+    expect(statusUrls[1].searchParams.get('scope')).toBe('branch');
+
+    const bar = view.querySelector('[data-testid="review-branch-bar"]')!;
+    expect(bar.textContent).toContain('领先基底 2 个提交');
+    expect(bar.textContent).toContain('1 个文件');
+    expect(fileRow('src/committed.ts')).toBeTruthy();
+
+    // Opening a file in branch scope passes scope=branch to git/diff
+    act(() => fileRow('src/committed.ts').click());
+    await flush();
+    const [diffCall] = calls('/api/groups/web%3Aws/git/diff');
+    expect(diffCall.searchParams.get('scope')).toBe('branch');
+    expect(view.querySelector('[data-kind="add"]')?.textContent).toBe(
+      '+export const committed = true;',
+    );
+
+    // Return to list and manually toggle to 未提交 (working)
+    act(() =>
+      view
+        .querySelector<HTMLButtonElement>('button[aria-label="返回文件列表"]')!
+        .click(),
+    );
+    const workingBtn = [
+      ...view.querySelectorAll<HTMLButtonElement>(
+        '[data-slot="segmented-control"] button',
+      ),
+    ].find((btn) => btn.textContent === '未提交')!;
+    act(() => workingBtn.click());
+    await flush();
+
+    expect(view.textContent).toContain('没有未提交的改动');
+    expect(calls(STATUS_URL)).toHaveLength(3);
+  });
 });
 
 describe('parseUnifiedDiff', () => {

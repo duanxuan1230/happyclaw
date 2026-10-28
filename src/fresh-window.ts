@@ -59,11 +59,17 @@ export async function captureWorkspaceSnapshot(
   const branch =
     (await gitText(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])) || 'HEAD';
   const commit = (await gitText(cwd, ['rev-parse', '--short', 'HEAD'])) || '';
-  const statusRaw = await gitText(
-    cwd,
-    ['status', '--short', '--ignore-submodules=all'],
-    await neutralFilterArgs(cwd),
-  );
+  let statusRaw: string | null = null;
+  try {
+    const filterConfig = await neutralFilterArgs(cwd);
+    statusRaw = await gitText(
+      cwd,
+      ['status', '--short', '--ignore-submodules=all'],
+      filterConfig,
+    );
+  } catch {
+    statusRaw = null;
+  }
   const statusLines = statusRaw
     ? statusRaw.split('\n').filter(Boolean).slice(0, 10)
     : [];

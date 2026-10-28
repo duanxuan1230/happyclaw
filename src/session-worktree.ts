@@ -223,6 +223,109 @@ export class WorktreeUnavailableError extends Error {
   }
 }
 
+export class SessionWorktreeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SessionWorktreeError';
+  }
+}
+
+const WORKTREE_INCLUDE_FILE_MAX_BYTES = 64 * 1024;
+const WORKTREE_INCLUDE_MAX_FILES = 100;
+const WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
+const WORKTREE_INCLUDE_TOTAL_MAX_BYTES = 50 * 1024 * 1024;
+
+async function copyWorktreeIncludeFiles(
+  repoRoot: string,
+  worktreePath: string,
+): Promise<void> {
+  try {
+    const includeFile = path.join(repoRoot, '.worktreeinclude');
+    let includeStat: fs.Stats;
+    try {
+      includeStat = fs.lstatSync(includeFile);
+    } catch {
+      return;
+    }
+    if (
+      !includeStat.isFile() ||
+      includeStat.isSymbolicLink() ||
+      includeStat.size > WORKTREE_INCLUDE_FILE_MAX_BYTES ||
+      !isRealpathInside(includeFile, repoRoot)
+    ) {
+      return;
+    }
+    const lsResult = await runGit(
+      repoRoot,
+      [
+        'ls-files',
+        '-z',
+        '--others',
+        '--ignored',
+        '--exclude-from=.worktreeinclude',
+      ],
+      { maxBytes: 256 * 1024 },
+    );
+    const matched = lsResult.stdout.split('\0').filter(Boolean);
+    let copiedCount = 0;
+    let totalBytes = 0;
+    for (const relPath of matched) {
+      if (copiedCount >= WORKTREE_INCLUDE_MAX_FILES) break;
+      if (
+        !relPath ||
+        path.isAbsolute(relPath) ||
+        path.posix.isAbsolute(relPath) ||
+        relPath.split('/').includes('..') ||
+        relPath.split(path.sep).includes('..')
+      ) {
+        continue;
+      }
+      const srcPath = path.join(repoRoot, relPath);
+      const dstPath = path.join(worktreePath, relPath);
+      if (
+        !isRealpathInside(srcPath, repoRoot) ||
+        !isRealpathInside(dstPath, worktreePath)
+      ) {
+        continue;
+      }
+      let srcStat: fs.Stats;
+      try {
+        srcStat = fs.lstatSync(srcPath);
+      } catch {
+        continue;
+      }
+      if (
+        !srcStat.isFile() ||
+        srcStat.isSymbolicLink() ||
+        srcStat.size > WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES ||
+        totalBytes + srcStat.size > WORKTREE_INCLUDE_TOTAL_MAX_BYTES
+      ) {
+        continue;
+      }
+      try {
+        fs.lstatSync(dstPath);
+        continue;
+      } catch {
+        /* destination does not exist yet */
+      }
+      const dstDir = path.dirname(dstPath);
+      fs.mkdirSync(dstDir, { recursive: true });
+      if (!isRealpathInside(dstDir, worktreePath)) continue;
+      fs.copyFileSync(srcPath, dstPath, fs.constants.COPYFILE_EXCL);
+      copiedCount++;
+      totalBytes += srcStat.size;
+    }
+  } catch (err) {
+    logger.warn(
+      { err, repoRoot, worktreePath },
+      'Failed to copy .worktreeinclude files into session worktree',
+    );
+  }
+}
+
 function worktreePathFor(folder: string, agentId: string): string {
   return path.join(WORKTREES_DIR, folder, agentId);
 }
@@ -291,12 +394,31 @@ export async function createSessionWorktree(input: {
   }
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   const branch = await pickBranchName(support.repoRoot, input.agentId);
-  await runGit(
-    support.repoRoot,
-    ['worktree', 'add', '-b', branch, worktreePath, support.baseCommit],
-    // The user's own repository: its hooks run as they would for them.
-    { timeoutMs: 120_000, maxBytes: 256 * 1024, trustRepoConfig: true },
-  );
+  let addResult;
+  try {
+    addResult = await runGit(
+      support.repoRoot,
+      ['worktree', 'add', '-b', branch, worktreePath, support.baseCommit],
+      // The user's own repository: its hooks run as they would for them.
+      { timeoutMs: 120_000, maxBytes: 256 * 1024, trustRepoConfig: true },
+    );
+  } catch (error) {
+    await detachWorktreeDirectory(support.repoRoot, worktreePath, branch);
+    throw new SessionWorktreeError(
+      'GIT_WORKTREE_ADD_FAILED',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (addResult.exitCode !== 0 || addResult.truncated) {
+    await detachWorktreeDirectory(support.repoRoot, worktreePath, branch);
+    throw new SessionWorktreeError(
+      'GIT_WORKTREE_ADD_FAILED',
+      addResult.truncated
+        ? 'git worktree add output exceeded maximum size'
+        : `git worktree add exited with ${addResult.exitCode}`,
+    );
+  }
+  await copyWorktreeIncludeFiles(support.repoRoot, worktreePath);
   try {
     return insertSessionWorktree({
       agent_id: input.agentId,
@@ -310,7 +432,7 @@ export async function createSessionWorktree(input: {
       created_at: new Date().toISOString(),
     });
   } catch (error) {
-    await detachWorktreeDirectory(support.repoRoot, worktreePath);
+    await detachWorktreeDirectory(support.repoRoot, worktreePath, branch);
     throw error;
   }
 }
@@ -400,7 +522,13 @@ export async function countWorktreeChanges(
 ): Promise<number> {
   const result = await runGit(
     worktreePath,
-    ['status', '--porcelain=v1', '-z', '--untracked-files=normal'],
+    [
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=normal',
+      '--ignore-submodules=all',
+    ],
     {
       maxBytes: 2 * 1024 * 1024,
       config: await neutralFilterArgs(worktreePath),
@@ -421,15 +549,18 @@ export async function countWorktreeChanges(
 async function detachWorktreeDirectory(
   repoRoot: string,
   worktreePath: string,
+  deleteBranch?: string,
 ): Promise<void> {
   if (!isManagedWorktreePath(worktreePath)) {
     throw new Error(`refusing to remove unmanaged path: ${worktreePath}`);
   }
+  let removedByGit = false;
   try {
     await runGit(repoRoot, ['worktree', 'remove', '--force', worktreePath], {
       timeoutMs: 60_000,
       maxBytes: 64 * 1024,
     });
+    removedByGit = true;
   } catch (error) {
     // The repository may be gone or no longer know this worktree. Removing
     // the directory below data/worktrees is still safe; prune is best effort.
@@ -443,10 +574,21 @@ async function detachWorktreeDirectory(
       throw new Error(`refusing to remove unmanaged path: ${worktreePath}`);
     }
     fs.rmSync(worktreePath, { recursive: true, force: true });
+  }
+  if (!removedByGit) {
     try {
       await runGit(repoRoot, ['worktree', 'prune'], { maxBytes: 64 * 1024 });
     } catch {
       /* repository unavailable; nothing left to prune */
+    }
+  }
+  if (deleteBranch) {
+    try {
+      await runGit(repoRoot, ['branch', '-D', deleteBranch], {
+        maxBytes: 64 * 1024,
+      });
+    } catch {
+      /* branch was never created or already removed */
     }
   }
 }
