@@ -95,6 +95,13 @@ import {
   setSessionModel,
   setSessionProviderId,
 } from './db.js';
+import { recordUsageEventConnection } from './runtime-state-store.js';
+import {
+  normalizeUsageLimitResetAt,
+  reserveUsageLimitWaitFor,
+  settleUsageLimitWaitAfterSuccess,
+  usageLimitWaitScopeKey,
+} from './usage-limit-wait.js';
 import {
   chatGptDefaultModel,
   chatGptLaunchModel,
@@ -813,14 +820,24 @@ export function applyCodexGatewayVerdict(
  * it could run, and a failing account can still serve its fallback tier.
  */
 function poolCanStillServe(): boolean {
-  const enabled = getEnabledProviders();
-  if (enabled.length === 0) return false;
-  const primaryTier = new Map(
-    enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
+  const tiers = poolServingTiers();
+  return (
+    !!tiers && tiers.some((tier) => providerPool.hasCandidateForTier(tier))
   );
-  if (providerPool.hasCandidateForTier(primaryTier)) return true;
+}
+
+/**
+ * The model tiers an automatic pool may serve a run on: each member's own
+ * model first, then the system fallback model. Null without members.
+ */
+function poolServingTiers(): ProviderTier[] | null {
+  const enabled = getEnabledProviders();
+  if (enabled.length === 0) return null;
   const fallbackModel = getSystemSettings().fallbackModel?.trim();
-  return !!fallbackModel && providerPool.hasCandidateForTier(fallbackModel);
+  return [
+    new Map(enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)])),
+    ...(fallbackModel ? [fallbackModel] : []),
+  ];
 }
 
 /** Host-process replay budget; each transient retry runs a fresh runner. */
@@ -842,6 +859,7 @@ export function applyProviderFailureDisposition(
   output: ContainerOutput,
   selectedProfileId: string | null,
   allowFailover = true,
+  waitScope?: UsageLimitWaitScope,
 ): boolean {
   const failureClass = resolveProviderFailureClass(output);
   // Transient failures never consult the pool: no account was judged, so the
@@ -893,11 +911,120 @@ export function applyProviderFailureDisposition(
   // healthy but unable to serve that tier, and an account wall leaves other
   // accounts' tiers untouched — neither is expressible in account health
   // alone, which is all resolveProviderFailureDisposition() can see.
-  const disposition = allowFailover
-    ? { terminal: !(selectedProfileId !== null && poolCanStillServe()) }
-    : { terminal: true };
-  applyKnownProviderFailureDisposition(output, disposition.terminal);
-  return disposition.terminal;
+  const exhausted = allowFailover
+    ? !(selectedProfileId !== null && poolCanStillServe())
+    : true;
+  // Out of usage everywhere this run may go, with a known reset: wait for it
+  // instead of ending the input.
+  const terminal =
+    exhausted &&
+    !deferUsageLimitFailure(
+      output,
+      selectedProfileId,
+      allowFailover,
+      waitScope,
+    );
+  applyKnownProviderFailureDisposition(output, terminal);
+  return terminal;
+}
+
+/** The lane and durable input a provider failure belongs to. */
+export interface UsageLimitWaitScope {
+  scopeKey: string;
+  inputKey?: string;
+}
+
+export function usageLimitWaitScopeFor(
+  input: ContainerInput,
+): UsageLimitWaitScope {
+  return {
+    scopeKey: usageLimitWaitScopeKey(input),
+    inputKey: input.turnId,
+  };
+}
+
+/**
+ * When the run's last usable connection hit its usage limit and the upstream
+ * named a reset time, keep the input for after the reset: mark the failure
+ * with the resume time and report it non-terminal. A pinned connection waits
+ * for its own reset only; an automatic pool for the earliest reset of any
+ * member that could serve the run. Bounded per lane by usage-limit-wait.ts.
+ */
+function deferUsageLimitFailure(
+  output: ContainerOutput,
+  selectedProfileId: string | null,
+  allowFailover: boolean,
+  waitScope: UsageLimitWaitScope | undefined,
+): boolean {
+  if (!waitScope || !isDatabaseInitialized()) return false;
+  const inputKey = resolveTransientRetryKey(output) || waitScope.inputKey;
+  if (!inputKey) return false;
+  const now = Date.now();
+  const candidates = [
+    normalizeUsageLimitResetAt(output.providerRateLimitResetsAt),
+  ];
+  const tiers = allowFailover ? poolServingTiers() : null;
+  if (tiers) {
+    candidates.push(
+      providerPool.earliestReportedRecoveryAt(tiers, selectedProfileId, now),
+    );
+  }
+  const known = candidates.filter((at): at is number => at !== null);
+  if (known.length === 0) return false;
+  try {
+    const wait = reserveUsageLimitWaitFor({
+      scopeKey: waitScope.scopeKey,
+      inputKey,
+      resetAtMs: Math.min(...known),
+      nowMs: now,
+    });
+    if (!wait) return false;
+    output.providerUsageLimitResumeAt = Date.parse(wait.resumeAt);
+    logger.warn(
+      {
+        scopeKey: waitScope.scopeKey,
+        providerId: selectedProfileId,
+        resumeAt: wait.resumeAt,
+        waitCount: wait.waitCount,
+      },
+      'Usage limit reached on every usable connection; input waits for the reset',
+    );
+    return true;
+  } catch (err) {
+    logger.error(
+      { err, scopeKey: waitScope.scopeKey },
+      'Failed to record a usage-limit wait; ending the input instead',
+    );
+    return false;
+  }
+}
+
+/** A healthy turn ends the lane's run of consecutive usage-limit waits. */
+function settleUsageLimitWaitForOutput(
+  output: ContainerOutput,
+  input: ContainerInput,
+): void {
+  if (
+    output.providerFailure ||
+    output.inputTurnCompleted !== true ||
+    !isDatabaseInitialized()
+  ) {
+    return;
+  }
+  try {
+    settleUsageLimitWaitAfterSuccess(usageLimitWaitScopeKey(input));
+  } catch (err) {
+    logger.warn({ err }, 'Failed to settle the usage-limit wait of a lane');
+  }
+}
+
+/** The final output repeats the streamed failure; keep its wait with it. */
+function carryUsageLimitWait(
+  decided: ContainerOutput | undefined,
+  output: ContainerOutput,
+): void {
+  if (decided?.providerUsageLimitResumeAt === undefined) return;
+  output.providerUsageLimitResumeAt = decided.providerUsageLimitResumeAt;
 }
 
 function applyKnownProviderFailureDisposition(
@@ -915,6 +1042,27 @@ function applyKnownProviderFailureDisposition(
   if (terminal) {
     const notice = resolveTerminalProviderFailureNotice(output);
     if (notice) output.providerFailureNotice = notice;
+  }
+}
+
+/**
+ * Remember which connection served a usage event, so cache hit rates can be
+ * read per connection. The usage row itself is written by the caller under
+ * the same event id. Exported for tests.
+ */
+export function recordUsageConnection(
+  output: ContainerOutput,
+  profileId: string | null,
+): void {
+  const eventId =
+    output.streamEvent?.eventType === 'usage'
+      ? output.streamEvent.usage?.eventId
+      : undefined;
+  if (!profileId || !eventId || !isDatabaseInitialized()) return;
+  try {
+    recordUsageEventConnection(eventId, profileId);
+  } catch (err) {
+    logger.warn({ err, eventId }, 'Failed to record the usage connection');
   }
 }
 
@@ -3288,6 +3436,8 @@ export async function runContainerAgent(
   );
   let providerFailureReported = false;
   let providerFailureTerminal: boolean | undefined;
+  /** The streamed failure the disposition was decided on, if it waits. */
+  let providerFailureDecision: ContainerOutput | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
   input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
@@ -3543,6 +3693,8 @@ export async function runContainerAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, selectedProfileId);
+        settleUsageLimitWaitForOutput(output, input);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
@@ -3618,8 +3770,10 @@ export async function runContainerAgent(
             output,
             selectedProfileId,
             !modelSelectionPinned,
+            usageLimitWaitScopeFor(input),
           );
           providerFailureTerminal = terminal;
+          providerFailureDecision = output;
           logger.warn(
             {
               group: group.name,
@@ -3759,9 +3913,11 @@ export async function runContainerAgent(
           result,
           selectedProfileId,
           !modelSelectionPinned,
+          usageLimitWaitScopeFor(input),
         );
       } else {
         applyKnownProviderFailureDisposition(result, providerFailureTerminal);
+        carryUsageLimitWait(providerFailureDecision, result);
       }
     }
 
@@ -4457,6 +4613,8 @@ export async function runHostAgent(
     hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
   let hostProviderFailureReported = false;
   let hostProviderFailureTerminal: boolean | undefined;
+  /** The streamed failure the disposition was decided on, if it waits. */
+  let hostProviderFailureDecision: ContainerOutput | undefined;
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
@@ -4923,6 +5081,8 @@ export async function runHostAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, hostSelectedProfileId);
+        settleUsageLimitWaitForOutput(output, input);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
@@ -4993,8 +5153,10 @@ export async function runHostAgent(
             output,
             hostSelectedProfileId,
             !hostModelSelectionPinned,
+            usageLimitWaitScopeFor(input),
           );
           hostProviderFailureTerminal = terminal;
+          hostProviderFailureDecision = output;
           logger.warn(
             {
               group: group.name,
@@ -5126,12 +5288,14 @@ export async function runHostAgent(
           hostResult,
           hostSelectedProfileId,
           !hostModelSelectionPinned,
+          usageLimitWaitScopeFor(input),
         );
       } else {
         applyKnownProviderFailureDisposition(
           hostResult,
           hostProviderFailureTerminal,
         );
+        carryUsageLimitWait(hostProviderFailureDecision, hostResult);
       }
     }
 
@@ -5305,7 +5469,9 @@ export async function runAgentWithModelFallback(
     if (
       !input.isScheduledTask ||
       !lastOutput.providerFailure ||
-      lastOutput.providerFailureTerminal === true
+      lastOutput.providerFailureTerminal === true ||
+      // Every connection is out of usage: no other attempt can serve it.
+      lastOutput.providerUsageLimitResumeAt !== undefined
     ) {
       return lastOutput;
     }

@@ -98,10 +98,8 @@ import {
   HOST_EXECUTION_FORBIDDEN_ERROR,
 } from './host-execution-policy.js';
 import { resolveEffectiveAgentProfile } from './agent-profile-runtime.js';
-import {
-  buildAgentProfilePrompt,
-  hasAgentProfilePrompts,
-} from './agent-profile-prompts.js';
+import { hasAgentProfilePrompts } from './agent-profile-prompts.js';
+import { toRunnerAgentProfile } from './runner-agent-profile.js';
 import {
   isInternalOnlyAgentOutput,
   SCHEDULED_TASK_SILENT_COMPLETION_NOTICE,
@@ -119,6 +117,19 @@ import { resolveScheduledGroupDeliveryContract } from './reply-delivery.js';
 import { resolveRuntimeInteractionMode } from './workspace-interaction-runtime.js';
 import { explicitImDeliveryPhase } from './im-send-retry-policy.js';
 import { CHANNEL_PREFIXES } from './channel-prefixes.js';
+import {
+  decideTaskRunNotice,
+  formatTaskRecoveryNotice,
+} from './task-failure-notice.js';
+import {
+  clearUsageLimitWait,
+  markUsageLimitWaitResumed,
+  type TaskFailureNoticeState,
+} from './runtime-state-store.js';
+import {
+  formatUsageLimitResumeTime,
+  usageLimitWaitScopeKey,
+} from './usage-limit-wait.js';
 
 export function shouldFinalizeScheduledRunOutput(
   output: Pick<
@@ -198,23 +209,6 @@ function pauseUnsafeScriptTask(
   if (!current || !scriptTaskRuntimePolicyError(current, deps)) return;
   updateTask(taskId, { status: 'paused', next_run: null });
   notifyTaskSchedulerChanged();
-}
-
-function toRunnerAgentProfile(profile: AgentProfile | undefined) {
-  profile = resolveEffectiveAgentProfile(profile);
-  if (!profile) return undefined;
-  return {
-    id: profile.id,
-    name: profile.name,
-    version: profile.version,
-    isDefault: profile.is_default,
-    identityHash: profile.identity_hash,
-    identityPrompt: buildAgentProfilePrompt(profile),
-    includeClaudePreset: profile.prompt_mode === 'append',
-    modelConfigId: profile.model_config_id,
-    model: profile.model,
-    runtimePolicy: profile.runtime_policy,
-  };
 }
 
 function taskSessionNeedsAgentProfileReset(
@@ -517,6 +511,50 @@ function scheduledTaskDisplayName(task: ScheduledTask): string {
   return normalized.length > 120
     ? `${normalized.slice(0, 117)}...`
     : normalized;
+}
+
+/**
+ * Announce the end of a failure streak where its failure notice went: the
+ * task's binding and opted-in channels, plus the run's chat when the failure
+ * itself was posted there.
+ */
+async function notifyTaskRecovery(
+  task: ScheduledTask,
+  streak: TaskFailureNoticeState,
+  deps: SchedulerDependencies,
+  target: {
+    chatJid: string;
+    ownerId: string | null | undefined;
+    workspaceFolder?: string;
+    postToChat?: boolean;
+  },
+): Promise<void> {
+  const text = formatTaskRecoveryNotice(scheduledTaskDisplayName(task), streak);
+  try {
+    if (target.postToChat) {
+      await deps.sendMessage(target.chatJid, `${deps.assistantName}: ${text}`, {
+        source: 'scheduled_task',
+      });
+    }
+    if (deps.storeResultAndNotify && target.ownerId) {
+      await deps.storeResultAndNotify(target.chatJid, text, {
+        ownerId: target.ownerId,
+        notifyChannels: task.notify_channels,
+        // A script failure was posted to its chat, not to the binding.
+        deliveryRouteJid: target.postToChat
+          ? undefined
+          : (task.delivery_route_jid ?? task.chat_jid),
+        sourceKind: 'sdk_final',
+        skipStore: target.postToChat,
+        workspaceFolder: target.workspaceFolder,
+      });
+    }
+  } catch (err) {
+    logger.error(
+      { taskId: task.id, err },
+      'Failed to announce scheduled task recovery',
+    );
+  }
 }
 
 export function formatScheduledTaskWorkspaceResult(input: {
@@ -1131,10 +1169,13 @@ async function runTaskInner(
   let lastOutputTime = startTime;
   let runLogFinalized = false;
   let durableWorkspaceIntentStored = false;
+  /** Set when the run went back to retry_wait to outlast a usage limit. */
+  let waitingForUsageReset = false;
   let preparedDurableWorkspaceCommit: (() => boolean) | null = null;
 
   const commitDurableWorkspaceIntent = (): boolean => {
     if (durableWorkspaceIntentStored) return true;
+    if (waitingForUsageReset) return false;
     if (
       !deps.storeResultAndNotify ||
       !options?.durableRun ||
@@ -1394,6 +1435,51 @@ async function runTaskInner(
 
     if (idleTimer) clearTimeout(idleTimer);
 
+    if (output.providerUsageLimitResumeAt !== undefined) {
+      // Every connection is out of usage until a known reset: hand the
+      // occurrence back to task_runs, which claims it again at that time.
+      const resumeAt = new Date(
+        output.providerUsageLimitResumeAt,
+      ).toISOString();
+      const durableRun = options?.durableRun;
+      if (
+        durableRun &&
+        releaseTaskRunForRetry(
+          durableRun.id,
+          durableRun.lease_owner,
+          durableRun.lease_token,
+          resumeAt,
+          'Usage limit reached; waiting for the reset',
+          { countsAsAttempt: false },
+        )
+      ) {
+        waitingForUsageReset = true;
+        // task_runs owns the resume; the lane row only keeps the count.
+        markUsageLimitWaitResumed(
+          usageLimitWaitScopeKey({
+            chatJid: workspace.jid,
+            taskRunId: options?.taskRunId,
+            isScheduledTask: true,
+          }),
+        );
+        error = `模型服务额度已用尽，预计 ${formatUsageLimitResumeTime(resumeAt)} 自动重试本次运行。`;
+        lastOutputTime = Date.now();
+        logger.warn(
+          { taskId: task.id, runId: durableRun.id, resumeAt },
+          'Scheduled run waits for a usage-limit reset',
+        );
+        return;
+      }
+      // Nothing can resume this run later: it fails as before.
+      clearUsageLimitWait(
+        usageLimitWaitScopeKey({
+          chatJid: workspace.jid,
+          taskRunId: options?.taskRunId,
+          isScheduledTask: true,
+        }),
+      );
+    }
+
     if (!output.providerFailure && output.inputTurnCompleted === true) {
       scheduledInputCompleted = true;
     }
@@ -1484,6 +1570,12 @@ async function runTaskInner(
     const taskSessionText = error
       ? `执行出错: ${error}`
       : cleanedResult?.trim() || null;
+    // A task failing the same way every run notifies once per streak.
+    const notice = decideTaskRunNotice({
+      taskId: task.id,
+      error,
+      manualRun: options?.manualRun,
+    });
 
     if (taskSessionText) {
       try {
@@ -1493,7 +1585,10 @@ async function runTaskInner(
           // routed to chat_jid/notify_channels by the host watcher.  Keep the
           // SDK final in the web task session for audit, but do not broadcast
           // it a second time.  Failures still need the scheduler fallback.
-          ownerId: error ? taskOwnerId || undefined : undefined,
+          ownerId:
+            notice.kind === 'notify_failure'
+              ? taskOwnerId || undefined
+              : undefined,
           notifyChannels: task.notify_channels,
           deliveryRouteJid: task.delivery_route_jid ?? task.chat_jid,
           sourceKind: 'sdk_final',
@@ -1507,6 +1602,13 @@ async function runTaskInner(
           'Failed to store/notify task result',
         );
       }
+    }
+    if (notice.kind === 'notify_recovery') {
+      await notifyTaskRecovery(task, notice.streak, deps, {
+        chatJid: effectiveJid,
+        ownerId: taskOwnerId,
+        workspaceFolder: workspace.folder || undefined,
+      });
     }
 
     // Isolated runs execute in a short-lived #task session. Preserve their
@@ -1805,8 +1907,17 @@ async function runScriptTaskInner(
       result = scriptResult.stdout.trim() || null;
     }
 
+    // A script failing the same way every run reports it once per streak.
+    const notice = scriptResult.aborted
+      ? ({ kind: 'none' } as const)
+      : decideTaskRunNotice({ taskId: task.id, error, manualRun });
+
     // Send result to user (skip if no output and no error)
-    if (!scriptResult.aborted && (error || result)) {
+    if (
+      !scriptResult.aborted &&
+      (error || result) &&
+      notice.kind !== 'suppress_failure'
+    ) {
       const text = error
         ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
         : `[脚本] ${result!.slice(0, 1000)}`;
@@ -1834,6 +1945,15 @@ async function runScriptTaskInner(
           }
         }
       }
+    }
+    if (notice.kind === 'notify_recovery') {
+      await notifyTaskRecovery(task, notice.streak, deps, {
+        chatJid: groupJid,
+        ownerId:
+          task.created_by || deps.registeredGroups()[groupJid]?.created_by,
+        workspaceFolder: task.group_folder,
+        postToChat: true,
+      });
     }
 
     logger.info(

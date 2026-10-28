@@ -505,10 +505,8 @@ import {
 } from './channel-account-migration.js';
 import { resolveChannelAccountFallbackWorkspace } from './channel-account-routing.js';
 import { testChannelAccountCredentials } from './channel-account-connectivity.js';
-import {
-  buildAgentProfilePrompt,
-  hasAgentProfilePrompts,
-} from './agent-profile-prompts.js';
+import { hasAgentProfilePrompts } from './agent-profile-prompts.js';
+import { toRunnerAgentProfile } from './runner-agent-profile.js';
 import {
   getFeishuProviderConfigWithSource,
   getTelegramProviderConfig,
@@ -662,9 +660,28 @@ import {
   clearStreamingSnapshot,
   broadcastFollowUpUpdate,
   broadcastMessageTrace,
+  broadcastUsageLimitWait,
 } from './web.js';
 import { ProactiveCommentaryRelay } from './process-commentary.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
+import { skillMutationTurnRejection } from './skill-ipc-authorization.js';
+import {
+  getUsageLimitWait,
+  takeSessionHistoryReinjection,
+} from './runtime-state-store.js';
+import {
+  CAPABILITY_CHANGE_HISTORY_INTRO,
+  invalidateSessionAfterRunnerExit,
+} from './capability-runtime-mutation.js';
+import {
+  armUsageLimitResume,
+  bindUsageLimitWaitHost,
+  endUsageLimitWait,
+  formatUsageLimitResumeTime,
+  formatUsageLimitWaitNotice,
+  listPendingUsageLimitWaits,
+  rearmUsageLimitWaitsAfterRestart,
+} from './usage-limit-wait.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import {
@@ -2032,6 +2049,16 @@ function promoteFollowUp(
     return { ok: false, message: '这条排队消息已被处理或取消。' };
   }
   broadcastFollowUpUpdate(chatJid);
+  if (!activeRunId && endUsageLimitWait(chatJid, 'new_input')) {
+    // Sending a parked input now ends its usage-limit wait early.
+    releaseQueuedFollowUpsToColdReader(chatJid);
+    return {
+      ok: true,
+      state: 'queued',
+      message: '已结束等待，正在重新发送。',
+      item,
+    };
+  }
   if (!activeRunId) {
     dispatchQueuedFollowUpFamily(chatJid);
     return {
@@ -2066,6 +2093,10 @@ function settleCancelledFollowUp(
     [item.id],
     'Queued input cancelled',
   );
+  // Nothing left to resume: the lane no longer waits for a usage reset.
+  if (listQueuedFollowUps(chatJid).length === 0) {
+    endUsageLimitWait(chatJid, 'cancelled');
+  }
   broadcastFollowUpUpdate(chatJid, {
     id: item.id,
     delivery_status: 'cancelled',
@@ -2202,14 +2233,141 @@ function steerQueuedFollowUpBatch(
   };
 }
 
-function recoverDurableFollowUps(): void {
-  for (const chatJid of getQueuedFollowUpChatJids()) {
-    withdrawQueuedInputsOutsideAudience(chatJid);
-    const recoveryRunId = `recovery:${crypto.randomUUID()}`;
-    const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
-    if (items.length === 0) continue;
-    releaseQueuedFollowUpBatch(items, recoveryRunId);
+/**
+ * Hand a lane's durable queue to the cold-start reader as one batch and, by
+ * default, schedule the run that reads it. Returns whether any was released.
+ */
+function releaseQueuedFollowUpsToColdReader(
+  chatJid: string,
+  options: { enqueue?: boolean } = {},
+): boolean {
+  withdrawQueuedInputsOutsideAudience(chatJid);
+  const recoveryRunId = `recovery:${crypto.randomUUID()}`;
+  const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
+  if (items.length === 0) return false;
+  const deliveryUpdatedAt = new Date().toISOString();
+  const released = releaseQueuedFollowUpBatch(
+    items,
+    recoveryRunId,
+    deliveryUpdatedAt,
+  );
+  broadcastFollowUpBatchUpdate(
+    chatJid,
+    released ? items : [],
+    recoveryRunId,
+    deliveryUpdatedAt,
+  );
+  if (options.enqueue !== false) {
     enqueueReleasedFollowUp(items[items.length - 1]);
+  }
+  return released;
+}
+
+/** `waitingLanes` resume on their own usage-limit timers instead. */
+function recoverDurableFollowUps(
+  waitingLanes: ReadonlySet<string> = new Set(),
+): void {
+  for (const chatJid of getQueuedFollowUpChatJids()) {
+    if (waitingLanes.has(chatJid)) continue;
+    releaseQueuedFollowUpsToColdReader(chatJid);
+  }
+}
+
+// ── Usage-limit waits (policy and timers: src/usage-limit-wait.ts) ──
+
+/**
+ * The durable inputs a waiting provider failure parks: the failed batch and
+ * everything else still pending in the lane, so only input that arrives
+ * after the wait began can end it.
+ */
+function usageLimitParkedMessageIds(
+  laneJid: string,
+  output: ContainerOutput,
+  batch: readonly { id: string }[],
+): string[] {
+  const covered = (output.ipcReceipts ?? []).flatMap((receipt) =>
+    (receipt.coveredCursors ?? [receipt.cursor]).map((cursor) => cursor.id),
+  );
+  const pending = getMessagesSince(
+    laneJid,
+    lastCommittedCursor[laneJid] || EMPTY_CURSOR,
+  ).map((message) => message.id);
+  return [
+    ...new Set([
+      ...(covered.length > 0 ? covered : batch.map((message) => message.id)),
+      ...pending,
+    ]),
+  ];
+}
+
+/**
+ * Put an input waiting for a usage-limit reset back in its lane's durable
+ * queue, where it stays visible, editable, reorderable and cancellable until
+ * the resume timer releases it, and tell its channel once when it continues.
+ * Returns the note for the input's streaming card.
+ */
+function parkInputForUsageLimitWait(input: {
+  laneJid: string;
+  agentId: string | null;
+  inputId: string;
+  messageIds: readonly string[];
+  replySourceImJid: string | null;
+  turnScope: string;
+  presentation: 'native' | 'default';
+}): string | null {
+  const wait = getUsageLimitWait(input.laneJid);
+  if (!wait || wait.state !== 'waiting') return null;
+  for (const messageId of input.messageIds) {
+    setMessageFollowUp(input.laneJid, messageId, {
+      mode: 'queue',
+      status: 'queued',
+      // "Send now" names the run it steers; a parked input has none running.
+      runId: `usage-limit:${input.inputId}`,
+    });
+  }
+  broadcastFollowUpUpdate(input.laneJid);
+  armUsageLimitResume(wait);
+  broadcastUsageLimitWait(input.laneJid, wait);
+  if (input.replySourceImJid) {
+    // Keyed by the input: later waits of the same input send nothing.
+    void deliverTerminalFailureNotice({
+      logicalChatJid: input.laneJid,
+      scopeKey: input.turnScope,
+      targetJid: input.replySourceImJid,
+      originalInputTurnId: input.inputId,
+      noticeKey: 'usage-limit-wait',
+      text: formatUsageLimitWaitNotice(wait.resumeAt),
+      agentId: input.agentId,
+      presentation: input.presentation,
+    }).catch((err) =>
+      logger.warn(
+        { err, laneJid: input.laneJid },
+        'Usage-limit wait notice failed',
+      ),
+    );
+  }
+  return `额度用尽，预计 ${formatUsageLimitResumeTime(wait.resumeAt)} 自动继续`;
+}
+
+/**
+ * New input ends the lane's wait: its parked inputs join the batch the
+ * caller is about to read. Returns true when they were released.
+ */
+function releaseUsageLimitWaitForNewInput(laneJid: string): boolean {
+  return (
+    !!endUsageLimitWait(laneJid, 'new_input') &&
+    releaseQueuedFollowUpsToColdReader(laneJid, { enqueue: false })
+  );
+}
+
+/** A discarded wait takes the input it parked along. */
+function cancelQueuedInputsOfLane(laneJid: string): void {
+  const deliveryUpdatedAt = new Date().toISOString();
+  for (const item of cancelQueuedFollowUpsAtCutoff(
+    laneJid,
+    deliveryUpdatedAt,
+  )) {
+    settleCancelledFollowUp(laneJid, item, deliveryUpdatedAt);
   }
 }
 
@@ -2502,25 +2660,6 @@ function resolveOwnerHomeFolder(group: RegisteredGroup): string {
     return getUserHomeGroup(group.created_by)?.folder || group.folder;
   }
   return group.folder;
-}
-
-function toContainerAgentProfile(
-  profile: AgentProfile | undefined,
-): ContainerInput['agentProfile'] | undefined {
-  profile = resolveEffectiveAgentProfile(profile);
-  if (!profile) return undefined;
-  return {
-    id: profile.id,
-    name: profile.name,
-    version: profile.version,
-    isDefault: profile.is_default,
-    identityHash: profile.identity_hash,
-    identityPrompt: buildAgentProfilePrompt(profile),
-    includeClaudePreset: profile.prompt_mode === 'append',
-    modelConfigId: profile.model_config_id,
-    model: profile.model,
-    runtimePolicy: profile.runtime_policy,
-  };
 }
 
 function resolveHappyClawOwnerProfileForTurn(input: {
@@ -7135,7 +7274,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Get the oldest pending messages since last agent interaction. A backlog
   // beyond one turn's bound is consumed by the follow-up check below.
   const sinceCursor = lastAgentTimestamp[chatJid] || EMPTY_CURSOR;
-  const pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  let pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  if (
+    pendingWindow.messages.length > 0 &&
+    releaseUsageLimitWaitForNewInput(chatJid)
+  ) {
+    pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
+  }
   let missedMessages = pendingWindow.messages;
 
   if (missedMessages.length === 0) return true;
@@ -7339,7 +7485,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Recovery: injected recent conversation history into prompt',
       );
     }
-  } else if (resetForAgentProfile || resetForInteractionMode) {
+  } else if (
+    resetForAgentProfile ||
+    resetForInteractionMode ||
+    // A Skill/MCP change reset the SDK session; the conversation goes on.
+    takeSessionHistoryReinjection(
+      effectiveGroup.folder,
+      null,
+      !!sessions[effectiveGroup.folder],
+    )
+  ) {
     historyContext = buildRecentConversationHistoryContext(
       chatJid,
       new Set(missedMessages.map((m) => m.id)),
@@ -7348,7 +7503,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         maxMessageLength: 700,
         intro: resetForInteractionMode
           ? '当前输入来源使用不同的回复模式，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。'
-          : '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。',
+          : resetForAgentProfile
+            ? '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。'
+            : CAPABILITY_CHANGE_HISTORY_INTRO,
       },
     );
     if (historyContext) {
@@ -7510,6 +7667,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // active B appear committed when B later fails.
   const cursorCommittedInputTurns = new Set<string>();
   let providerFailoverPending = false;
+  /** Card note while the input waits for a usage-limit reset. */
+  let usageLimitWaitNote: string | null = null;
   let channelDeliveryNeedsManualReconciliation = false;
   let channelManualNoticesAcknowledged = true;
   let lastReplyMsgId: string | undefined;
@@ -9685,6 +9844,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             rollbackIdleMainCardReservation(providerFailureInputId);
             if (result.providerFailureTerminal !== true) {
               providerFailoverPending = true;
+              if (result.providerUsageLimitResumeAt !== undefined) {
+                await clearProcessingIndicatorForInput(providerFailureInputId);
+                usageLimitWaitNote = parkInputForUsageLimitWait({
+                  laneJid: chatJid,
+                  agentId: null,
+                  inputId: providerFailureInputId,
+                  messageIds: usageLimitParkedMessageIds(
+                    chatJid,
+                    result,
+                    missedMessages,
+                  ),
+                  replySourceImJid,
+                  turnScope: channelTurnScope(effectiveGroup.folder),
+                  presentation:
+                    interactionMode === 'proactive' ? 'native' : 'default',
+                });
+              }
               logger.warn(
                 {
                   group: group.name,
@@ -10774,7 +10950,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           await streamingSession.abort(heldNote).catch(() => {});
         } else if (providerFailoverPending) {
           await streamingSession
-            .abort('模型服务暂时异常，正在重试')
+            .abort(usageLimitWaitNote ?? '模型服务暂时异常，正在重试')
             .catch(() => {});
         } else if (hadError || !output || output.status === 'error') {
           await streamingSession.abort('处理出错').catch(() => {});
@@ -11735,7 +11911,7 @@ async function runAgent(
     );
   }
   const sessionId = sessions[group.folder];
-  const containerAgentProfile = toContainerAgentProfile(resolvedAgentProfile);
+  const containerAgentProfile = toRunnerAgentProfile(resolvedAgentProfile);
   const rotateProviderAfterTurn = shouldRotatePoolProviderAfterTurn(
     group.folder,
     resolvedAgentProfile?.model_config_id,
@@ -14070,6 +14246,73 @@ function writeTaskResult(
   }
 }
 
+/**
+ * Refuse a Skill install/uninstall from a turn the workspace owner did not
+ * start, writing the reason as the tool result. Returns true when refused.
+ */
+function refuseSkillMutationFromNonOwnerTurn(request: {
+  type: 'install_skill' | 'uninstall_skill';
+  sourceGroup: string;
+  ipcAgentId: string | null;
+  ipcTaskId: string | null;
+  ownerUserId: string;
+  tasksDir: string;
+  resultFilePath: string;
+}): boolean {
+  const rejection = skillMutationTurnRejection({
+    registry: activeAgentBuilderTurns,
+    sourceFolder: request.sourceGroup,
+    turnScope: agentBuilderTurnScope(request.sourceGroup, request.ipcAgentId),
+    isolatedTaskRun: !!request.ipcTaskId,
+    ownerUserId: request.ownerUserId,
+    loadPersistedInput: getAgentBuilderInputMessage,
+    getGroup: (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+    getFolderJids: getJidsByFolder,
+    getChannelType,
+  });
+  if (!rejection) return false;
+  logger.warn(
+    {
+      type: request.type,
+      sourceGroup: request.sourceGroup,
+      ipcAgentId: request.ipcAgentId,
+      ipcTaskId: request.ipcTaskId,
+    },
+    'Rejected a Skill change from a turn the workspace owner did not start',
+  );
+  fs.mkdirSync(path.dirname(request.resultFilePath), { recursive: true });
+  writeExclusiveIpcResult(
+    request.tasksDir,
+    request.resultFilePath,
+    JSON.stringify({ success: false, error: rejection }),
+  );
+  return true;
+}
+
+/**
+ * Apply a Skill change that a runner's own tool call asked for. That runner
+ * finishes and delivers its turn on the old capability set instead of being
+ * stopped mid-turn; it closes afterwards, its SDK session is reset with the
+ * history hand-off, and input left queued behind it starts on a fresh runner.
+ */
+function runSelfCapabilityMutation<T>(
+  sourceGroup: string,
+  ipcAgentId: string | null,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const workspaceJid = findWebJidForFolder(sourceGroup);
+  if (!workspaceJid) return mutate();
+  return queue.deferStopsToQueryEnd(
+    ipcAgentId ? `${workspaceJid}#agent:${ipcAgentId}` : workspaceJid,
+    (runnerJid) => {
+      invalidateSessionAfterRunnerExit(sourceGroup, ipcAgentId);
+      // After the exited runner's own teardown has finished.
+      queueMicrotask(() => releaseQueuedFollowUpsToColdReader(runnerJid));
+    },
+    mutate,
+  );
+}
+
 async function processTaskIpc(
   data: {
     type: string;
@@ -16031,8 +16274,26 @@ async function processTaskIpc(
           break;
         }
 
+        if (
+          refuseSkillMutationFromNonOwnerTurn({
+            type: 'install_skill',
+            sourceGroup,
+            ipcAgentId,
+            ipcTaskId,
+            ownerUserId: userId,
+            tasksDir,
+            resultFilePath,
+          })
+        ) {
+          break;
+        }
+
         try {
-          const result = await installSkillForUser(userId, pkg);
+          const result = await runSelfCapabilityMutation(
+            sourceGroup,
+            ipcAgentId,
+            () => installSkillForUser(userId, pkg),
+          );
           fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
           writeExclusiveIpcResult(
             tasksDir,
@@ -16105,7 +16366,25 @@ async function processTaskIpc(
           break;
         }
 
-        const result = await deleteSkillForUser(userId, skillId);
+        if (
+          refuseSkillMutationFromNonOwnerTurn({
+            type: 'uninstall_skill',
+            sourceGroup,
+            ipcAgentId,
+            ipcTaskId,
+            ownerUserId: userId,
+            tasksDir,
+            resultFilePath,
+          })
+        ) {
+          break;
+        }
+
+        const result = await runSelfCapabilityMutation(
+          sourceGroup,
+          ipcAgentId,
+          () => deleteSkillForUser(userId, skillId),
+        );
         fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
         writeExclusiveIpcResult(
           tasksDir,
@@ -16697,7 +16976,14 @@ async function processAgentConversation(
   // Get the oldest pending messages; a longer backlog is consumed by the
   // agent-channel-next task enqueued below.
   const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
-  const pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  let pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  // New input ends a usage-limit wait: the parked inputs rejoin this batch.
+  if (
+    pendingWindow.messages.length > 0 &&
+    releaseUsageLimitWaitForNewInput(virtualChatJid)
+  ) {
+    pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
+  }
   let missedMessages = pendingWindow.messages;
 
   // Owner gate (single chokepoint for all 5 call sites: normal dispatch,
@@ -16919,6 +17205,11 @@ async function processAgentConversation(
     );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
+  const capabilityReset = takeSessionHistoryReinjection(
+    effectiveGroup.folder,
+    agentId,
+    !!sessionId,
+  );
   if (startsFreshSession) {
     historyContext = buildRecentConversationHistoryContext(
       virtualChatJid,
@@ -16928,7 +17219,9 @@ async function processAgentConversation(
         maxMessageLength: 700,
         intro: resetForAgentProfile
           ? '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，当前 agent 的底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。'
-          : '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
+          : capabilityReset
+            ? CAPABILITY_CHANGE_HISTORY_INTRO
+            : '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
       },
     );
     if (historyContext) {
@@ -17943,6 +18236,8 @@ async function processAgentConversation(
   const cursorCommittedInputTurns = new Set<string>();
   let retryUnfinishedTurn = false;
   let agentProviderFailoverPending = false;
+  /** Card note while the input waits for a usage-limit reset. */
+  let agentUsageLimitWaitNote: string | null = null;
   const rotateProviderAfterAgentTurn = shouldRotatePoolProviderAfterTurn(
     effectiveGroup.folder,
     agentProfile?.model_config_id,
@@ -18725,6 +19020,23 @@ async function processAgentConversation(
         retryUnfinishedTurn = !healthyAgentCompletedInputTurns.has(
           providerFailureInputId,
         );
+        if (output.providerUsageLimitResumeAt !== undefined) {
+          await clearAgentProcessingIndicatorForInput(providerFailureInputId);
+          agentUsageLimitWaitNote = parkInputForUsageLimitWait({
+            laneJid: virtualChatJid,
+            agentId,
+            inputId: providerFailureInputId,
+            messageIds: usageLimitParkedMessageIds(
+              virtualChatJid,
+              output,
+              missedMessages,
+            ),
+            replySourceImJid: replySourceImJid ?? null,
+            turnScope: channelTurnScope(effectiveGroup.folder, agentId),
+            presentation:
+              interactionMode === 'proactive' ? 'native' : 'default',
+          });
+        }
         logger.warn(
           { chatJid, agentId, inputTurnId: providerFailureInputId },
           'Agent provider failure kept retryable for failover',
@@ -19508,7 +19820,7 @@ async function processAgentConversation(
       agentId,
       agentName: agent.name,
       images: imagesForAgent,
-      agentProfile: toContainerAgentProfile(agentProfile),
+      agentProfile: toRunnerAgentProfile(agentProfile),
     };
 
     // Write tasks/groups snapshots
@@ -19761,7 +20073,7 @@ async function processAgentConversation(
           await agentStreamingSession.abort(heldNote).catch(() => {});
         } else if (agentProviderFailoverPending) {
           await agentStreamingSession
-            .abort('模型服务暂时异常，正在重试')
+            .abort(agentUsageLimitWaitNote ?? '模型服务暂时异常，正在重试')
             .catch(() => {});
         } else if (hadError) {
           await agentStreamingSession.abort('处理出错').catch(() => {});
@@ -22733,6 +23045,8 @@ async function handleSessionBreak(input: {
       'Input cancelled by /break',
     );
   }
+  // The cutoff took the inputs a usage-limit wait had parked.
+  endUsageLimitWait(targetJid, 'cancelled');
 
   const { activeRunId, interrupted } = interruptActiveSessionRun(
     targetJid,
@@ -24277,6 +24591,10 @@ async function main(): Promise<void> {
           Date.now() - CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS,
         ).toISOString(),
         reason: 'retry_wait expired: no execution reclaimed this turn',
+        // A usage-limit wait can outlast the bound; its input runs again.
+        keepCorrelationIds: listPendingUsageLimitWaits().map(
+          (wait) => wait.inputKey,
+        ),
       });
       if (cancelled > 0) {
         logger.info({ cancelled }, 'Cancelled stale retry_wait channel turns');
@@ -24300,6 +24618,25 @@ async function main(): Promise<void> {
   });
   queue.setOnQueryIdle((chatJid) => {
     dispatchQueuedFollowUpFamily(chatJid);
+  });
+  bindUsageLimitWaitHost({
+    releaseLane: releaseQueuedFollowUpsToColdReader,
+    hasQueuedInput: (jid) => listQueuedFollowUps(jid).length > 0,
+    discardQueuedInput: cancelQueuedInputsOfLane,
+    broadcast: broadcastUsageLimitWait,
+  });
+  queue.setOnLaneDiscarded((jid) => {
+    endUsageLimitWait(jid, 'discarded');
+  });
+  // An idle runner that still owes its lane queued input or a running
+  // background agent keeps its container slot.
+  queue.setIdleRunnerReclaimBlocker((jid) => {
+    const baseJid = stripVirtualJidSuffix(jid);
+    return (
+      listQueuedFollowUps(jid).length > 0 ||
+      getRunningTaskAgentsByChat(jid).length > 0 ||
+      (baseJid !== jid && getRunningTaskAgentsByChat(baseJid).length > 0)
+    );
   });
   // IM attachments must land where the Agent's cwd resolves the relative
   // path it is given: a Host workspace with customCwd runs there, not in
@@ -24490,7 +24827,8 @@ async function main(): Promise<void> {
   // A restart has no live query that can emit an idle transition. Release one
   // durable item per chat into the normal cold-start path; the remaining items
   // stay queued and are promoted one-by-one after each completed query.
-  recoverDurableFollowUps();
+  // Lanes still waiting for a usage-limit reset get their timers back first.
+  recoverDurableFollowUps(new Set(rearmUsageLimitWaitsAfterRestart()));
   const schedulerDeps: import('./task-scheduler.js').SchedulerDependencies = {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,

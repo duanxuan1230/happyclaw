@@ -15,12 +15,12 @@ function read(relativePath: string): string {
  */
 describe('Agent model runtime contracts', () => {
   test('conversations and isolated scheduled tasks hand the Agent model to the runner', () => {
-    expect(read('src/index.ts')).toMatch(
-      /function toContainerAgentProfile[\s\S]*?modelConfigId: profile\.model_config_id,\s*model: profile\.model,/,
-    );
-    expect(read('src/task-scheduler.ts')).toMatch(
+    expect(read('src/runner-agent-profile.ts')).toMatch(
       /function toRunnerAgentProfile[\s\S]*?modelConfigId: profile\.model_config_id,\s*model: profile\.model,/,
     );
+    for (const caller of ['src/index.ts', 'src/task-scheduler.ts']) {
+      expect(read(caller)).toContain('toRunnerAgentProfile(');
+    }
   });
 
   test('host and container starts select the provider with the Agent model', () => {

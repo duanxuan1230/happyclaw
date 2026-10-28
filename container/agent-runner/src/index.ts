@@ -195,6 +195,7 @@ import {
 } from './background-task-drain.js';
 import { IpcInputClaimStore } from './ipc-input-claims.js';
 import { QueryStartupTiming } from './query-timing.js';
+import { QueryCacheUsage } from './cache-rate.js';
 import { ReplyShapeTracker } from './reply-shape.js';
 import {
   buildSilentStopContinuationPrompt,
@@ -2163,6 +2164,7 @@ async function runQueryAttempt(
   };
   let firstResponseWatchdog: SdkFirstResponseWatchdog | undefined;
   let queryTiming: QueryStartupTiming | undefined;
+  let queryCache: QueryCacheUsage | undefined;
 
   // 如果有图片被拒绝，立即通知用户
   for (const reason of initialRejected) {
@@ -3162,6 +3164,7 @@ async function runQueryAttempt(
       source: sourceKindOverride ?? 'input',
       queryRunId: containerInput.queryRunId,
     });
+    queryCache = new QueryCacheUsage(containerInput.queryRunId);
     const q = query({
       prompt: stream,
       options: sdkCompat.options,
@@ -3317,6 +3320,7 @@ async function runQueryAttempt(
       firstResponseWatchdog.observe(message.type);
       const timingLine = queryTiming.observe(message);
       if (timingLine) logInfo(timingLine);
+      queryCache.observe(message);
       if (message.type === 'system') {
         const frame = message as {
           subtype?: string;
@@ -4511,6 +4515,8 @@ async function runQueryAttempt(
     queryFinished = true;
     const timingLine = queryTiming?.finish();
     if (timingLine) logInfo(timingLine);
+    const cacheLine = queryCache?.finish();
+    if (cacheLine) logInfo(cacheLine);
     firstResponseWatchdog?.clear();
     clearBackgroundProtocolDebtWatchdog();
     backgroundResultGate.dispose();

@@ -352,6 +352,7 @@ function runtimeControlLane(groups: Record<string, any>) {
     clearTrackedProcessingIndicators: vi.fn(async () => {}),
     getStreamingSession: () => undefined,
     cancelRetryWaitChannelTurnsForInputs: vi.fn(() => 0),
+    endUsageLimitWait: vi.fn(),
     ...directChatLearning(groups),
   };
   const harness = createRuntimeSourceHarness(globals);

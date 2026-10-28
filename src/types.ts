@@ -932,6 +932,14 @@ export type RunFinishReason =
   | 'stopped';
 
 // WebSocket message types
+/** One Session waiting for a usage-limit reset, in a reconnect snapshot. */
+export interface UsageLimitWaitSnapshot {
+  chatJid: string;
+  agentId?: string;
+  resumeAt: string;
+  waitCount: number;
+}
+
 export type WsMessageOut =
   | {
       /**
@@ -1038,6 +1046,18 @@ export type WsMessageOut =
        * an idle composer and sends the same message twice.
        */
       queuedChatJids: string[];
+      /** Sessions whose input waits for a usage-limit reset. */
+      usageLimitWaits?: UsageLimitWaitSnapshot[];
+    }
+  | {
+      type: 'usage_limit_wait';
+      /** Normalized workspace JID, routed like follow_up_update. */
+      chatJid: string;
+      agentId?: string;
+      /** ISO time the parked input resumes; null clears the wait. */
+      resumeAt: string | null;
+      /** 1-based count of consecutive waits for this input (max 3). */
+      waitCount?: number;
     }
   | {
       type: 'follow_up_update';

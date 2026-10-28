@@ -114,6 +114,7 @@ import {
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
 import { initSessionWorktreeStore } from './session-worktree-store.js';
+import { initRuntimeStateStore } from './runtime-state-store.js';
 import { splitLegacyEmbeddedReferenceContent } from './message-prompt.js';
 
 let db: InstanceType<typeof Database>;
@@ -2664,6 +2665,7 @@ export function initDatabase(
   // schema and fenced APIs; db.ts only binds it to this process connection.
   createChannelReliabilitySchema(db);
   bindChannelReliabilityDatabase(db);
+  initRuntimeStateStore(db);
 
   // v63 -> v64: early Feishu reply enrichment embedded quoted ancestors in
   // messages.content, leaking prompt scaffolding into Web history and then
@@ -16386,6 +16388,7 @@ export function closeDatabase(): void {
   bindChannelReliabilityDatabase(null);
   bindWorkspaceMemoryDatabase(null);
   bindOwnerProfileDatabase(null);
+  initRuntimeStateStore(null);
   if (db) {
     db.close();
   }

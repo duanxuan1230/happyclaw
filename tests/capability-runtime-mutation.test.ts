@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
+  events: [] as string[],
   deletedFolders: [] as string[],
   blocked: [] as string[][],
   unblocked: [] as string[][],
@@ -11,8 +12,10 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/db.js', () => ({
-  deleteWorkspaceSessions: (folder: string) =>
-    state.deletedFolders.push(folder),
+  deleteWorkspaceSessions: (folder: string) => {
+    state.events.push(`delete:${folder}`);
+    state.deletedFolders.push(folder);
+  },
   getAllUsers: () => [
     { id: 'u1', status: 'active' },
     { id: 'u2', status: 'active' },
@@ -20,6 +23,12 @@ vi.mock('../src/db.js', () => ({
   ],
   listAgentProfilesForUser: (userId: string) =>
     state.profiles.get(userId) ?? [],
+}));
+
+vi.mock('../src/runtime-state-store.js', () => ({
+  markFolderSessionsForHistoryReinjection: (folder: string) =>
+    state.events.push(`mark:${folder}`),
+  markSessionForHistoryReinjection: () => {},
 }));
 
 vi.mock('../src/web-context.js', () => ({
@@ -72,6 +81,7 @@ function workspace(folder: string) {
 }
 
 beforeEach(() => {
+  state.events.length = 0;
   state.deletedFolders.length = 0;
   state.blocked.length = 0;
   state.unblocked.length = 0;
@@ -116,6 +126,19 @@ describe('capability runtime mutation invalidation', () => {
       'u2-custom-folder',
     ]);
     expect(state.sessions).not.toHaveProperty('u1-inherit-folder');
+    // Each reset session is owed the history hand-off, marked before the
+    // session rows it reads from are deleted.
+    expect(state.events).toEqual(
+      expect.arrayContaining([
+        'mark:u1-inherit-folder',
+        'mark:u2-custom-folder',
+      ]),
+    );
+    for (const folder of ['u1-inherit-folder', 'u2-custom-folder']) {
+      expect(state.events.indexOf(`mark:${folder}`)).toBeLessThan(
+        state.events.indexOf(`delete:${folder}`),
+      );
+    }
     expect(state.unblocked).toEqual([
       ['web:u1-inherit-folder', 'web:u2-custom-folder'],
     ]);

@@ -283,6 +283,45 @@ export class ProviderPool {
     return JSON.stringify({ accountWalls, modelWalls });
   }
 
+  /**
+   * The earliest upstream-reported moment a member could serve one of
+   * `tiers` again, ignoring `excludeProfileId` (whose own report the caller
+   * holds unclamped). A member counts only when every wall in its way carries
+   * an upstream reset stamp: an interval-based quarantine says nothing about
+   * when the quota returns. Null when no member has such a reset.
+   */
+  earliestReportedRecoveryAt(
+    tiers: readonly ProviderTier[],
+    excludeProfileId?: string | null,
+    now = Date.now(),
+  ): number | null {
+    this.refreshRecoveryState(now);
+    let earliest: number | null = null;
+    for (const member of this.members) {
+      if (!member.enabled || member.profileId === excludeProfileId) continue;
+      const health = this.healthMap.get(member.profileId);
+      let accountAt = now;
+      if (health && !health.healthy) {
+        if (health.quarantinedUntil === null) continue;
+        accountAt = health.quarantinedUntil;
+      }
+      let tierAt: number | null = null;
+      for (const tier of tiers) {
+        const model =
+          typeof tier === 'string' ? tier : (tier.get(member.profileId) ?? '');
+        const entry = model
+          ? this.modelQuarantine.get(modelKey(member.profileId, model))
+          : undefined;
+        const at = !entry ? now : entry.until;
+        if (at !== null && (tierAt === null || at < tierAt)) tierAt = at;
+      }
+      if (tierAt === null) continue;
+      const memberAt = Math.max(accountAt, tierAt);
+      if (earliest === null || memberAt < earliest) earliest = memberAt;
+    }
+    return earliest;
+  }
+
   // ─── 选择算法 ────────────────────────────────────────────
 
   /**
