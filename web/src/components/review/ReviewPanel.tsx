@@ -11,6 +11,10 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { IconButton } from '@/components/common/IconButton';
 import { LoadErrorNotice } from '@/components/common/LoadErrorNotice';
 import { ScrollEdgeAffordance } from '@/components/common/ScrollEdgeAffordance';
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from '@/components/common/SegmentedControl';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
@@ -26,6 +30,7 @@ import {
 } from './review-format';
 import type {
   GitReviewFile,
+  GitReviewScope,
   GitReviewWorktree,
   GitStatusResponse,
   ReviewLoad,
@@ -42,6 +47,10 @@ export interface ReviewPanelProps {
 const HEADER_CLASS =
   'flex h-11 shrink-0 items-center gap-2 border-b border-surface-border pr-2';
 const HEADER_BUTTON_CLASS = 'text-muted-foreground pointer-coarse:size-9';
+const SCOPE_OPTIONS: SegmentedOption<GitReviewScope>[] = [
+  { value: 'working', label: '未提交' },
+  { value: 'branch', label: '分支改动' },
+];
 
 /** Read-only view of the uncommitted changes in a conversation's checkout. */
 export function ReviewPanel({
@@ -154,7 +163,13 @@ function ReviewPanelScope({ groupJid, agentId, className }: ReviewPanelProps) {
       <div
         className={cn('flex min-h-0 flex-1 flex-col', selectedFile && 'hidden')}
       >
-        {okStatus && <BranchBar status={okStatus} />}
+        {okStatus && (
+          <BranchBar
+            status={okStatus}
+            scope={review.scope}
+            onScopeChange={review.setScope}
+          />
+        )}
         <div className="relative min-h-0 flex-1">
           <div
             ref={listScrollRef}
@@ -163,6 +178,7 @@ function ReviewPanelScope({ groupJid, agentId, className }: ReviewPanelProps) {
           >
             <StatusBody
               status={review.status}
+              scope={review.scope}
               onOpenFile={openFile}
               onRetry={review.refresh}
             />
@@ -200,13 +216,19 @@ function WorktreeBadge({
 
 function BranchBar({
   status,
+  scope,
+  onScopeChange,
 }: {
   status: Extract<GitStatusResponse, { state: 'ok' }>;
+  scope: GitReviewScope;
+  onScopeChange: (scope: GitReviewScope) => void;
 }) {
+  const showScopeToggle =
+    status.worktree !== null || status.baseAhead !== undefined;
   return (
     <div
       data-testid="review-branch-bar"
-      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-surface-border px-4 py-1.5 text-caption"
+      className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b border-surface-border px-4 py-1.5 text-caption"
     >
       <GitBranch
         className="size-3.5 shrink-0 text-muted-foreground"
@@ -226,7 +248,7 @@ function BranchBar({
           )}
         </span>
       )}
-      {status.upstream && (
+      {status.upstream ? (
         <span
           className="shrink-0 font-mono text-muted-foreground tabular-nums"
           title={`相对 ${status.upstream}`}
@@ -238,6 +260,28 @@ function BranchBar({
             领先 {status.ahead} 个提交，落后 {status.behind} 个提交
           </span>
         </span>
+      ) : (
+        (status.baseAhead ?? 0) > 0 && (
+          <span
+            className="shrink-0 text-muted-foreground tabular-nums"
+            title={
+              status.baseCommit
+                ? `基于 ${status.baseCommit.slice(0, 7)}`
+                : undefined
+            }
+          >
+            领先基底 {status.baseAhead} 个提交
+          </span>
+        )
+      )}
+      {showScopeToggle && (
+        <SegmentedControl
+          size="sm"
+          label="改动范围"
+          value={scope}
+          options={SCOPE_OPTIONS}
+          onChange={onScopeChange}
+        />
       )}
       <span className="ml-auto shrink-0 text-muted-foreground tabular-nums">
         {status.total_files} 个文件
@@ -248,10 +292,12 @@ function BranchBar({
 
 function StatusBody({
   status,
+  scope,
   onOpenFile,
   onRetry,
 }: {
   status: ReviewLoad<GitStatusResponse>;
+  scope: GitReviewScope;
   onOpenFile: (file: GitReviewFile) => void;
   onRetry: () => void;
 }) {
@@ -275,7 +321,7 @@ function StatusBody({
   const data = status.data;
   switch (data.state) {
     case 'ok':
-      return <FileList status={data} onOpenFile={onOpenFile} />;
+      return <FileList status={data} scope={scope} onOpenFile={onOpenFile} />;
     case 'unavailable':
       return data.reason === 'worktree_broken' ? (
         <ReviewWarningNotice
@@ -314,16 +360,18 @@ function StatusBody({
 
 function FileList({
   status,
+  scope,
   onOpenFile,
 }: {
   status: Extract<GitStatusResponse, { state: 'ok' }>;
+  scope: GitReviewScope;
   onOpenFile: (file: GitReviewFile) => void;
 }) {
   if (status.files.length === 0) {
     return (
       <EmptyState
         icon={CircleCheck}
-        title="没有未提交的改动"
+        title={scope === 'branch' ? '分支没有改动' : '没有未提交的改动'}
         className="px-4"
       />
     );

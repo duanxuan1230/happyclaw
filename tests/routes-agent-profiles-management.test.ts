@@ -727,6 +727,43 @@ describe('POST /:id/migrate-and-delete', () => {
     expect(db.getWorkspaceAgentProfileId('busy-retire')).toBe(source.id);
     expect(db.getAgentProfileForUser(source.id, MEMBER)).toBeDefined();
   });
+
+  test('a refused commit rolls back without running post-commit stop or reporting persisted: true', async () => {
+    const source = db.createAgentProfile({
+      ownerUserId: MEMBER,
+      name: 'Rollback Retiree',
+    });
+    const target = db.createAgentProfile({
+      ownerUserId: MEMBER,
+      name: 'Rollback Heir',
+    });
+    registerWorkspace('rollback-own-ws', MEMBER, source.id);
+    // Foreign workspace keeps a mapping to `source`, so archive is refused
+    // inside `commit` with `'has_workspaces'`.
+    registerWorkspace('rollback-foreign-ws', OTHER, source.id);
+
+    let stopCalls = 0;
+    const blockGroupsForRuntimeSafety = vi.fn();
+    fakeQueue({
+      stopGroup: vi.fn(async () => {
+        stopCalls++;
+        if (stopCalls > 1) {
+          throw new Error('post-commit stop should never run after rollback');
+        }
+      }),
+      blockGroupsForRuntimeSafety,
+    });
+
+    const res = await call(`/${source.id}/migrate-and-delete`, {
+      method: 'POST',
+      body: { target_agent_profile_id: target.id },
+    });
+    expect(res.status).toBe(409);
+    expect(stopCalls).toBe(1);
+    expect(blockGroupsForRuntimeSafety).not.toHaveBeenCalled();
+    expect(db.getWorkspaceAgentProfileId('rollback-own-ws')).toBe(source.id);
+    expect(db.getAgentProfileForUser(source.id, MEMBER)).toBeDefined();
+  });
 });
 
 describe('governance and capability preview', () => {

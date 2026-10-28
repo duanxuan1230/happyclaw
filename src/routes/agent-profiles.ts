@@ -1123,6 +1123,18 @@ agentProfileRoutes.delete('/:id', authMiddleware, async (c) => {
   });
 });
 
+class AgentProfileMigrateRefusedError extends Error {
+  constructor(
+    readonly reason: Exclude<
+      ReturnType<typeof migrateAgentProfileWorkspacesAndArchive>,
+      'ok'
+    >,
+  ) {
+    super(`Agent profile migration refused: ${reason}`);
+    this.name = 'AgentProfileMigrateRefusedError';
+  }
+}
+
 /**
  * Move every Workspace of an Agent to another Agent and archive it, all or
  * nothing: the Workspaces' runners are stopped around one transaction that
@@ -1153,8 +1165,8 @@ agentProfileRoutes.post(
       // Membership changes for both Agents hold these locks, so the list
       // cannot grow; Workspace deletion does not, so the commit re-reads it.
       const workspaces = listWorkspaceGroupsForAgentProfile(user.id, id);
-      const commit = () =>
-        migrateAgentProfileWorkspacesAndArchive(
+      const commit = () => {
+        const outcome = migrateAgentProfileWorkspacesAndArchive(
           id,
           user.id,
           targetId,
@@ -1162,13 +1174,21 @@ agentProfileRoutes.post(
             (workspace) => workspace.group.folder,
           ),
         );
+        // Throw when the transaction rolled back so quiesceWorkspaceRunnersAroundCommit
+        // skips its post-commit stop pass, never invokes onPostCommitFailure, and
+        // never reports persisted:true for an aborted migration.
+        if (outcome !== 'ok') {
+          throw new AgentProfileMigrateRefusedError(outcome);
+        }
+        return outcome;
+      };
       const deps = getWebDeps();
-      let result: ReturnType<typeof commit>;
+      let result: ReturnType<typeof migrateAgentProfileWorkspacesAndArchive>;
       let invalidatedRuntimeJids = 0;
-      if (!deps || workspaces.length === 0) {
-        result = commit();
-      } else {
-        try {
+      try {
+        if (!deps || workspaces.length === 0) {
+          result = commit();
+        } else {
           const quiesced = await quiesceWorkspaceRunnersAroundCommit(
             deps,
             workspaces.map((workspace) => ({
@@ -1188,7 +1208,11 @@ agentProfileRoutes.post(
           result = quiesced.value;
           invalidatedRuntimeJids = quiesced.runtimeJids.length;
           deps.queue.unblockGroupsForRuntimeSafety?.(quiesced.runtimeJids);
-        } catch (err) {
+        }
+      } catch (err) {
+        if (err instanceof AgentProfileMigrateRefusedError) {
+          result = err.reason;
+        } else {
           if (!(err instanceof WorkspaceRuntimeQuiesceError)) throw err;
           logger.error(
             { err, agentProfileId: id, persisted: err.persisted },

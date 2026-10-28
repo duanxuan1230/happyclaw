@@ -4,6 +4,7 @@ import { useChatStore } from '../../stores/chat';
 import type {
   GitDiffResponse,
   GitReviewFile,
+  GitReviewScope,
   GitStatusResponse,
   ReviewLoad,
   ReviewRequestFailure,
@@ -33,20 +34,31 @@ export function reviewRuntimeJid(
   return agentId ? `${groupJid}#agent:${agentId}` : groupJid;
 }
 
-export function gitStatusUrl(groupJid: string, agentId: string | null) {
-  const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
-  return `/api/groups/${encodeURIComponent(groupJid)}/git/status${query}`;
+export function gitStatusUrl(
+  groupJid: string,
+  agentId: string | null,
+  scope: GitReviewScope = 'working',
+) {
+  const params = new URLSearchParams();
+  if (agentId) params.set('agentId', agentId);
+  if (scope === 'branch') params.set('scope', 'branch');
+  const query = params.toString();
+  return `/api/groups/${encodeURIComponent(groupJid)}/git/status${
+    query ? `?${query}` : ''
+  }`;
 }
 
 export function gitDiffUrl(
   groupJid: string,
   agentId: string | null,
   file: Pick<GitReviewFile, 'path' | 'orig_path'>,
+  scope: GitReviewScope = 'working',
 ) {
   const params = new URLSearchParams();
   if (agentId) params.set('agentId', agentId);
   params.set('path', file.path);
   if (file.orig_path) params.set('orig_path', file.orig_path);
+  if (scope === 'branch') params.set('scope', 'branch');
   return `/api/groups/${encodeURIComponent(groupJid)}/git/diff?${params}`;
 }
 
@@ -78,6 +90,7 @@ function cancelRequest(ref: { current: Request }) {
  * scope changes. Responses of superseded or cancelled requests are dropped.
  */
 export function useGitReview(groupJid: string, agentId: string | null) {
+  const [scope, setScopeState] = useState<GitReviewScope>('working');
   const [status, setStatus] = useState<ReviewLoad<GitStatusResponse>>({
     kind: 'loading',
   });
@@ -86,35 +99,59 @@ export function useGitReview(groupJid: string, agentId: string | null) {
   const [diff, setDiff] = useState<ReviewLoad<GitDiffResponse> | null>(null);
   const [diffRefreshing, setDiffRefreshing] = useState(false);
 
+  const scopeRef = useRef<GitReviewScope>('working');
+  const initialLoadDoneRef = useRef(false);
   const statusRequest = useRef<Request>({ seq: 0, controller: null });
   const diffRequest = useRef<Request>({ seq: 0, controller: null });
   const selectedRef = useRef<GitReviewFile | null>(null);
 
-  const loadStatus = useCallback(async () => {
-    const request = beginRequest(statusRequest);
-    setStatusRefreshing(true);
-    try {
-      const data = await apiFetch<GitStatusResponse>(
-        gitStatusUrl(groupJid, agentId),
-        { signal: request.signal, timeoutMs: REVIEW_REQUEST_TIMEOUT_MS },
-      );
-      if (request.isCurrent()) setStatus({ kind: 'loaded', data });
-    } catch (error) {
-      if (request.isCurrent()) {
-        setStatus({ kind: 'failed', failure: toReviewFailure(error) });
+  const loadStatus = useCallback(
+    async (targetScope: GitReviewScope = scopeRef.current) => {
+      const request = beginRequest(statusRequest);
+      setStatusRefreshing(true);
+      try {
+        const data = await apiFetch<GitStatusResponse>(
+          gitStatusUrl(groupJid, agentId, targetScope),
+          { signal: request.signal, timeoutMs: REVIEW_REQUEST_TIMEOUT_MS },
+        );
+        if (!request.isCurrent()) return;
+        const isFirstLoad = !initialLoadDoneRef.current;
+        initialLoadDoneRef.current = true;
+        if (
+          isFirstLoad &&
+          targetScope === 'working' &&
+          data.state === 'ok' &&
+          data.files.length === 0 &&
+          (data.baseAhead ?? 0) > 0
+        ) {
+          scopeRef.current = 'branch';
+          setScopeState('branch');
+          setStatus({ kind: 'loaded', data });
+          void loadStatus('branch');
+          return;
+        }
+        setStatus({ kind: 'loaded', data });
+      } catch (error) {
+        if (request.isCurrent()) {
+          setStatus({ kind: 'failed', failure: toReviewFailure(error) });
+        }
+      } finally {
+        if (request.isCurrent()) setStatusRefreshing(false);
       }
-    } finally {
-      if (request.isCurrent()) setStatusRefreshing(false);
-    }
-  }, [groupJid, agentId]);
+    },
+    [groupJid, agentId],
+  );
 
   const loadDiff = useCallback(
-    async (file: GitReviewFile) => {
+    async (
+      file: GitReviewFile,
+      targetScope: GitReviewScope = scopeRef.current,
+    ) => {
       const request = beginRequest(diffRequest);
       setDiffRefreshing(true);
       try {
         const data = await apiFetch<GitDiffResponse>(
-          gitDiffUrl(groupJid, agentId, file),
+          gitDiffUrl(groupJid, agentId, file, targetScope),
           { signal: request.signal, timeoutMs: REVIEW_REQUEST_TIMEOUT_MS },
         );
         if (request.isCurrent()) setDiff({ kind: 'loaded', data });
@@ -130,16 +167,33 @@ export function useGitReview(groupJid: string, agentId: string | null) {
   );
 
   const refresh = useCallback(() => {
-    void loadStatus();
-    if (selectedRef.current) void loadDiff(selectedRef.current);
+    void loadStatus(scopeRef.current);
+    if (selectedRef.current)
+      void loadDiff(selectedRef.current, scopeRef.current);
   }, [loadStatus, loadDiff]);
+
+  const setScope = useCallback(
+    (nextScope: GitReviewScope) => {
+      if (nextScope === scopeRef.current) return;
+      initialLoadDoneRef.current = true;
+      scopeRef.current = nextScope;
+      setScopeState(nextScope);
+      cancelRequest(diffRequest);
+      selectedRef.current = null;
+      setSelected(null);
+      setDiff(null);
+      setDiffRefreshing(false);
+      void loadStatus(nextScope);
+    },
+    [loadStatus],
+  );
 
   const openFile = useCallback(
     (file: GitReviewFile) => {
       selectedRef.current = file;
       setSelected(file);
       setDiff({ kind: 'loading' });
-      void loadDiff(file);
+      void loadDiff(file, scopeRef.current);
     },
     [loadDiff],
   );
@@ -156,11 +210,11 @@ export function useGitReview(groupJid: string, agentId: string | null) {
     const file = selectedRef.current;
     if (!file) return;
     setDiff({ kind: 'loading' });
-    void loadDiff(file);
+    void loadDiff(file, scopeRef.current);
   }, [loadDiff]);
 
   useEffect(() => {
-    void loadStatus();
+    void loadStatus(scopeRef.current);
     return () => {
       cancelRequest(statusRequest);
       cancelRequest(diffRequest);
@@ -177,6 +231,8 @@ export function useGitReview(groupJid: string, agentId: string | null) {
   }, [running, refresh]);
 
   return {
+    scope,
+    setScope,
     status,
     statusRefreshing,
     selected,

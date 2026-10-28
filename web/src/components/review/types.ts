@@ -1,6 +1,8 @@
 // Response shapes of GET /api/groups/:jid/git/{status,diff}
 // (src/routes/git-review.ts, src/git-review.ts).
 
+export type GitReviewScope = 'working' | 'branch';
+
 export type GitReviewWorktree = {
   branch: string;
   base_commit: string;
@@ -39,6 +41,9 @@ export type GitStatusResponse =
       upstream: string | null;
       ahead: number;
       behind: number;
+      baseCommit?: string | null;
+      baseAhead?: number;
+      scope?: GitReviewScope;
       files: GitReviewFile[];
       total_files: number;
       truncated: boolean;

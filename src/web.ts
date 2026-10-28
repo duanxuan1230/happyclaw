@@ -202,8 +202,8 @@ function normalizeTerminalSize(
  * group. Returns null when the group has no resolvable owner (no plugins to
  * resolve in that case).
  *
- * Host mode honors `group.customCwd` so inline `!` commands run against the
- * user's real repo (#18 P2-bug-4).
+ * Host mode honors `resolveWorkspaceProjectRoot(group, { agentId })` so inline
+ * `!` commands run against the session's worktree or the user's real repo.
  */
 function buildWebExpandContext(
   groupJid: string,
@@ -211,18 +211,32 @@ function buildWebExpandContext(
     folder: string;
     created_by?: string | null;
     executionMode?: string | null;
+    execution_mode?: string | null;
     customCwd?: string | null;
     is_home?: boolean;
   },
+  agentId?: string | null,
 ): ExpandContext | null {
   const deps = getWebDeps();
   const containerName = deps?.queue.getActiveContainerName(groupJid) ?? null;
+  const rawMode = group.executionMode ?? group.execution_mode;
+  const customCwd =
+    rawMode === 'host'
+      ? resolveWorkspaceProjectRoot(
+          {
+            folder: group.folder,
+            executionMode: 'host',
+            customCwd: group.customCwd ?? undefined,
+          },
+          { agentId },
+        )
+      : group.customCwd;
   return makeExpandContext({
     chatJid: groupJid,
     groupFolder: group.folder,
     ownerId: group.created_by,
-    executionMode: group.executionMode,
-    customCwd: group.customCwd,
+    executionMode: rawMode,
+    customCwd,
     groupsDir: GROUPS_DIR,
     containerName,
   });
@@ -1208,7 +1222,11 @@ async function handleAgentConversationMessage(
       const expandParent = deps.resolveEffectiveGroup
         ? deps.resolveEffectiveGroup(parentGroup).effectiveGroup
         : parentGroup;
-      const expandCtx = buildWebExpandContext(virtualChatJid, expandParent);
+      const expandCtx = buildWebExpandContext(
+        virtualChatJid,
+        expandParent,
+        agentId,
+      );
       if (expandCtx) {
         const expansion = await expandPluginSlashCommandIfNeeded(
           expandCtx,

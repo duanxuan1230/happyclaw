@@ -12,13 +12,29 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
 import { captureWorkspaceSnapshot } from '../src/fresh-window.js';
-import { readGitFileDiff, readGitStatus } from '../src/git-review.js';
+import {
+  neutralFilterArgs,
+  readGitFileDiff,
+  readGitStatus,
+} from '../src/git-review.js';
 import { countWorktreeChanges } from '../src/session-worktree.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'git-read-hardening-'));
 const repo = path.join(root, 'repo');
 const markers = path.join(root, 'markers');
-const MARKERS = ['fsmonitor', 'clean', 'process', 'textconv', 'extdiff'];
+const MARKERS = [
+  'fsmonitor',
+  'clean',
+  'process',
+  'textconv',
+  'extdiff',
+  'eq-clean',
+  'eq-smudge',
+  'eq-process',
+  'num-eq-clean',
+  'large-clean',
+  'overflow-clean',
+];
 
 function git(...args: string[]): void {
   execFileSync(
@@ -92,6 +108,172 @@ describe('host git reads with a hostile repository config', () => {
 
   test('the worktree dirty check runs nothing either', async () => {
     await expect(countWorktreeChanges(repo)).resolves.toBe(2);
+    expect(ran()).toEqual([]);
+  });
+
+  test('neutralizes filter subsections containing "=" and numeric prefixes', async () => {
+    const eqRepo = path.join(root, 'repo-eq');
+    fs.mkdirSync(eqRepo, { recursive: true });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'init',
+        '-q',
+        '-b',
+        'main',
+      ],
+      { cwd: eqRepo, stdio: 'ignore' },
+    );
+    fs.writeFileSync(
+      path.join(eqRepo, '.gitattributes'),
+      '*.txt filter=a=b\n*.md filter=1=2\n',
+    );
+    fs.writeFileSync(path.join(eqRepo, 'note.txt'), 'v1\n');
+    fs.writeFileSync(path.join(eqRepo, 'doc.md'), 'm1\n');
+    execFileSync(
+      'git',
+      ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '.'],
+      { cwd: eqRepo, stdio: 'ignore' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-qm',
+        'init',
+      ],
+      { cwd: eqRepo, stdio: 'ignore' },
+    );
+
+    fs.appendFileSync(
+      path.join(eqRepo, '.git', 'config'),
+      [
+        '',
+        '[filter "a=b"]',
+        `\tclean = ${planted('eq-clean', 'cat')}`,
+        `\tsmudge = ${planted('eq-smudge', 'cat')}`,
+        `\tprocess = ${planted('eq-process', 'exit 1')}`,
+        '\trequired = true',
+        '[filter "1=2"]',
+        `\tclean = ${planted('num-eq-clean', 'cat')}`,
+        '\trequired = true',
+        '',
+      ].join('\n'),
+    );
+
+    fs.writeFileSync(path.join(eqRepo, 'note.txt'), 'v2\n');
+    fs.writeFileSync(path.join(eqRepo, 'doc.md'), 'm2\n');
+
+    const status = await readGitStatus(eqRepo);
+    expect(status.files.map((f) => f.path).sort()).toEqual([
+      'doc.md',
+      'note.txt',
+    ]);
+    const diff = await readGitFileDiff(eqRepo, 'note.txt');
+    expect(diff.diff).toContain('+v2');
+    const mdDiff = await readGitFileDiff(eqRepo, 'doc.md');
+    expect(mdDiff.diff).toContain('+m2');
+    const snapshot = await captureWorkspaceSnapshot(eqRepo);
+    expect(snapshot.available).toBe(true);
+    expect(snapshot.statusLines?.join('\n')).toContain('note.txt');
+    await expect(countWorktreeChanges(eqRepo)).resolves.toBe(2);
+    expect(ran()).toEqual([]);
+  });
+
+  test('handles >64 KB filter configs and fails closed if >512 KB filter config truncates', async () => {
+    const bigRepo = path.join(root, 'repo-big-config');
+    fs.mkdirSync(bigRepo, { recursive: true });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'init',
+        '-q',
+        '-b',
+        'main',
+      ],
+      { cwd: bigRepo, stdio: 'ignore' },
+    );
+    fs.writeFileSync(
+      path.join(bigRepo, '.gitattributes'),
+      '*.txt filter=tail-evil\n',
+    );
+    fs.writeFileSync(path.join(bigRepo, 'a.txt'), 'initial\n');
+    execFileSync(
+      'git',
+      ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'add', '.'],
+      { cwd: bigRepo, stdio: 'ignore' },
+    );
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-qm',
+        'init',
+      ],
+      { cwd: bigRepo, stdio: 'ignore' },
+    );
+
+    // Pad with ~80 KB of filter keys before the active filter (>64 KB, <512 KB).
+    const padding: string[] = [''];
+    for (let i = 0; i < 900; i++) {
+      padding.push(
+        `[filter "pad-${String(i).padStart(4, '0')}-${'x'.repeat(60)}"]`,
+        '\tclean = cat',
+      );
+    }
+    padding.push(
+      '[filter "tail-evil"]',
+      `\tclean = ${planted('large-clean', 'cat')}`,
+      '\trequired = true',
+      '',
+    );
+    fs.appendFileSync(path.join(bigRepo, '.git', 'config'), padding.join('\n'));
+    fs.writeFileSync(path.join(bigRepo, 'a.txt'), 'modified\n');
+
+    const status = await readGitStatus(bigRepo);
+    expect(status.files.map((f) => f.path)).toEqual(['a.txt']);
+    expect(ran()).toEqual([]);
+
+    // Now push filter config output past 512 KB so git config truncates;
+    // reads must fail closed without running the filter.
+    const overflow: string[] = [''];
+    for (let i = 0; i < 6000; i++) {
+      overflow.push(
+        `[filter "over-${String(i).padStart(5, '0')}-${'y'.repeat(70)}"]`,
+        '\tclean = cat',
+      );
+    }
+    overflow.push(
+      '[filter "tail-evil"]',
+      `\tclean = ${planted('overflow-clean', 'cat')}`,
+      '',
+    );
+    fs.appendFileSync(
+      path.join(bigRepo, '.git', 'config'),
+      overflow.join('\n'),
+    );
+
+    await expect(neutralFilterArgs(bigRepo)).rejects.toThrow(/exceeded/);
+    await expect(readGitStatus(bigRepo)).rejects.toThrow(/exceeded/);
+    await expect(readGitFileDiff(bigRepo, 'a.txt')).rejects.toThrow(/exceeded/);
+    const snap = await captureWorkspaceSnapshot(bigRepo);
+    expect(snap.statusLines).toEqual([]);
     expect(ran()).toEqual([]);
   });
 });
