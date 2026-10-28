@@ -908,6 +908,13 @@ Web 和 Runtime 不再把它们当作第二个可写真相源。
 - `GET /api/usage/records`
 - `GET /api/usage/export.csv`
 - `GET /api/usage/users`
+- `GET /api/usage/cache`：与 `/stats` 相同的筛选参数，返回提示缓存命中率
+  `{ window, semantics: 'anthropic', summary, daily[], models[], connections[] }`；
+  每行含 `inputTokens`、`cacheCreationTokens`、`cacheReadTokens` 和
+  `hitRate = cacheRead ÷ (input + cacheCreation + cacheRead)`（无提示 Token 时为
+  `null`）。`daily[].date`、`models[].model`、`connections[]` 的 `connectionId`
+  （未记录连接时为 `null`）与 `name`（连接已删除时为 `null`）。按 Anthropic 用量语义
+  计算（input 不含缓存）；网关把缓存计入 input 时命中率偏低
 
 计费用户侧：
 
