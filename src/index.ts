@@ -24313,6 +24313,14 @@ async function main(): Promise<void> {
   queue.setOnQueryIdle((chatJid) => {
     dispatchQueuedFollowUpFamily(chatJid);
   });
+  // An idle runner that still owes its lane queued input or a running
+  // background agent keeps its container slot.
+  queue.setIdleRunnerReclaimBlocker(
+    (jid) =>
+      listQueuedFollowUps(jid).length > 0 ||
+      getRunningTaskAgentsByChat(jid).length > 0 ||
+      getRunningTaskAgentsByChat(stripVirtualJidSuffix(jid)).length > 0,
+  );
   // IM attachments must land where the Agent's cwd resolves the relative
   // path it is given: a Host workspace with customCwd runs there, not in
   // data/groups/{folder} (same root as the Web file panel).
