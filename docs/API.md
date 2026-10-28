@@ -511,9 +511,51 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
 - `POST /api/agent-profiles/:id/refine-prompt`
 - `GET /api/agent-profiles/:id/workspaces`
 - `POST /api/agent-profiles/:id/effective-capabilities`
+- `POST /api/agent-profiles/:id/duplicate`
+- `POST /api/agent-profiles/:id/migrate-and-delete`
+- `GET /api/agent-profiles/:id/export`
+- `POST /api/agent-profiles/import`
 
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
-脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”。
+脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”；`model_resolution`
+（`source`、`model_config_id`、`model_config_name`、`model`）说明运行实际用的连接
+与模型，`source` 按固定顺序取 `session`（会话手选，仅指定 `workspace_jid` 时看该
+工作区主会话）、`agent`（智能体绑定）、`default`（全局默认，工作区自带 Provider 环境
+变量时让位）、`single`（唯一启用）、`workspace_env`、`pool`（自动池）或 `none`。
+
+`GET /:id/workspaces` 的每个工作区带 `active_conversations`：该工作区运行时中正在
+执行或有排队输入的个数，即一次会重启 Runner 的保存会中断的对话数；只在等待输入的
+暖 Runner 不计入。
+
+名称在同一用户的 active 智能体（含内置 HappyClaw）之间唯一，按 NFKC 折叠后不区分
+大小写比较；创建、导入和改名冲突返回 409 与 `code: AGENT_NAME_TAKEN`，已有的重名
+不受影响。四段 Prompt 每段最多 20000 个字符；超限返回 400 与
+`code: PROMPT_TOO_LONG`、`field`（如 `soul_prompt`）和 `max`，名称不合法返回
+`code: INVALID_NAME`。
+
+每个 profile 的 `runtime_policy.skills.host` 都是显式值（schema v84 起），宿主机
+Skills 不再随有效上下文来源隐式继承。
+
+`duplicate` 新建「<名称> 副本」（重名时为「副本 2」「副本 3」…），复制四段 Prompt、
+`prompt_mode`、`runtime_policy`、模型绑定、头像 Emoji/背景色与上传的头像文件（复制为
+新文件），不复制工作区和渠道挂载；内置 HappyClaw 返回 400。校验与创建相同；非
+admin 复制时去掉宿主机上下文与宿主机 Skills，响应 `stripped` 列出
+`host_context`/`host_skills`。
+
+`migrate-and-delete` 接受 `{target_agent_profile_id}`，在两个智能体的锁和工作区
+Runner 停止期间，用一个事务把该智能体的全部工作区迁到目标并归档它：归档被拒绝
+（例如仍有渠道挂载）时整体回滚并返回 409，提交前停不下 Runner 返回 503
+`persisted: false`；成功返回 `{success, migrated_workspaces, invalidated_runtime_jids}`。
+
+`export` 返回 `{format: "happyclaw-agent", version: 1, exported_at, agent}`，`agent`
+含名称、头像 Emoji/背景色、四段 Prompt、`prompt_mode` 与 `runtime_policy`；Skills 用
+目录名、MCP 用 `system:`/`user:` 前缀名引用，不含模型配置、上传头像、宿主机路径或
+凭据。`import` 接受 `{data, name?, drop_missing?}`：格式或版本不对返回 400
+（`INVALID_AGENT_EXPORT`、`UNSUPPORTED_AGENT_EXPORT_VERSION`）；引用了本账号没有的
+Skills/MCP 时返回 409 `AGENT_IMPORT_MISSING_REFERENCES` 与 `missing`，带
+`drop_missing: true` 重发会去掉这些引用后创建（去掉后为空的“所选”改为不使用）；非
+admin 导入时去掉宿主机上下文与宿主机 Skills。成功返回 201
+`{profile, stripped, dropped}`。
 
 `GET /api/agent-profiles` 的每个 profile 带 `model_config_id` 与 `model`（该配置内
 的模型，`null` 表示配置的默认模型）；`model_configs[]` 的每项带 `models[]`（`id`、

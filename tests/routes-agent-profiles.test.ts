@@ -569,7 +569,11 @@ describe('/api/agent-profiles routes', () => {
         auto_compact_window: 0,
         auto_compact_percentage: 0,
       },
-      skills: { mode: 'disabled', ids: ['research'] },
+      skills: {
+        mode: 'disabled',
+        ids: ['research'],
+        host: { mode: 'disabled', ids: [] },
+      },
       mcp: { mode: 'custom', ids: ['github'] },
     });
   });
@@ -1063,6 +1067,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['retry-invalidation'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1133,6 +1138,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['post-commit'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
         blockGroupsForRuntimeSafety: () => {
           runtimeSafetyBlocked = true;
@@ -1238,6 +1244,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['locked-governance'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
         blockGroupsForRuntimeSafety: () => {
           runtimeSafetyBlocked = true;
@@ -1304,6 +1311,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1364,6 +1372,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1414,6 +1423,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1752,6 +1762,7 @@ describe('/api/agent-profiles model within a configuration', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);

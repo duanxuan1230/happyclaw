@@ -1305,22 +1305,50 @@ function resolvePinnedModelConfigId(
   modelConfigId?: string | null,
   session?: { groupFolder: string; agentId?: string | null },
 ): string | null {
+  return resolvePinnedModelConfig(modelConfigId, session).id;
+}
+
+export type PinnedModelConfigSource =
+  | 'session'
+  | 'agent'
+  | 'default'
+  | 'single'
+  | 'workspace_env'
+  | 'pool'
+  | 'none';
+
+/** resolvePinnedModelConfigId, plus which step of the order decided it. */
+export function resolvePinnedModelConfig(
+  modelConfigId?: string | null,
+  session?: { groupFolder: string; agentId?: string | null },
+): { id: string | null; source: PinnedModelConfigSource } {
   const sessionSelection = session
     ? resolveSessionModelSelection(session.groupFolder, session.agentId)
     : null;
-  if (sessionSelection) return sessionSelection;
-  if (modelConfigId) return modelConfigId;
+  if (sessionSelection) return { id: sessionSelection, source: 'session' };
+  if (modelConfigId) return { id: modelConfigId, source: 'agent' };
   // The global default is the weakest explicit choice: a Workspace that
   // carries its own provider environment keeps it.
+  // Read the Workspace environment file at most once, and only if asked.
+  let ownEnv: boolean | undefined;
+  const ownProviderEnv = () =>
+    (ownEnv ??= !!session && workspaceHasProviderEnv(session.groupFolder));
   const defaultProvider = getUsableDefaultProvider();
-  if (
-    defaultProvider &&
-    !(session && workspaceHasProviderEnv(session.groupFolder))
-  ) {
-    return defaultProvider.id;
+  if (defaultProvider && !ownProviderEnv()) {
+    return { id: defaultProvider.id, source: 'default' };
   }
   const enabledProviders = getEnabledProviders();
-  return enabledProviders.length === 1 ? enabledProviders[0].id : null;
+  if (enabledProviders.length === 1) {
+    return { id: enabledProviders[0].id, source: 'single' };
+  }
+  return {
+    id: null,
+    source: ownProviderEnv()
+      ? 'workspace_env'
+      : enabledProviders.length > 1
+        ? 'pool'
+        : 'none',
+  };
 }
 
 /** Whether the Workspace brings its own provider environment, bypassing the pool. */

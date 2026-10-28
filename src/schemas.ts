@@ -381,7 +381,9 @@ export const AgentProfileRuntimePolicySchema = z
   })
   .strict();
 
-const AgentPromptTextSchema = z.string().max(20000);
+/** Per-section limit of an Agent's four prompts, in UTF-16 code units. */
+export const AGENT_PROMPT_MAX_CHARS = 20000;
+const AgentPromptTextSchema = z.string().max(AGENT_PROMPT_MAX_CHARS);
 const AgentPromptModeSchema = z.enum(['append', 'replace']);
 const AgentPromptSectionsSchema = z.object({
   identity_prompt: AgentPromptTextSchema,
@@ -410,9 +412,48 @@ function validatePromptModeCompatibility(
   }
 }
 
+/** Per-Agent name limit, in UTF-16 code units. */
+export const AGENT_NAME_MAX_CHARS = 80;
+const AgentProfileNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(AGENT_NAME_MAX_CHARS);
+
+/**
+ * What an Agent is apart from its owner, model binding and Workspaces: the
+ * part a create request and an export file share.
+ */
+const AgentProfileDefinitionFields = {
+  name: AgentProfileNameSchema,
+  identity_prompt: AgentPromptTextSchema.optional(),
+  soul_prompt: AgentPromptTextSchema.optional(),
+  agents_prompt: AgentPromptTextSchema.optional(),
+  tools_prompt: AgentPromptTextSchema.optional(),
+  prompt_mode: AgentPromptModeSchema.optional(),
+  avatar_emoji: z.string().max(8).nullable().optional(),
+  avatar_color: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/)
+    .nullable()
+    .optional(),
+  runtime_policy: AgentProfileRuntimePolicySchema.optional(),
+};
+
 export const AgentProfileCreateSchema = z
   .object({
-    name: z.string().trim().min(1).max(80),
+    ...AgentProfileDefinitionFields,
+    /** Explicitly disambiguates four-part clients from legacy identity_prompt. */
+    prompt_schema_version: z.literal(2).optional(),
+    include_claude_preset: z.boolean().optional(),
+    model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
+    model: AgentProfileModelSchema,
+  })
+  .superRefine(validatePromptModeCompatibility);
+
+export const AgentProfilePatchSchema = z
+  .object({
+    name: AgentProfileNameSchema.optional(),
     /** Explicitly disambiguates four-part clients from legacy identity_prompt. */
     prompt_schema_version: z.literal(2).optional(),
     identity_prompt: AgentPromptTextSchema.optional(),
@@ -433,28 +474,26 @@ export const AgentProfileCreateSchema = z
   })
   .superRefine(validatePromptModeCompatibility);
 
-export const AgentProfilePatchSchema = z
-  .object({
-    name: z.string().trim().min(1).max(80).optional(),
-    /** Explicitly disambiguates four-part clients from legacy identity_prompt. */
-    prompt_schema_version: z.literal(2).optional(),
-    identity_prompt: AgentPromptTextSchema.optional(),
-    soul_prompt: AgentPromptTextSchema.optional(),
-    agents_prompt: AgentPromptTextSchema.optional(),
-    tools_prompt: AgentPromptTextSchema.optional(),
-    prompt_mode: AgentPromptModeSchema.optional(),
-    include_claude_preset: z.boolean().optional(),
-    avatar_emoji: z.string().max(8).nullable().optional(),
-    avatar_color: z
-      .string()
-      .regex(/^#[0-9a-fA-F]{6}$/)
-      .nullable()
-      .optional(),
-    model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
-    model: AgentProfileModelSchema,
-    runtime_policy: AgentProfileRuntimePolicySchema.optional(),
-  })
-  .superRefine(validatePromptModeCompatibility);
+export const AgentProfileMigrateAndDeleteSchema = z.object({
+  target_agent_profile_id: z.string().trim().min(1),
+});
+
+/**
+ * The `agent` part of a file written by GET /api/agent-profiles/:id/export.
+ * Skills and MCP are referenced by name; a model configuration, host paths
+ * and credentials never leave the instance.
+ */
+export const AgentProfileExportAgentSchema = z.object(
+  AgentProfileDefinitionFields,
+);
+
+export const AgentProfileImportSchema = z.object({
+  data: z.unknown(),
+  /** Overrides the exported name, e.g. after a name conflict. */
+  name: AgentProfileNameSchema.optional(),
+  /** Create without the Skills/MCP this account does not have. */
+  drop_missing: z.boolean().optional(),
+});
 
 export const AgentProfileGenerateSchema = z.object({
   description: z.string().trim().min(1).max(4000),

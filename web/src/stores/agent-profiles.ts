@@ -95,7 +95,40 @@ interface AgentProfilesState {
   uploadProfileAvatar: (id: string, file: File) => Promise<AgentProfile>;
   removeProfileAvatar: (id: string) => Promise<AgentProfile>;
   deleteProfile: (id: string) => Promise<void>;
+  /** Move every Workspace to `targetId` and delete, all or nothing. */
+  migrateAndDeleteProfile: (id: string, targetId: string) => Promise<void>;
+  duplicateProfile: (
+    id: string,
+  ) => Promise<{ profile: AgentProfile; stripped: AgentHostGrant[] }>;
+  exportProfile: (id: string) => Promise<AgentProfileExportDocument>;
+  importProfile: (data: {
+    data: unknown;
+    name?: string;
+    drop_missing?: boolean;
+  }) => Promise<AgentProfileImportResult>;
   setWorkspaceAgentProfile: (jid: string, profileId: string) => Promise<void>;
+}
+
+/** Host grants a member's copy or import loses. */
+export type AgentHostGrant = 'host_context' | 'host_skills';
+
+export interface AgentProfileExportDocument {
+  format: 'happyclaw-agent';
+  version: number;
+  exported_at?: string;
+  agent: { name: string } & Record<string, unknown>;
+}
+
+export interface AgentCapabilityReferences {
+  skills: string[];
+  host_skills: string[];
+  mcp: string[];
+}
+
+export interface AgentProfileImportResult {
+  profile: AgentProfile;
+  stripped: AgentHostGrant[];
+  dropped: AgentCapabilityReferences;
 }
 
 export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
@@ -369,6 +402,56 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       set({ error: extractErrorMessage(err) });
       throw err;
     }
+  },
+
+  migrateAndDeleteProfile: async (id, targetId) => {
+    try {
+      await api.post(
+        `/api/agent-profiles/${encodeURIComponent(id)}/migrate-and-delete`,
+        { target_agent_profile_id: targetId },
+        120_000,
+      );
+      set((state) => ({
+        profiles: state.profiles.filter((p) => p.id !== id),
+        governanceByProfile: Object.fromEntries(
+          Object.entries(state.governanceByProfile).filter(
+            ([key]) => key !== id && key !== targetId,
+          ),
+        ),
+        error: null,
+      }));
+      // The Workspaces now belong to the target; navigation lists show it.
+      await Promise.allSettled([
+        useChatStore.getState().loadGroups(),
+        useGroupsStore.getState().loadGroups(),
+      ]);
+    } catch (err) {
+      set({ error: extractErrorMessage(err) });
+      throw err;
+    }
+  },
+
+  duplicateProfile: async (id) => {
+    const res = await api.post<{
+      profile: AgentProfile;
+      stripped: AgentHostGrant[];
+    }>(`/api/agent-profiles/${encodeURIComponent(id)}/duplicate`);
+    await get().loadProfiles();
+    return res;
+  },
+
+  exportProfile: (id) =>
+    api.get<AgentProfileExportDocument>(
+      `/api/agent-profiles/${encodeURIComponent(id)}/export`,
+    ),
+
+  importProfile: async (data) => {
+    const res = await api.post<AgentProfileImportResult>(
+      '/api/agent-profiles/import',
+      data,
+    );
+    await get().loadProfiles();
+    return res;
   },
 
   setWorkspaceAgentProfile: async (jid, profileId) => {

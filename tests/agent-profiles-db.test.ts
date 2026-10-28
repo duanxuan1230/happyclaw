@@ -46,6 +46,11 @@ afterAll(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+/** What every new custom profile persists for host Skills. */
+const NO_HOST_SKILLS = {
+  skills: { host: { mode: 'disabled' as const, ids: [] } },
+};
+
 function seedUser(id: string, role: 'admin' | 'member' = 'member'): void {
   const now = new Date().toISOString();
   createUser({
@@ -216,7 +221,7 @@ describe('AgentProfile DB model', () => {
       computeAgentProfileIdentityHash(
         '以研究员身份回答。',
         false,
-        undefined,
+        NO_HOST_SKILLS,
         'Research Agent',
       ),
     );
@@ -271,7 +276,7 @@ describe('AgentProfile DB model', () => {
       computeAgentProfileIdentityHash(
         '写代码前先读上下文。',
         true,
-        undefined,
+        NO_HOST_SKILLS,
         'Coder Renamed',
       ),
     );
@@ -289,7 +294,7 @@ describe('AgentProfile DB model', () => {
       computeAgentProfileIdentityHash(
         '先读上下文，再给最小可行改动。',
         true,
-        undefined,
+        NO_HOST_SKILLS,
         'Coder Renamed',
       ),
     );
@@ -306,7 +311,7 @@ describe('AgentProfile DB model', () => {
       computeAgentProfileIdentityHash(
         '先读上下文，再给最小可行改动。',
         false,
-        undefined,
+        NO_HOST_SKILLS,
         'Coder Renamed',
       ),
     );
@@ -385,7 +390,11 @@ describe('AgentProfile DB model', () => {
         auto_compact_window: 0,
         auto_compact_percentage: 0,
       },
-      skills: { mode: 'custom', ids: ['review', 'research'] },
+      skills: {
+        mode: 'custom',
+        ids: ['review', 'research'],
+        host: { mode: 'disabled', ids: [] },
+      },
       mcp: { mode: 'disabled', ids: ['ignored'] },
     });
     expect(profile.identity_hash).toBe(
@@ -425,7 +434,11 @@ describe('AgentProfile DB model', () => {
         auto_compact_window: 0,
         auto_compact_percentage: 0,
       },
-      skills: { mode: 'inherit', ids: [] },
+      skills: {
+        mode: 'inherit',
+        ids: [],
+        host: { mode: 'disabled', ids: [] },
+      },
       mcp: { mode: 'custom', ids: ['github'] },
     });
     expect(updated?.identity_hash).toBe(
@@ -499,7 +512,11 @@ describe('AgentProfile DB model', () => {
         auto_compact_window: 0,
         auto_compact_percentage: 0,
       },
-      skills: { mode: 'disabled', ids: ['kept-for-audit'] },
+      skills: {
+        mode: 'disabled',
+        ids: ['kept-for-audit'],
+        host: { mode: 'disabled', ids: [] },
+      },
       mcp: { mode: 'custom', ids: ['github', 'linear'] },
     });
   });

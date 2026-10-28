@@ -1,36 +1,25 @@
-import { createHash } from 'node:crypto';
-
 import type { WebDeps } from './web-context.js';
 import {
-  computeAgentProfileIdentityHash,
+  computeEffectiveAgentProfileIdentityHash,
   getAllRegisteredGroups,
   getJidsByFolder,
   getOrCreateDefaultAgentProfile,
-  getUserById,
   getWorkspaceAgentProfileId,
+  registerMainAgentContextSettingsReader,
+  resolveAgentProfileHostAccess,
 } from './db.js';
 import { KeyedLockPool } from './capability-lock.js';
 import { getSystemSettings } from './runtime-config.js';
 import type { AgentProfile, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { resolveEffectiveAgentRuntimePolicy } from './agent-profile-identity.js';
 
-/**
- * The built-in HappyClaw identity is code-owned rather than persisted in an
- * editable AgentProfile field. Bump this version whenever the protected
- * identity contract changes so existing SDK sessions restart under it.
- */
-export const HAPPYCLAW_PLATFORM_IDENTITY_VERSION = 1;
+export {
+  bindHappyClawPlatformIdentityHash,
+  HAPPYCLAW_PLATFORM_IDENTITY_VERSION,
+} from './agent-profile-identity.js';
 
-export function bindHappyClawPlatformIdentityHash(
-  identityHash: string,
-): string {
-  return createHash('sha256')
-    .update(
-      `happyclaw-platform-identity:v${HAPPYCLAW_PLATFORM_IDENTITY_VERSION}\0${identityHash}`,
-      'utf8',
-    )
-    .digest('hex');
-}
+registerMainAgentContextSettingsReader(() => getSystemSettings());
 
 export interface AgentProfileWorkspace {
   jid: string;
@@ -51,54 +40,17 @@ export function resolveEffectiveAgentProfile(
   profile: AgentProfile | undefined,
 ): AgentProfile | undefined {
   if (!profile) return undefined;
-  const owner = getUserById(profile.owner_user_id);
-  const canUseHostResources =
-    owner?.role === 'admin' && owner.status === 'active';
-  const contextSource = !canUseHostResources
-    ? 'managed'
-    : profile.is_default
-      ? getSystemSettings().mainAgentContextSource
-      : profile.runtime_policy.context.source;
-  const autoCompactWindow = profile.is_default
-    ? getSystemSettings().mainAgentAutoCompactWindow
-    : profile.runtime_policy.context.auto_compact_window;
-  const autoCompactPercentage = profile.is_default
-    ? getSystemSettings().mainAgentAutoCompactPercentage
-    : profile.runtime_policy.context.auto_compact_percentage;
-  const effectiveSkills =
-    !canUseHostResources &&
-    profile.runtime_policy.skills.host &&
-    profile.runtime_policy.skills.host.mode !== 'disabled'
-      ? {
-          ...profile.runtime_policy.skills,
-          host: {
-            mode: 'disabled' as const,
-            // Retain requested ids for audit/editing while failing closed.
-            ids: profile.runtime_policy.skills.host.ids,
-          },
-        }
-      : profile.runtime_policy.skills;
-  const effectiveRuntimePolicy = {
-    ...profile.runtime_policy,
-    context: {
-      ...profile.runtime_policy.context,
-      source: contextSource,
-      auto_compact_window: autoCompactWindow,
-      auto_compact_percentage: autoCompactPercentage,
-    },
-    skills: effectiveSkills,
-  };
-  const effectiveIdentityHash = computeAgentProfileIdentityHash(
+  const runtimePolicy = resolveEffectiveAgentRuntimePolicy(
     profile,
-    effectiveRuntimePolicy,
-    profile.name,
+    resolveAgentProfileHostAccess(profile),
   );
   return {
     ...profile,
-    identity_hash: profile.is_default
-      ? bindHappyClawPlatformIdentityHash(effectiveIdentityHash)
-      : effectiveIdentityHash,
-    runtime_policy: effectiveRuntimePolicy,
+    identity_hash: computeEffectiveAgentProfileIdentityHash(
+      profile,
+      runtimePolicy,
+    ),
+    runtime_policy: runtimePolicy,
   };
 }
 

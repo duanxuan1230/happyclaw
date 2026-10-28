@@ -184,9 +184,10 @@ describe('settings information architecture', () => {
     );
 
     expect(settings).toContain('<MainAgentCapabilitiesSection />');
-    expect(mainCapabilities).toMatch(/HappyClaw 用户 Skills|HappyClaw MCP/);
+    // The same capability form and save path as the Agent page.
+    expect(mainCapabilities).toContain('<AgentCapabilityForm');
     expect(mainCapabilities).not.toContain('工具与扩展能力边界');
-    expect(mainCapabilities).toContain('/api/agent-profiles/');
+    expect(mainCapabilities).toContain('updateProfile(profile.id');
     expect(workspaceEnv).toMatch(/Provider\s+地址和凭据由系统管理员统一管理/);
     expect(workspaceEnv).not.toContain('MODEL_PRESETS');
     expect(workspaceEnv).not.toContain('setAuthToken');

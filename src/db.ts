@@ -81,6 +81,14 @@ import {
   normalizeAgentProfilePrompts,
   promptModeFromLegacyPreset,
 } from './agent-profile-prompts.js';
+import {
+  bindHappyClawPlatformIdentityHash,
+  canOwnerUseHostResources,
+  legacyHostSkillPolicy,
+  resolveEffectiveAgentRuntimePolicy,
+  type AgentProfileHostAccess,
+  type MainAgentContextSettings,
+} from './agent-profile-identity.js';
 import { assertDatabaseMaintenanceAccess } from './database-maintenance.js';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
 import type {
@@ -2806,6 +2814,8 @@ export function initDatabase(
   // v83 -> v84: Agents no longer keep a prompt history. The pre-migration
   // backup still holds the old snapshots.
   db.exec('DROP TABLE IF EXISTS agent_profile_prompt_versions');
+  // v83 -> v84: host Skills become an explicit per-Agent grant.
+  pinAgentProfileHostSkillPolicies();
 
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
@@ -9504,6 +9514,157 @@ export function computeAgentProfileIdentityHash(
     .digest('hex');
 }
 
+/** The identity a run of `profile` carries under its effective policy. */
+export function computeEffectiveAgentProfileIdentityHash(
+  profile: AgentProfilePrompts & Pick<AgentProfile, 'is_default' | 'name'>,
+  effectiveRuntimePolicy: AgentProfileRuntimePolicy,
+): string {
+  const identityHash = computeAgentProfileIdentityHash(
+    profile,
+    effectiveRuntimePolicy,
+    profile.name,
+  );
+  return profile.is_default
+    ? bindHappyClawPlatformIdentityHash(identityHash)
+    : identityHash;
+}
+
+let readMainAgentContextSettings: (() => MainAgentContextSettings) | undefined;
+
+/**
+ * The main HappyClaw's context comes from system settings. runtime-config
+ * reads DATA_DIR as it loads, so db.ts does not import it; the module that
+ * resolves Agent runtime policy registers the reader when it loads, before
+ * the server calls initDatabase.
+ */
+export function registerMainAgentContextSettingsReader(
+  reader: () => MainAgentContextSettings,
+): void {
+  readMainAgentContextSettings = reader;
+}
+
+function knownAgentProfileHostAccess(
+  profile: Pick<AgentProfile, 'owner_user_id' | 'is_default'>,
+): AgentProfileHostAccess | undefined {
+  const canUseHostResources = canOwnerUseHostResources(
+    getUserById(profile.owner_user_id),
+  );
+  if (!profile.is_default) return { canUseHostResources };
+  const mainAgent = readMainAgentContextSettings?.();
+  return mainAgent ? { canUseHostResources, mainAgent } : undefined;
+}
+
+/** What the owner's role and the system settings allow `profile` to run with. */
+export function resolveAgentProfileHostAccess(
+  profile: Pick<AgentProfile, 'owner_user_id' | 'is_default'>,
+): AgentProfileHostAccess {
+  const access = knownAgentProfileHostAccess(profile);
+  if (!access) {
+    throw new Error('Main HappyClaw context settings reader is not registered');
+  }
+  return access;
+}
+
+/**
+ * The host Skill policy a profile saved without one has been running with,
+ * or undefined while the main HappyClaw's settings cannot be read (a
+ * maintenance tool); the next server start pins it then.
+ */
+function effectiveLegacyHostSkillPolicy(
+  profile: Pick<
+    AgentProfile,
+    'owner_user_id' | 'is_default' | 'runtime_policy'
+  >,
+): NonNullable<AgentProfileRuntimePolicy['skills']['host']> | undefined {
+  const access = knownAgentProfileHostAccess(profile);
+  return access
+    ? legacyHostSkillPolicy(
+        resolveEffectiveAgentRuntimePolicy(profile, access).context.source,
+      )
+    : undefined;
+}
+
+/**
+ * Pin `skills.host` on every active profile saved without one. The runner
+ * resolved a missing value from the effective context source (the main
+ * HappyClaw's comes from system settings) while the Web form read the
+ * persisted one, so saving only the main HappyClaw's model silently turned
+ * its host Skills off. The pinned value is what the runner resolved, so runs
+ * behave as before; SDK sessions recorded under the old identity hash move to
+ * the new one and the revision stays, so no conversation restarts.
+ */
+export function pinAgentProfileHostSkillPolicies(): number {
+  // Runs on every start; once pinned, the scan decodes nothing. Malformed
+  // JSON is decoded like the runner decodes it (to the default policy).
+  const pending = (
+    prepareCached(`SELECT * FROM agent_profiles
+       WHERE status = 'active'
+         AND CASE WHEN json_valid(runtime_policy)
+           THEN json_extract(runtime_policy, '$.skills.host') IS NULL
+           ELSE 1 END`).all() as Array<Record<string, unknown>>
+  )
+    .map(mapAgentProfileRow)
+    .filter((profile) => !profile.runtime_policy.skills.host);
+  if (pending.length === 0) return 0;
+
+  const updateProfile = prepareCached(
+    'UPDATE agent_profiles SET runtime_policy = ?, identity_hash = ? WHERE id = ?',
+  );
+  const carrySessions = prepareCached(
+    'UPDATE sessions SET identity_hash = ? WHERE agent_profile_id = ? AND identity_hash = ?',
+  );
+  const carryRuntimeSessions = prepareCached(
+    'UPDATE workspace_runtime_sessions SET identity_hash = ? WHERE agent_profile_id = ? AND identity_hash = ?',
+  );
+  let pinnedCount = 0;
+  let carried = 0;
+  db.transaction(() => {
+    for (const profile of pending) {
+      const access = knownAgentProfileHostAccess(profile);
+      if (!access) continue;
+      pinnedCount += 1;
+      const effective = resolveEffectiveAgentRuntimePolicy(profile, access);
+      const runtimePolicy = {
+        ...profile.runtime_policy,
+        skills: {
+          ...profile.runtime_policy.skills,
+          host: legacyHostSkillPolicy(effective.context.source),
+        },
+      };
+      const pinned = { ...profile, runtime_policy: runtimePolicy };
+      updateProfile.run(
+        serializeAgentProfileRuntimePolicy(runtimePolicy),
+        computeAgentProfileIdentityHash(pinned, runtimePolicy, pinned.name),
+        profile.id,
+      );
+      const before = computeEffectiveAgentProfileIdentityHash(
+        profile,
+        effective,
+      );
+      const after = computeEffectiveAgentProfileIdentityHash(
+        pinned,
+        resolveEffectiveAgentRuntimePolicy(pinned, access),
+      );
+      if (before === after) continue;
+      carried += carrySessions.run(after, profile.id, before).changes;
+      carryRuntimeSessions.run(after, profile.id, before);
+    }
+  })();
+  if (pinnedCount < pending.length) {
+    logger.warn(
+      { deferred: pending.length - pinnedCount },
+      'Main HappyClaw settings unavailable; host Skill policies are pinned at the next server start',
+    );
+  }
+  if (pinnedCount > 0) {
+    logger.info(
+      { profiles: pinnedCount, sessions: carried },
+      'Pinned explicit host Skill policies on Agent profiles',
+    );
+  }
+  return pinnedCount;
+}
+
 function mapAgentProfileRow(row: Record<string, unknown>): AgentProfile {
   const name = String(row.name);
   const persistedIncludeClaudePreset =
@@ -9813,6 +9974,12 @@ export function getOrCreateDefaultAgentProfile(userId: string): AgentProfile {
   const name = DEFAULT_AGENT_PROFILE_NAME;
   const prompts = normalizeAgentProfilePrompts();
   const runtimePolicy = normalizeAgentProfileRuntimePolicy();
+  const hostSkills = effectiveLegacyHostSkillPolicy({
+    owner_user_id: userId,
+    is_default: true,
+    runtime_policy: runtimePolicy,
+  });
+  if (hostSkills) runtimePolicy.skills.host = hostSkills;
   const identityHash = computeAgentProfileIdentityHash(
     prompts,
     runtimePolicy,
@@ -9864,6 +10031,7 @@ export function createAgentProfile(input: {
   includeClaudePreset?: boolean;
   avatarEmoji?: string | null;
   avatarColor?: string | null;
+  avatarUrl?: string | null;
   modelConfigId?: string | null;
   /** A model of `modelConfigId`'s list; ignored without a configuration. */
   model?: string | null;
@@ -9881,6 +10049,8 @@ export function createAgentProfile(input: {
       promptModeFromLegacyPreset(input.includeClaudePreset ?? true),
   });
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(input.runtimePolicy);
+  // Host Skills are an explicit grant; nothing inherits them by omission.
+  runtimePolicy.skills.host ??= { mode: 'disabled', ids: [] };
   const runtimePolicyJson = serializeAgentProfileRuntimePolicy(runtimePolicy);
   const identityHash = computeAgentProfileIdentityHash(
     prompts,
@@ -9890,9 +10060,9 @@ export function createAgentProfile(input: {
   prepareCached(`INSERT INTO agent_profiles (
       id, owner_user_id, name,
       identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-      include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
+      include_claude_preset, avatar_emoji, avatar_color, avatar_url, model_config_id, model, runtime_policy, identity_hash, version,
       is_default, status, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
     id,
     input.ownerUserId,
     input.name,
@@ -9904,6 +10074,7 @@ export function createAgentProfile(input: {
     includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
     input.avatarEmoji ?? null,
     input.avatarColor ?? null,
+    input.avatarUrl ?? null,
     input.modelConfigId ?? null,
     (input.modelConfigId && input.model) || null,
     runtimePolicyJson,
@@ -9956,6 +10127,14 @@ export function updateAgentProfile(
           updates.runtimePolicy,
         )
       : existing.runtime_policy;
+  // A policy update that does not name the host grant keeps the one the
+  // profile runs with, pinned if it was still implicit.
+  if (updates.runtimePolicy !== undefined && !nextRuntimePolicy.skills.host) {
+    const host =
+      existing.runtime_policy.skills.host ??
+      effectiveLegacyHostSkillPolicy(existing);
+    if (host) nextRuntimePolicy.skills.host = host;
+  }
   const nextAvatarEmoji =
     updates.avatarEmoji === undefined
       ? existing.avatar_emoji
@@ -10067,6 +10246,72 @@ export function archiveAgentProfile(
     "UPDATE agent_profiles SET status = 'archived', updated_at = ? WHERE id = ? AND owner_user_id = ?",
   ).run(new Date().toISOString(), profileId, ownerUserId);
   return 'ok';
+}
+
+class AgentProfileArchiveRollback extends Error {
+  constructor(
+    readonly result: Exclude<ReturnType<typeof archiveAgentProfile>, 'ok'>,
+  ) {
+    super(`Agent profile archive rolled back: ${result}`);
+  }
+}
+
+/**
+ * Move every listed Workspace to `targetProfileId`, then archive the profile,
+ * as one transaction: when the archive is refused (a channel mount or a
+ * Workspace that was not listed still names the profile) nothing moves.
+ */
+export function migrateAgentProfileWorkspacesAndArchive(
+  profileId: string,
+  ownerUserId: string,
+  targetProfileId: string,
+  groupFolders: readonly string[],
+): ReturnType<typeof archiveAgentProfile> {
+  try {
+    db.transaction(() => {
+      for (const folder of groupFolders) {
+        assignWorkspaceAgentProfile(folder, targetProfileId);
+      }
+      const result = archiveAgentProfile(profileId, ownerUserId);
+      if (result !== 'ok') throw new AgentProfileArchiveRollback(result);
+    })();
+    return 'ok';
+  } catch (err) {
+    if (err instanceof AgentProfileArchiveRollback) return err.result;
+    throw err;
+  }
+}
+
+/** Names compare after NFKC folding, ignoring case and surrounding space. */
+function agentProfileNameKey(name: string): string {
+  return name.normalize('NFKC').trim().toLowerCase();
+}
+
+/**
+ * The active profile of `ownerUserId` (the built-in HappyClaw included)
+ * whose name collides with `name`, other than `excludeProfileId`.
+ */
+export function findAgentProfileNameConflict(
+  ownerUserId: string,
+  name: string,
+  excludeProfileId?: string,
+): { id: string | null; name: string } | undefined {
+  const key = agentProfileNameKey(name);
+  const rows = prepareCached(
+    "SELECT id, name, is_default FROM agent_profiles WHERE owner_user_id = ? AND status = 'active'",
+  ).all(ownerUserId) as Array<{ id: string; name: string; is_default: number }>;
+  const builtIn = rows.find((row) => row.is_default === 1);
+  if (
+    key === agentProfileNameKey(DEFAULT_AGENT_PROFILE_NAME) &&
+    builtIn?.id !== excludeProfileId
+  ) {
+    return { id: builtIn?.id ?? null, name: DEFAULT_AGENT_PROFILE_NAME };
+  }
+  const conflict = rows.find(
+    (row) =>
+      row.id !== excludeProfileId && agentProfileNameKey(row.name) === key,
+  );
+  return conflict ? { id: conflict.id, name: conflict.name } : undefined;
 }
 
 /**
