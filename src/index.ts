@@ -2350,15 +2350,6 @@ function parkInputForUsageLimitWait(input: {
   return `额度用尽，预计 ${formatUsageLimitResumeTime(wait.resumeAt)} 自动继续`;
 }
 
-function isScheduledTaskPromptMessage(message: {
-  source_kind?: string | null;
-  task_id?: string | null;
-}): boolean {
-  return (
-    message.source_kind === 'scheduled_task_prompt' || Boolean(message.task_id)
-  );
-}
-
 /**
  * New input ends the lane's wait: its parked inputs join the batch the
  * caller is about to read. Returns true when they were released.
@@ -7297,7 +7288,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // New input ends a usage-limit wait: the parked inputs rejoin this batch.
   // Scheduled-task prompts join an active wait instead of waking the lane.
   if (
-    pendingWindow.messages.some((m) => !isScheduledTaskPromptMessage(m)) &&
+    pendingWindow.messages.some(
+      (m) => m.source_kind !== 'scheduled_task_prompt' && !m.task_id,
+    ) &&
     releaseUsageLimitWaitForNewInput(chatJid)
   ) {
     pendingWindow = getMessagesSinceBounded(chatJid, sinceCursor);
@@ -7333,10 +7326,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const activeWait = getUsageLimitWait(chatJid);
+  const activeWait =
+    typeof getUsageLimitWait === 'function' ? getUsageLimitWait(chatJid) : null;
   if (
     activeWait?.state === 'waiting' &&
-    missedMessages.every((m) => isScheduledTaskPromptMessage(m))
+    missedMessages.every(
+      (m) => m.source_kind === 'scheduled_task_prompt' || Boolean(m.task_id),
+    )
   ) {
     for (const msg of missedMessages) {
       setMessageFollowUp(chatJid, msg.id, {
@@ -17068,15 +17064,22 @@ async function processAgentConversation(
   // New input ends a usage-limit wait: the parked inputs rejoin this batch.
   // Scheduled-task prompts join an active wait instead of waking the lane.
   if (
-    pendingWindow.messages.some((m) => !isScheduledTaskPromptMessage(m)) &&
+    pendingWindow.messages.some(
+      (m) => m.source_kind !== 'scheduled_task_prompt' && !m.task_id,
+    ) &&
     releaseUsageLimitWaitForNewInput(virtualChatJid)
   ) {
     pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
   } else if (pendingWindow.messages.length > 0) {
-    const activeWait = getUsageLimitWait(virtualChatJid);
+    const activeWait =
+      typeof getUsageLimitWait === 'function'
+        ? getUsageLimitWait(virtualChatJid)
+        : null;
     if (
       activeWait?.state === 'waiting' &&
-      pendingWindow.messages.every((m) => isScheduledTaskPromptMessage(m))
+      pendingWindow.messages.every(
+        (m) => m.source_kind === 'scheduled_task_prompt' || Boolean(m.task_id),
+      )
     ) {
       for (const msg of pendingWindow.messages) {
         setMessageFollowUp(virtualChatJid, msg.id, {
@@ -24731,11 +24734,18 @@ async function main(): Promise<void> {
           ...new Set(
             listPendingUsageLimitWaits().flatMap((wait) => [
               wait.inputKey,
-              ...listQueuedFollowUps(wait.scopeKey).map((item) => item.id),
-              ...getMessagesSince(
-                wait.scopeKey,
-                lastCommittedCursor[wait.scopeKey] || EMPTY_CURSOR,
-              ).map((message) => message.id),
+              ...(wait.scopeKey && typeof listQueuedFollowUps === 'function'
+                ? listQueuedFollowUps(wait.scopeKey).map((item) => item.id)
+                : []),
+              ...(wait.scopeKey &&
+              typeof getMessagesSince === 'function' &&
+              typeof lastCommittedCursor !== 'undefined' &&
+              typeof EMPTY_CURSOR !== 'undefined'
+                ? getMessagesSince(
+                    wait.scopeKey,
+                    lastCommittedCursor[wait.scopeKey] || EMPTY_CURSOR,
+                  ).map((message) => message.id)
+                : []),
             ]),
           ),
         ],
