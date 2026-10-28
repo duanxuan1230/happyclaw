@@ -220,30 +220,43 @@ export function listUsageLimitWaitsForChat(chatJid: string): UsageLimitWait[] {
 // ─── Session history re-injection ──────────────────────────
 
 /**
- * Remember that these sessions lost their SDK context to a capability
- * change, so the next turn of each re-injects recent history. `''` is the
- * Workspace main session.
+ * Remember that every conversation session of a folder holding an SDK
+ * session is about to lose it to a capability change, so the next turn of
+ * each re-injects recent history. Call before the sessions are deleted.
+ * Isolated scheduled-task sessions (`task-*`) never resume and are skipped.
  */
-export function markSessionsForHistoryReinjection(
+export function markFolderSessionsForHistoryReinjection(
   groupFolder: string,
-  agentIds: readonly string[],
+  reason: string,
+): number {
+  return requireDatabase()
+    .prepare(
+      `INSERT INTO session_history_reinjections (
+         group_folder, agent_id, reason, created_at
+       )
+       SELECT group_folder, agent_id, ?, ? FROM sessions
+       WHERE group_folder = ? AND agent_id NOT LIKE 'task-%'
+       ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+         reason = excluded.reason, created_at = excluded.created_at`,
+    )
+    .run(reason, new Date().toISOString(), groupFolder).changes;
+}
+
+/** Owe one session (`''` is the main session) a history hand-off. */
+export function markSessionForHistoryReinjection(
+  groupFolder: string,
+  agentId: string | null | undefined,
   reason: string,
 ): void {
-  if (agentIds.length === 0) return;
-  const db = requireDatabase();
-  const insert = db.prepare(
-    `INSERT INTO session_history_reinjections (
-       group_folder, agent_id, reason, created_at
-     ) VALUES (?, ?, ?, ?)
-     ON CONFLICT(group_folder, agent_id) DO UPDATE SET
-       reason = excluded.reason, created_at = excluded.created_at`,
-  );
-  const now = new Date().toISOString();
-  db.transaction(() => {
-    for (const agentId of new Set(agentIds)) {
-      insert.run(groupFolder, agentId, reason, now);
-    }
-  })();
+  requireDatabase()
+    .prepare(
+      `INSERT INTO session_history_reinjections (
+         group_folder, agent_id, reason, created_at
+       ) VALUES (?, ?, ?, ?)
+       ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+         reason = excluded.reason, created_at = excluded.created_at`,
+    )
+    .run(groupFolder, agentId || '', reason, new Date().toISOString());
 }
 
 /**

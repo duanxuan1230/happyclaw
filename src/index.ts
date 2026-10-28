@@ -662,6 +662,11 @@ import {
 import { ProactiveCommentaryRelay } from './process-commentary.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
 import { skillMutationTurnRejection } from './skill-ipc-authorization.js';
+import { takeSessionHistoryReinjection } from './runtime-state-store.js';
+import {
+  CAPABILITY_CHANGE_HISTORY_INTRO,
+  invalidateSessionAfterRunnerExit,
+} from './capability-runtime-mutation.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
 import {
@@ -2195,14 +2200,19 @@ function steerQueuedFollowUpBatch(
   };
 }
 
+/** Hand a lane's durable queue to the cold-start reader as one batch. */
+function releaseQueuedFollowUpsToColdReader(chatJid: string): void {
+  withdrawQueuedInputsOutsideAudience(chatJid);
+  const recoveryRunId = `recovery:${crypto.randomUUID()}`;
+  const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
+  if (items.length === 0) return;
+  releaseQueuedFollowUpBatch(items, recoveryRunId);
+  enqueueReleasedFollowUp(items[items.length - 1]);
+}
+
 function recoverDurableFollowUps(): void {
   for (const chatJid of getQueuedFollowUpChatJids()) {
-    withdrawQueuedInputsOutsideAudience(chatJid);
-    const recoveryRunId = `recovery:${crypto.randomUUID()}`;
-    const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
-    if (items.length === 0) continue;
-    releaseQueuedFollowUpBatch(items, recoveryRunId);
-    enqueueReleasedFollowUp(items[items.length - 1]);
+    releaseQueuedFollowUpsToColdReader(chatJid);
   }
 }
 
@@ -7332,6 +7342,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           historyCount: historyContext.count,
         },
         'AgentProfile identity change: injected recent conversation history into prompt',
+      );
+    }
+  } else if (
+    takeSessionHistoryReinjection(
+      effectiveGroup.folder,
+      null,
+      !!sessions[effectiveGroup.folder],
+    )
+  ) {
+    // A Skill/MCP change reset the SDK session; the conversation goes on.
+    historyContext = buildRecentConversationHistoryContext(
+      chatJid,
+      new Set(missedMessages.map((m) => m.id)),
+      {
+        limit: 30,
+        maxMessageLength: 700,
+        intro: CAPABILITY_CHANGE_HISTORY_INTRO,
+      },
+    );
+    if (historyContext) {
+      logger.info(
+        { group: group.name, historyCount: historyContext.count },
+        'Capability change: injected recent conversation history into prompt',
       );
     }
   } else if (
@@ -14063,6 +14096,30 @@ function skillMutationTurnRejectionFor(
   });
 }
 
+/**
+ * Apply a Skill change that a runner's own tool call asked for. That runner
+ * finishes and delivers its turn on the old capability set instead of being
+ * stopped mid-turn; it closes afterwards, its SDK session is reset with the
+ * history hand-off, and input left queued behind it starts on a fresh runner.
+ */
+function runSelfCapabilityMutation<T>(
+  sourceGroup: string,
+  ipcAgentId: string | null,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const workspaceJid = findWebJidForFolder(sourceGroup);
+  if (!workspaceJid) return mutate();
+  return queue.deferStopsToQueryEnd(
+    ipcAgentId ? `${workspaceJid}#agent:${ipcAgentId}` : workspaceJid,
+    (runnerJid) => {
+      invalidateSessionAfterRunnerExit(sourceGroup, ipcAgentId);
+      // After the exited runner's own teardown has finished.
+      queueMicrotask(() => releaseQueuedFollowUpsToColdReader(runnerJid));
+    },
+    mutate,
+  );
+}
+
 async function processTaskIpc(
   data: {
     type: string;
@@ -16032,7 +16089,11 @@ async function processTaskIpc(
         }
 
         try {
-          const result = await installSkillForUser(userId, pkg);
+          const result = await runSelfCapabilityMutation(
+            sourceGroup,
+            ipcAgentId,
+            () => installSkillForUser(userId, pkg),
+          );
           fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
           writeExclusiveIpcResult(
             tasksDir,
@@ -16125,7 +16186,11 @@ async function processTaskIpc(
           break;
         }
 
-        const result = await deleteSkillForUser(userId, skillId);
+        const result = await runSelfCapabilityMutation(
+          sourceGroup,
+          ipcAgentId,
+          () => deleteSkillForUser(userId, skillId),
+        );
         fs.mkdirSync(path.dirname(resultFilePath), { recursive: true });
         writeExclusiveIpcResult(
           tasksDir,
@@ -16939,6 +17004,11 @@ async function processAgentConversation(
     );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
+  const capabilityReset = takeSessionHistoryReinjection(
+    effectiveGroup.folder,
+    agentId,
+    !!sessionId,
+  );
   if (startsFreshSession) {
     historyContext = buildRecentConversationHistoryContext(
       virtualChatJid,
@@ -16948,7 +17018,9 @@ async function processAgentConversation(
         maxMessageLength: 700,
         intro: resetForAgentProfile
           ? '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，当前 agent 的底层模型 session 已重置。以下是 HappyClaw 保存的最近对话记录，供你在新身份下延续上下文。'
-          : '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
+          : capabilityReset
+            ? CAPABILITY_CHANGE_HISTORY_INTRO
+            : '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。',
       },
     );
     if (historyContext) {

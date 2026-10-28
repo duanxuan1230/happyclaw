@@ -1,6 +1,8 @@
 import {
+  deleteSession,
   deleteWorkspaceSessions,
   getAllUsers,
+  getSession,
   listAgentProfilesForUser,
 } from './db.js';
 import {
@@ -11,6 +13,10 @@ import {
   WorkspaceRuntimeQuiesceError,
   type WorkspaceRuntimeQuiesceTarget,
 } from './agent-profile-runtime.js';
+import {
+  markFolderSessionsForHistoryReinjection,
+  markSessionForHistoryReinjection,
+} from './runtime-state-store.js';
 import { getWebDeps } from './web-context.js';
 
 export type CapabilityMutationImpact =
@@ -120,14 +126,51 @@ export function listCapabilityMutationRuntimeTargets(
   return Array.from(byFolder.values());
 }
 
+/** Session-reset reason recorded for the history hand-off. */
+export const CAPABILITY_CHANGE_RESET_REASON = 'capability_changed';
+
+/** Intro of the history re-injected into a session reset by this module. */
+export const CAPABILITY_CHANGE_HISTORY_INTRO =
+  '检测到当前 workspace 可用的 Skill / MCP 已更新，底层模型 session 已重置以加载新的能力。以下是 HappyClaw 保存的最近对话记录，供你延续上下文。';
+
+/**
+ * A capability change must start new SDK sessions, but the conversation
+ * itself goes on: each session that had one is marked so its next turn
+ * re-injects recent history, as an identity change does.
+ */
 function invalidateWorkspaceSessions(
   targets: WorkspaceRuntimeQuiesceTarget[],
 ): void {
   const deps = getWebDeps();
   for (const target of targets) {
+    markFolderSessionsForHistoryReinjection(
+      target.folder,
+      CAPABILITY_CHANGE_RESET_REASON,
+    );
     deleteWorkspaceSessions(target.folder);
     if (deps) delete deps.sessions[target.folder];
   }
+}
+
+/**
+ * A runner whose own tool call changed the capability set finished its turn
+ * on the old set and, while doing so, saved its SDK session again. Once it has
+ * closed, drop that session too so the next turn loads the new capabilities,
+ * with the same history hand-off as the other sessions.
+ */
+export function invalidateSessionAfterRunnerExit(
+  groupFolder: string,
+  agentId: string | null,
+): void {
+  if (!getSession(groupFolder, agentId)) return;
+  markSessionForHistoryReinjection(
+    groupFolder,
+    agentId,
+    CAPABILITY_CHANGE_RESET_REASON,
+  );
+  deleteSession(groupFolder, agentId);
+  const deps = getWebDeps();
+  if (deps && !agentId) delete deps.sessions[groupFolder];
 }
 
 /**
