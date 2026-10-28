@@ -40,6 +40,7 @@ import {
 import { formatRunElapsed } from '../../lib/run-phase';
 import { useSteadyValue } from '../../hooks/useSteadyValue';
 import { useAfterDelay, useTick } from '../../hooks/useTick';
+import { MemoryReceipts } from './MemoryReceipts';
 import { ModelWaitBody, modelWaitSeconds } from './ModelWaitRow';
 import {
   LATER_WAIT_DELAY_MS,
@@ -613,6 +614,7 @@ export const ProcessCard = memo(function ProcessCard({
         </ProcessWindow>
       )}
       <QuestionCards steps={shown} activeTools={activeTools} />
+      <MemoryReceipts steps={shown} groupJid={groupJid} />
     </div>
   );
 });

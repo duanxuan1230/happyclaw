@@ -177,10 +177,11 @@ Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `
 `/api/memory/workspaces/:workspaceJid/items*` 先要求 Login，再按 URL 中的
 Workspace JID 执行资源级授权：
 
-| 操作                           | 权限                                               |
-| ------------------------------ | -------------------------------------------------- |
-| GET 列表、搜索、详情、versions | `canAccessGroup()`，当前用户必须是 Workspace owner |
-| POST、PATCH、DELETE            | `canModifyGroup()`，当前用户必须是 Workspace owner |
+| 操作                             | 权限                                               |
+| -------------------------------- | -------------------------------------------------- |
+| GET 列表、搜索、详情、versions   | `canAccessGroup()`，当前用户必须是 Workspace owner |
+| POST、PATCH、DELETE              | `canModifyGroup()`，当前用户必须是 Workspace owner |
+| POST `.../confirm`、`.../reject` | `canModifyGroup()`，当前用户必须是 Workspace owner |
 
 admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均返回 404，不能据此
 枚举其他用户的 Workspace 或 Memory。客户端必须使用 `/api/workspaces` 返回的 JID，
@@ -188,14 +189,18 @@ admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均
 
 Agent Runtime 的 Workspace Memory MCP 还叠加执行上下文策略：
 
-| 执行上下文                         | 读取 | 创建、更新、忘记 |
-| ---------------------------------- | ---- | ---------------- |
-| 顶层交互式 Main/Runtime Session    | 允许 | 按 Workspace ACL |
-| Scheduled Run（group 或 isolated） | 允许 | 拒绝             |
-| SDK Task Sub-Agent                 | 允许 | 拒绝             |
+| 执行上下文                                       | 读取 | 创建、更新、忘记                   |
+| ------------------------------------------------ | ---- | ---------------------------------- |
+| 顶层 Main/Runtime Session，批次全部是 owner 输入 | 允许 | 按 Workspace ACL                   |
+| 顶层 Main/Runtime Session，含非 owner 输入       | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| Scheduled Run（group 或 isolated）               | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| Spawn/Task 会话、SDK Task Sub-Agent              | 允许 | 拒绝                               |
 
-定时任务和 Sub-Agent 即使继承 Workspace owner 身份，也不能写入 Workspace Memory；
-只读限制由 MCP 暴露面与主进程 IPC broker 共同执行，不能由模型参数扩大权限。
+owner 输入的判定在宿主：Web 输入的 sender 等于 owner 用户 id；IM 输入的发送者 IM id
+必须等于该工作区注册中由宿主记录的 owner（claim source 为 `configured`、
+`trusted_direct` 或 `auto_feishu`）。写入一律要求 Runner 的 HMAC 写能力；proposed
+只有 owner 在 Web 确认后才生效。Sub-Agent 的只读限制由 PreToolUse hook 与主进程
+IPC broker 共同执行，不能由模型参数扩大权限。
 
 ### 4.6 HappyClaw Owner Profile
 

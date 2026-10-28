@@ -7,12 +7,15 @@ import {
   getWorkspaceMemoryItem,
   listRecallableWorkspaceMemoryItems,
   listWorkspaceMemoryChangesSince,
+  listWorkspaceMemoryDirectory,
   listWorkspaceMemoryItems,
   listWorkspaceMemoryVersions as listVersionsFromStore,
+  recallWorkspaceMemoryItems,
   searchWorkspaceMemoryItems,
   updateWorkspaceMemoryItem,
   WorkspaceMemoryStoreError,
   type WorkspaceMemoryItem,
+  type WorkspaceMemoryItemSummary,
   type WorkspaceMemoryKind,
   type WorkspaceMemorySourceType,
   type WorkspaceMemoryStatus,
@@ -30,6 +33,10 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_QUERY_LENGTH = 500;
 const MAX_PAGE_SIZE = 100;
 const MAX_SNAPSHOT_CHARS = 64_000;
+/** The memory index a runtime turn carries: at most this many entries... */
+const DIRECTORY_MAX_ENTRIES = 80;
+/** ...and this many characters of `id · kind · title` lines. */
+const DIRECTORY_MAX_CHARS = 3_000;
 
 const KINDS = new Set<WorkspaceMemoryKind>([
   'fact',
@@ -85,11 +92,15 @@ export class WorkspaceMemoryServiceError extends Error {
       | 'invalid_request'
       | 'revision_conflict'
       | 'idempotency_conflict'
-      | 'reserved_canonical_key',
+      | 'reserved_canonical_key'
+      | 'memory_duplicate'
+      | 'owner_confirmation_required'
+      | 'not_proposed',
     message: string,
     public readonly details?: {
       currentRevision?: number;
       storeRevision?: number;
+      existing?: WorkspaceMemoryItemSummary;
     },
   ) {
     super(message);
@@ -216,8 +227,57 @@ function authorizeWorkspace(
   }
 }
 
-function translateStoreError(error: unknown): never {
+function describeExisting(existing: WorkspaceMemoryItemSummary): string {
+  const title = existing.title ? ` "${existing.title}"` : '';
+  return `${existing.id}${title} (revision ${existing.revision})`;
+}
+
+/**
+ * Who reads a duplicate error decides what it says: an owner turn updates the
+ * item that already holds the key; a proposal may only revise a proposal.
+ */
+function duplicateMessage(
+  existing: WorkspaceMemoryItemSummary,
+  proposal: boolean,
+): string {
+  if (existing.status === 'proposed') {
+    return `A proposed memory awaiting the owner's confirmation already uses this canonical key: ${describeExisting(existing)}. Update that proposal instead of creating a duplicate.`;
+  }
+  return proposal
+    ? `This is already remembered as ${describeExisting(existing)}. Only the workspace owner can change confirmed memory; tell the user the owner can edit it on the Memory page.`
+    : `An active memory already uses this canonical key: ${describeExisting(existing)}. Update that item instead of creating a duplicate.`;
+}
+
+/**
+ * `proposal`: the write came from a turn that only proposes. Its status
+ * mismatch is a confirmed item it may not touch; any other is the owner
+ * answering an item that is no longer a proposal.
+ */
+function translateStoreError(
+  error: unknown,
+  options: { proposal?: boolean } = {},
+): never {
   if (!(error instanceof WorkspaceMemoryStoreError)) throw error;
+  if (error.code === 'duplicate' && error.details?.existing) {
+    throw new WorkspaceMemoryServiceError(
+      'memory_duplicate',
+      duplicateMessage(error.details.existing, options.proposal === true),
+      error.details,
+    );
+  }
+  if (error.code === 'status_mismatch') {
+    throw options.proposal
+      ? new WorkspaceMemoryServiceError(
+          'owner_confirmation_required',
+          "Only the workspace owner's own turns can change confirmed memory; a proposal from this turn can only revise another proposal.",
+          error.details,
+        )
+      : new WorkspaceMemoryServiceError(
+          'not_proposed',
+          'This memory is not awaiting confirmation',
+          error.details,
+        );
+  }
   if (error.code === 'revision_conflict') {
     throw new WorkspaceMemoryServiceError(
       'revision_conflict',
@@ -242,6 +302,24 @@ function translateStoreError(error: unknown): never {
   throw new WorkspaceMemoryServiceError(
     'not_found',
     'Workspace memory not found',
+  );
+}
+
+/**
+ * `first`, then as many of `more()` (asked only when `first` falls short) as
+ * fit in `limit`, each item once.
+ */
+function fillById<T>(
+  first: T[],
+  more: () => T[],
+  id: (value: T) => string,
+  limit: number,
+): T[] {
+  if (first.length >= limit) return first.slice(0, limit);
+  const seen = new Set(first.map(id));
+  return [...first, ...more().filter((value) => !seen.has(id(value)))].slice(
+    0,
+    limit,
   );
 }
 
@@ -337,6 +415,11 @@ export function searchWorkspaceMemory(
     query: string;
     kind?: WorkspaceMemoryKind;
     limit?: number;
+    /**
+     * `substring` (default) finds the text as typed; `relevance` ranks the
+     * items that share the most terms with it, the way a turn recalls.
+     */
+    ranking?: 'substring' | 'relevance';
   },
 ) {
   authorizeWorkspace(input, 'read');
@@ -345,16 +428,28 @@ export function searchWorkspaceMemory(
     invalid(`query must be between 1 and ${MAX_QUERY_LENGTH} characters`);
   }
   if (input.kind && !KINDS.has(input.kind)) invalid('Invalid kind');
+  const request = {
+    workspaceJid: input.workspaceJid,
+    query,
+    kind: input.kind,
+    limit: clampLimit(input.limit, 20),
+  };
   try {
-    const result = searchWorkspaceMemoryItems({
-      workspaceJid: input.workspaceJid,
-      query,
-      kind: input.kind,
-      limit: clampLimit(input.limit, 20),
-    });
+    if (input.ranking !== 'relevance') {
+      const result = searchWorkspaceMemoryItems(request);
+      return { storeRevision: result.store.revision, hits: result.hits };
+    }
+    // Ranked hits first; the literal ones still count when the query has no
+    // informative term or shares none with the memories.
+    const ranked = recallWorkspaceMemoryItems(request);
     return {
-      storeRevision: result.store.revision,
-      hits: result.hits,
+      storeRevision: ranked.store.revision,
+      hits: fillById(
+        ranked.hits,
+        () => searchWorkspaceMemoryItems(request).hits,
+        (hit) => hit.item.id,
+        request.limit,
+      ),
     };
   } catch (error) {
     translateStoreError(error);
@@ -382,6 +477,8 @@ export function createWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryValue & {
       idempotencyKey?: string | null;
+      /** Save as a proposal the owner confirms, whatever `status` says. */
+      proposal?: boolean;
     },
 ) {
   authorizeWorkspace(input, 'write');
@@ -396,7 +493,7 @@ export function createWorkspaceMemory(
     title: input.title,
     content: input.content,
     canonicalKey: input.canonicalKey,
-    status: input.status,
+    status: input.proposal ? 'proposed' : input.status,
     importance: input.importance,
     confidence: input.confidence,
     validFrom: input.validFrom,
@@ -417,7 +514,7 @@ export function createWorkspaceMemory(
       replayed: result.replayed,
     };
   } catch (error) {
-    translateStoreError(error);
+    translateStoreError(error, { proposal: input.proposal });
   }
 }
 
@@ -429,6 +526,10 @@ export function updateWorkspaceMemory(
       itemId: string;
       expectedRevision: number;
       idempotencyKey?: string | null;
+      /** The turn only proposes: revise a proposal, which stays one. */
+      proposal?: boolean;
+      /** The owner confirms this proposal. */
+      answer?: 'confirm';
     },
 ) {
   authorizeWorkspace(input, 'write');
@@ -457,6 +558,7 @@ export function updateWorkspaceMemory(
       (patch as Record<string, unknown>)[key] = input[key];
     }
   }
+  if (input.proposal) delete patch.status;
   if (Object.keys(patch).length === 0) invalid('No memory fields to update');
   validateValue(patch, false);
   try {
@@ -491,6 +593,8 @@ export function updateWorkspaceMemory(
         expectedRevision: input.expectedRevision,
         patch,
       }),
+      ...(input.proposal || input.answer ? { requireStatus: 'proposed' } : {}),
+      auditAction: input.answer,
     });
     return {
       storeRevision: result.store.revision,
@@ -498,7 +602,7 @@ export function updateWorkspaceMemory(
       replayed: result.replayed,
     };
   } catch (error) {
-    translateStoreError(error);
+    translateStoreError(error, { proposal: input.proposal });
   }
 }
 
@@ -508,6 +612,10 @@ export function forgetWorkspaceMemory(
     expectedRevision: number;
     reason?: string | null;
     idempotencyKey?: string | null;
+    /** The turn only proposes: forget a proposal only. */
+    proposal?: boolean;
+    /** The owner rejects this proposal. */
+    answer?: 'reject';
   },
 ) {
   authorizeWorkspace(input, 'write');
@@ -533,6 +641,8 @@ export function forgetWorkspaceMemory(
         expectedRevision: input.expectedRevision,
         reason: input.reason ?? null,
       }),
+      ...(input.proposal || input.answer ? { requireStatus: 'proposed' } : {}),
+      auditAction: input.answer,
     });
     return {
       storeRevision: result.store.revision,
@@ -540,8 +650,31 @@ export function forgetWorkspaceMemory(
       replayed: result.replayed,
     };
   } catch (error) {
-    translateStoreError(error);
+    translateStoreError(error, { proposal: input.proposal });
   }
+}
+
+/**
+ * The owner's answer to a proposal: confirming makes it active memory that
+ * turns recall; rejecting forgets it. Each is audited as its own action.
+ */
+export function answerWorkspaceMemoryProposal(
+  input: WorkspaceMemoryMutationRequest & {
+    itemId: string;
+    expectedRevision: number;
+    answer: 'confirm' | 'reject';
+    reason?: string | null;
+    idempotencyKey?: string | null;
+  },
+) {
+  const { answer, reason, ...request } = input;
+  return answer === 'confirm'
+    ? updateWorkspaceMemory({ ...request, status: 'active', answer })
+    : forgetWorkspaceMemory({
+        ...request,
+        reason: reason ?? 'Proposal rejected',
+        answer,
+      });
 }
 
 export function listWorkspaceMemoryVersions(
@@ -606,59 +739,50 @@ export function getWorkspaceMemorySnapshot(
     heldIds?: readonly string[] | null;
   },
 ) {
+  authorizeWorkspace(input, 'read');
+  if (input.kind && !KINDS.has(input.kind)) invalid('Invalid kind');
   const limit = clampLimit(input.limit, 12);
   const maxChars = Math.max(
     256,
     Math.min(MAX_SNAPSHOT_CHARS, Math.trunc(input.maxChars ?? 12_000)),
   );
+  // A turn is not a search query: recall ranks the memories that share its
+  // informative terms, then fills the rest of the budget with the most
+  // important ones, so standing context still comes along.
+  const query = input.query?.trim() ?? '';
   let storeRevision: number;
   let items: WorkspaceMemoryItem[];
-  if (input.query?.trim()) {
-    const searched = searchWorkspaceMemory({
-      ...input,
-      query: input.query,
-      kind: input.kind,
-      limit,
-    });
-    storeRevision = searched.storeRevision;
-    items = searched.hits.map((hit) => hit.item);
-    if (items.length < limit) {
-      // A turn prompt is not a search query. In particular, an exact FTS
-      // phrase for a long natural-language/Chinese prompt often returns zero
-      // even though the Workspace has important standing context. Preserve
-      // relevance hits first, then fill the remaining budget with the most
-      // important currently-valid memories.
-      try {
-        const recalled = listRecallableWorkspaceMemoryItems({
+  let terms: string[] = [];
+  let directory: ReturnType<typeof listWorkspaceMemoryDirectory>;
+  try {
+    const recalled = query
+      ? recallWorkspaceMemoryItems({
+          workspaceJid: input.workspaceJid,
+          query,
+          kind: input.kind,
+          limit,
+        })
+      : null;
+    terms = recalled?.terms ?? [];
+    items = fillById(
+      recalled?.hits.map((hit) => hit.item) ?? [],
+      () =>
+        listRecallableWorkspaceMemoryItems({
           workspaceJid: input.workspaceJid,
           kind: input.kind,
           limit,
-        });
-        storeRevision = recalled.store.revision;
-        const seen = new Set(items.map((item) => item.id));
-        for (const item of recalled.items) {
-          if (items.length >= limit) break;
-          if (seen.has(item.id)) continue;
-          seen.add(item.id);
-          items.push(item);
-        }
-      } catch (error) {
-        translateStoreError(error);
-      }
-    }
-  } else {
-    authorizeWorkspace(input, 'read');
-    try {
-      const recalled = listRecallableWorkspaceMemoryItems({
-        workspaceJid: input.workspaceJid,
-        kind: input.kind,
-        limit,
-      });
-      storeRevision = recalled.store.revision;
-      items = recalled.items;
-    } catch (error) {
-      translateStoreError(error);
-    }
+        }).items,
+      (item) => item.id,
+      limit,
+    );
+    directory = listWorkspaceMemoryDirectory({
+      workspaceJid: input.workspaceJid,
+      maxEntries: DIRECTORY_MAX_ENTRIES,
+      maxChars: DIRECTORY_MAX_CHARS,
+    });
+    storeRevision = directory.store.revision;
+  } catch (error) {
+    translateStoreError(error);
   }
 
   const lines = [
@@ -701,8 +825,10 @@ export function getWorkspaceMemorySnapshot(
       ? { changes: { reset: changes.reset, items: changes.items } }
       : {}),
     renderedText: included.length > 0 ? lines.join('\n') : '',
+    directory: { entries: directory.entries, total: directory.total },
     retrievalTrace: {
-      query: input.query?.trim() || null,
+      query: query.slice(0, MAX_QUERY_LENGTH) || null,
+      terms,
       itemRevisions: included.map((item) => ({
         id: item.id,
         revision: item.revision,

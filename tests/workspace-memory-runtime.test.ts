@@ -26,7 +26,9 @@ import {
 } from '../src/workspace-memory-capability.js';
 import {
   buildWorkspaceMemoryUpdateInput,
+  isWorkspaceMemoryOwnerTurn,
   workspaceMemoryWriteRejection,
+  workspaceOwnerImIds,
 } from '../src/workspace-memory-ipc.js';
 
 const roots: string[] = [];
@@ -153,14 +155,14 @@ describe('Workspace Memory runtime boundary', () => {
       content: [
         {
           type: 'text',
-          text: expect.stringContaining('"storeRevision": 1'),
+          text: expect.stringContaining('"storeRevision":1'),
         },
       ],
     });
     revokeWorkspaceMemoryWriteCapability(scope, capability.runnerInstanceId);
   });
 
-  test('scheduled/group-task MCP surfaces are read-only', () => {
+  test('scheduled/group-task MCP surfaces may propose memory', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-memory-ro-'));
     roots.push(root);
     for (const ctx of [
@@ -169,9 +171,9 @@ describe('Workspace Memory runtime boundary', () => {
     ]) {
       const names = createMcpTools(ctx).map((tool) => tool.name);
       expect(names).toContain('workspace_memory_search');
-      expect(names).not.toContain('workspace_memory_remember');
-      expect(names).not.toContain('workspace_memory_update');
-      expect(names).not.toContain('workspace_memory_forget');
+      expect(names).toContain('workspace_memory_remember');
+      expect(names).toContain('workspace_memory_update');
+      expect(names).toContain('workspace_memory_forget');
     }
   });
 
@@ -254,7 +256,7 @@ describe('Workspace Memory runtime boundary', () => {
     ).resolves.toEqual({});
   });
 
-  test('host allows ordinary conversation sessions and rejects scheduled, spawn, task, and unknown turns', () => {
+  test('host admits conversation sessions and scheduled runs, and rejects spawn, task, and unknown turns', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
@@ -264,6 +266,8 @@ describe('Workspace Memory runtime boundary', () => {
         capabilityValid: true,
       }),
     ).toBeNull();
+    // A scheduled run writes only proposals (workspaceMemoryWriteMode), and
+    // only with the runner's signed capability.
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
@@ -272,7 +276,16 @@ describe('Workspace Memory runtime boundary', () => {
         runtimeAgentKind: null,
         capabilityValid: true,
       }),
-    ).toMatchObject({ code: 'scheduled_memory_read_only' });
+    ).toBeNull();
+    expect(
+      workspaceMemoryWriteRejection({
+        operation: 'create',
+        hostTurnKind: 'scheduled',
+        runtimeAgentId: null,
+        runtimeAgentKind: null,
+        capabilityValid: false,
+      }),
+    ).toMatchObject({ code: 'workspace_memory_invalid_capability' });
     for (const runtimeAgentKind of ['spawn', 'task'] as const) {
       expect(
         workspaceMemoryWriteRejection({
@@ -710,5 +723,181 @@ describe('Workspace Memory runtime boundary', () => {
       provenance: principal.provenance,
     });
     expect(built).not.toHaveProperty('patch');
+    expect(built).toMatchObject({ proposal: false });
+    expect(
+      buildWorkspaceMemoryUpdateInput(
+        { itemId: 'mem-1', patch: { proposal: false } },
+        { ...principal, proposal: true },
+      ),
+    ).toMatchObject({ proposal: true });
+  });
+
+  test("a snapshot is asked for by the senders' words and brings the index", async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(root);
+    const pending = fetchWorkspaceMemorySnapshot(
+      context(root),
+      '<system_context>\nold</system_context>\n\n<messages>\n<message id="m1" sender="Alice" time="t">\nMac mini 怎么部署 &amp; 回滚</message>\n</messages>',
+      { timeoutMs: 2_000 },
+    );
+    const request = await readMemoryRequest(root);
+    expect(request.query).toBe('Mac mini 怎么部署 & 回滚');
+    const base = {
+      workspaceJid: 'web:workspace',
+      storeRevision: 6,
+      items: [],
+      renderedText: '',
+      retrievalTrace: {
+        itemRevisions: [],
+        generatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    };
+    acknowledge(root, request.requestId as string, {
+      snapshot: {
+        ...base,
+        directory: {
+          entries: [{ id: 'wmi_a', kind: 'fact', title: 'Deploy', extra: 1 }],
+          total: 3,
+        },
+      },
+    });
+    await expect(pending).resolves.toMatchObject({
+      directory: {
+        entries: [{ id: 'wmi_a', kind: 'fact', title: 'Deploy' }],
+        total: 3,
+      },
+    });
+
+    const other = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(other);
+    const next = fetchWorkspaceMemorySnapshot(context(other), 'plain', {
+      timeoutMs: 2_000,
+    });
+    const second = await readMemoryRequest(other);
+    acknowledge(other, second.requestId as string, {
+      snapshot: { ...base, directory: { entries: [{ id: 1 }], total: 1 } },
+    });
+    const parsed = await next;
+    expect(parsed).not.toBeNull();
+    expect(parsed).not.toHaveProperty('directory');
+  });
+
+  test('a write result names the item, and a proposal says it waits for the owner', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-mcp-'),
+    );
+    roots.push(root);
+    const tools = new Map(
+      createMcpTools(context(root, { isScheduledTask: true })).map((tool) => [
+        tool.name,
+        tool,
+      ]),
+    );
+    const pending = tools
+      .get('workspace_memory_remember')!
+      .handler(
+        { kind: 'lesson', title: 'Back up first', content: 'Long content.' },
+        {} as never,
+      );
+    const request = await readMemoryRequest(root);
+    acknowledge(root, request.requestId as string, {
+      storeRevision: 9,
+      item: {
+        id: 'wmi_1',
+        revision: 1,
+        kind: 'lesson',
+        title: 'Back up first',
+        content: 'Long content.',
+        status: 'proposed',
+      },
+      replayed: false,
+    });
+    const response = (await pending) as {
+      content: Array<{ text: string }>;
+    };
+    const text = response.content[0].text;
+    expect(
+      text.startsWith(
+        '{"result":"proposed","id":"wmi_1","title":"Back up first"',
+      ),
+    ).toBe(true);
+    expect(JSON.parse(text)).toEqual({
+      result: 'proposed',
+      id: 'wmi_1',
+      title: 'Back up first',
+      revision: 1,
+      kind: 'lesson',
+      storeRevision: 9,
+      note: "Submitted, awaiting the workspace owner's confirmation on the Memory page; it is not recalled until confirmed.",
+    });
+    expect(text).not.toContain('Long content.');
+  });
+
+  test("only a batch of the owner's own messages is the owner's turn", () => {
+    const registrations: Record<
+      string,
+      { created_by?: string; owner_im_id?: string; owner_claim_source?: string }
+    > = {
+      'web:ws': { created_by: 'owner-1' },
+      'feishu:oc_group': {
+        created_by: 'owner-1',
+        owner_im_id: 'ou_owner',
+        owner_claim_source: 'auto_feishu',
+      },
+      'feishu:oc_claimed': {
+        created_by: 'owner-1',
+        owner_im_id: 'ou_claimer',
+        owner_claim_source: 'explicit',
+      },
+    };
+    const lookup = {
+      ownerUserId: 'owner-1',
+      workspaceJids: Object.keys(registrations),
+      channelType: (jid: string) => jid.split(':')[0],
+      registration: (jid: string) => registrations[jid],
+    };
+    // A first claim any member can make never vouches for the owner.
+    expect(workspaceOwnerImIds({ ...lookup, provider: 'feishu' })).toEqual([
+      'ou_owner',
+    ]);
+    const turnOf =
+      (...inputs: Array<{ sender: string; source_jid: string }>) =>
+      (isOwnerInput: (input: never) => boolean) => {
+        for (const input of inputs) {
+          if (!isOwnerInput({ ...input, is_from_me: 0 } as never)) {
+            throw new Error('not the owner');
+          }
+        }
+      };
+    const ownerTurn = (requireActiveOwnerTurn: ReturnType<typeof turnOf>) =>
+      isWorkspaceMemoryOwnerTurn({ ...lookup, requireActiveOwnerTurn });
+    expect(ownerTurn(turnOf({ sender: 'owner-1', source_jid: 'web:ws' }))).toBe(
+      true,
+    );
+    expect(
+      ownerTurn(turnOf({ sender: 'ou_owner', source_jid: 'feishu:oc_group' })),
+    ).toBe(true);
+    expect(
+      ownerTurn(
+        turnOf(
+          { sender: 'ou_owner', source_jid: 'feishu:oc_group' },
+          { sender: 'ou_member', source_jid: 'feishu:oc_group' },
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      ownerTurn(
+        turnOf({ sender: 'ou_claimer', source_jid: 'feishu:oc_claimed' }),
+      ),
+    ).toBe(false);
+    expect(
+      ownerTurn(() => {
+        throw new Error('scheduled or non-human');
+      }),
+    ).toBe(false);
   });
 });

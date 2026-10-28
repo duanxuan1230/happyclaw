@@ -13,7 +13,9 @@ import {
 } from './owner-profile-context.js';
 import type { ChannelTurnContext } from './types.js';
 import {
+  memoryIndexLine,
   narrowWorkspaceMemorySnapshot,
+  renderWorkspaceMemoryIndexBlock,
   renderWorkspaceMemorySnapshotBlock,
   type WithdrawnMemory,
 } from './workspace-memory-context.js';
@@ -42,6 +44,8 @@ export interface TurnNoteSources {
 /** What one user turn carries: each block is '' when the context has it. */
 export interface TurnNotes {
   ownerProfile: string;
+  /** The memory index, or the lines of it that changed. */
+  memoryIndex: string;
   memory: string;
   channel: string;
   anchor?: AgentTurnAnchor;
@@ -57,6 +61,10 @@ interface NoteState {
   readonly memory: ReadonlyMap<string, number>;
   /** The store revision the context's memory reflects. */
   readonly memoryRevision?: number;
+  /** The memory index line of every item listed, by id. */
+  readonly memoryIndex: ReadonlyMap<string, string>;
+  /** How many recallable items the index said it left out. */
+  readonly memoryIndexUnlisted: number;
   /** The last Owner Profile block sent ('' before the first). */
   readonly ownerProfile: string;
   /** Top-level fields of the channel context as sent so far, as JSON. */
@@ -71,6 +79,8 @@ interface NoteState {
 
 const EMPTY_STATE: NoteState = {
   memory: new Map(),
+  memoryIndex: new Map(),
+  memoryIndexUnlisted: 0,
   ownerProfile: '',
   channelFormat: '',
   formatAge: 0,
@@ -173,6 +183,49 @@ function memoryWithdrawals(
 }
 
 /**
+ * The memory index a turn carries against the one the context holds: all of
+ * it when the context holds none, else the lines that changed; '' when
+ * nothing did, or the snapshot brought no index (the held one stays).
+ */
+function planMemoryIndex(
+  state: NoteState,
+  directory: WorkspaceMemorySnapshot['directory'],
+): {
+  block: string;
+  held: ReadonlyMap<string, string>;
+  unlisted: number;
+} {
+  if (!directory) {
+    return {
+      block: '',
+      held: state.memoryIndex,
+      unlisted: state.memoryIndexUnlisted,
+    };
+  }
+  const held = new Map(
+    directory.entries.map((entry) => [entry.id, memoryIndexLine(entry)]),
+  );
+  const unlisted = Math.max(0, directory.total - directory.entries.length);
+  const changesOnly =
+    state.memoryIndex.size > 0 || state.memoryIndexUnlisted > 0;
+  const lines = [...held]
+    .filter(([id, line]) => state.memoryIndex.get(id) !== line)
+    .map(([, line]) => line);
+  const removed = [...state.memoryIndex.keys()].filter((id) => !held.has(id));
+  const unlistedChanged = unlisted !== state.memoryIndexUnlisted;
+  const block =
+    lines.length > 0 || removed.length > 0 || unlistedChanged
+      ? renderWorkspaceMemoryIndexBlock({
+          changesOnly,
+          lines,
+          removed,
+          unlisted: unlistedChanged ? unlisted : undefined,
+        })
+      : '';
+  return { block, held, unlisted };
+}
+
+/**
  * Decide what one user turn carries, given what the context already holds:
  * only new or changed parts, and no block at all when nothing changed. Pure;
  * returns the state the context holds once this turn is in it.
@@ -214,6 +267,7 @@ function planTurnNotes(
         : null),
     withdrawnMemory,
   );
+  const memoryIndex = planMemoryIndex(state, snapshot?.directory);
   let heldMemory = state.memory;
   if (sentMemory.length > 0 || withdrawnMemory.length > 0) {
     const next = new Map(held);
@@ -267,6 +321,7 @@ function planTurnNotes(
   return {
     notes: {
       ownerProfile,
+      memoryIndex: memoryIndex.block,
       memory,
       channel,
       anchor,
@@ -276,6 +331,8 @@ function planTurnNotes(
     after: {
       memory: heldMemory,
       memoryRevision: snapshot?.storeRevision ?? state.memoryRevision,
+      memoryIndex: memoryIndex.held,
+      memoryIndexUnlisted: memoryIndex.unlisted,
       ownerProfile: ownerTarget,
       channel: fields,
       channelFormat,
@@ -288,7 +345,12 @@ function planTurnNotes(
 
 /** The notes' blocks, in the order a user turn carries them. */
 function noteBlocks(notes: TurnNotes): string[] {
-  return [notes.ownerProfile, notes.memory, notes.channel].filter(Boolean);
+  return [
+    notes.ownerProfile,
+    notes.memoryIndex,
+    notes.memory,
+    notes.channel,
+  ].filter(Boolean);
 }
 
 /** The user message the SDK receives: the turn's notes, then its text. */

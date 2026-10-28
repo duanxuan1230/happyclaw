@@ -867,6 +867,37 @@ POST、PATCH 和 DELETE 均返回
 `{ storeRevision, item, replayed }`；GET item 返回相同 wrapper，但不含
 `replayed`。`replayed` 表示服务端按相同 idempotency key 返回了已有写入结果。
 
+`canonicalKey` 规范化后（忽略大小写、全半角和空格/`_`/`-`）已被另一条 active 或
+proposed 条目使用时，创建或改 key 返回 409：
+
+```json
+{
+  "error": "memory_duplicate",
+  "message": "An active memory already uses this canonical key: ...",
+  "existing": {
+    "id": "wmi_...",
+    "kind": "fact",
+    "title": "部署流程",
+    "status": "active",
+    "revision": 3
+  }
+}
+```
+
+### 待确认的记忆
+
+群聊成员的轮次和定时任务写入的记忆以 `status: "proposed"` 保存，不参与召回、目录和
+搜索；`GET .../items?status=proposed` 列出它们。owner 的回答：
+
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/confirm`
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/reject`
+
+请求体 `{ expectedRevision, idempotencyKey?, reason?, provenance? }`（`reason` 只用于
+reject），返回 `{ storeRevision, item, replayed }`。confirm 把条目改为 active，
+reject 写入 tombstone；审计事件分别记为 `confirm`、`reject`。条目已不是 proposed 时
+返回 409 `not_proposed`，revision 过期返回 409 `revision_conflict`，确认时同一
+canonical key 已有 active 条目返回 409 `memory_duplicate`。
+
 并发编辑使用 compare-and-set。`expectedRevision` 过期时返回：
 
 ```json

@@ -174,16 +174,21 @@ describe('HappyClaw tool initialization', () => {
     ).toContain('agent_profile_publish');
   });
 
-  test('scheduled and task-triggered turns expose Workspace Memory read-only', () => {
+  test('scheduled and task-triggered turns may propose Workspace Memory', () => {
+    // The host saves their writes as proposals the owner confirms.
     for (const names of [
       toolNames(false, { isScheduledTask: true }),
       toolNames(false, { currentTaskId: 'scheduled-group-task' }),
     ]) {
-      expect(names).toContain('workspace_memory_search');
-      expect(names).toContain('workspace_memory_get');
-      expect(names).not.toContain('workspace_memory_remember');
-      expect(names).not.toContain('workspace_memory_update');
-      expect(names).not.toContain('workspace_memory_forget');
+      expect(names).toEqual(
+        expect.arrayContaining([
+          'workspace_memory_search',
+          'workspace_memory_get',
+          'workspace_memory_remember',
+          'workspace_memory_update',
+          'workspace_memory_forget',
+        ]),
+      );
     }
   });
 

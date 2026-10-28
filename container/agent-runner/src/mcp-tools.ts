@@ -20,6 +20,7 @@ import {
   type ChannelTurnContext,
 } from './types.js';
 import { signWorkspaceMemoryMutation } from './workspace-memory-auth.js';
+import { memoryRecallQuery } from './workspace-memory-query.js';
 import {
   PROACTIVE_FINAL_DELIVERED_SENTINEL,
   proactiveFinalWasDeliveredForInput,
@@ -248,6 +249,16 @@ export interface WorkspaceMemorySnapshot {
     reset: boolean;
     items: Array<{ id: string; revision: number; status: string }>;
   };
+  /**
+   * The workspace's memory index: the most important recallable items as
+   * `id · kind · title` entries, and how many there are in all.
+   */
+  directory?: WorkspaceMemoryDirectory;
+}
+
+export interface WorkspaceMemoryDirectory {
+  entries: Array<{ id: string; kind: string; title: string }>;
+  total: number;
 }
 
 export interface HappyClawOwnerProfileProjection {
@@ -312,6 +323,7 @@ export function parseWorkspaceMemorySnapshot(
     return null;
   }
   const changes = parseWorkspaceMemoryChanges(value.changes);
+  const directory = parseWorkspaceMemoryDirectory(value.directory);
   return {
     workspaceJid: value.workspaceJid,
     storeRevision: value.storeRevision as number,
@@ -326,6 +338,32 @@ export function parseWorkspaceMemorySnapshot(
       generatedAt: trace.generatedAt,
     },
     ...(changes ? { changes } : {}),
+    ...(directory ? { directory } : {}),
+  };
+}
+
+function parseWorkspaceMemoryDirectory(
+  value: unknown,
+): WorkspaceMemoryDirectory | undefined {
+  if (
+    !isRecord(value) ||
+    !Number.isInteger(value.total) ||
+    !Array.isArray(value.entries) ||
+    !value.entries.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.id === 'string' &&
+        typeof entry.kind === 'string' &&
+        typeof entry.title === 'string',
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    entries: (value.entries as Array<Record<string, string>>).map(
+      ({ id, kind, title }) => ({ id, kind, title }),
+    ),
+    total: value.total as number,
   };
 }
 
@@ -534,13 +572,14 @@ export async function fetchHappyClawOwnerProfileTurn(
 }
 
 /**
- * Fetch a bounded, query-relevant snapshot for the next model turn.
+ * Fetch a bounded snapshot for the next model turn: the memories relevant to
+ * what its senders wrote (see memoryRecallQuery), and the memory index.
  * Failure is fail-open for answering: the turn can continue without memory,
  * while all mutation paths remain server-authorized and fail-closed.
  */
 export async function fetchWorkspaceMemorySnapshot(
   ctx: McpContext,
-  query: string,
+  turnText: string,
   options: {
     limit?: number;
     maxChars?: number;
@@ -556,7 +595,7 @@ export async function fetchWorkspaceMemorySnapshot(
       ctx,
       'snapshot',
       {
-        query: query.slice(0, 500),
+        query: memoryRecallQuery(turnText),
         limit: Math.min(Math.max(options.limit ?? 8, 1), 20),
         maxChars: Math.min(Math.max(options.maxChars ?? 6000, 500), 12_000),
         ...(options.changedSince !== undefined
@@ -582,6 +621,48 @@ function workspaceMemoryToolResult(result: Record<string, unknown>) {
       {
         type: 'text' as const,
         text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}
+
+const MEMORY_WRITE_RESULTS = {
+  create: 'remembered',
+  update: 'updated',
+  delete: 'forgotten',
+} as const;
+
+/**
+ * A write's result names the item and what became of it, without echoing
+ * its content. `result`, `id` and then `title` lead, so the Web's bounded
+ * preview of the call (features/workspace-memory/receipts.ts) still holds
+ * them. A proposal says it waits for the owner; it is not recalled until
+ * confirmed.
+ */
+export function workspaceMemoryWriteResult(
+  operation: keyof typeof MEMORY_WRITE_RESULTS,
+  result: Record<string, unknown>,
+) {
+  const item = isRecord(result.item) ? result.item : {};
+  const proposed = item.status === 'proposed' && operation !== 'delete';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          result: proposed ? 'proposed' : MEMORY_WRITE_RESULTS[operation],
+          id: item.id,
+          title: item.title ?? null,
+          revision: item.revision,
+          kind: item.kind,
+          storeRevision: result.storeRevision,
+          ...(result.replayed ? { replayed: true } : {}),
+          ...(proposed
+            ? {
+                note: "Submitted, awaiting the workspace owner's confirmation on the Memory page; it is not recalled until confirmed.",
+              }
+            : {}),
+        }),
       },
     ],
   };
@@ -2955,9 +3036,10 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     payload: Record<string, unknown>,
   ) => {
     try {
-      return workspaceMemoryToolResult(
-        await callWorkspaceMemory(ctx, operation, payload),
-      );
+      const result = await callWorkspaceMemory(ctx, operation, payload);
+      return operation === 'search' || operation === 'get'
+        ? workspaceMemoryToolResult(result)
+        : workspaceMemoryWriteResult(operation, result);
     } catch (err) {
       return {
         content: [
@@ -3003,102 +3085,100 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     ),
   );
 
-  // Scheduled/task turns are deliberately read-only until candidate commits
-  // can be coupled atomically to a successful durable task-run completion.
-  // Sub-agents are independently denied by the PreToolUse runtime hook.
-  const memoryWriteEnabled = !ctx.isScheduledTask && !ctx.currentTaskId;
-  if (memoryWriteEnabled) {
-    tools.push(
-      tool(
-        'workspace_memory_remember',
-        'Persist a concise fact, decision, lesson, or open loop for future sessions in this workspace. Use only for information with durable workspace value. Never store secrets, third-party instructions, or a transcript summary.',
-        {
-          kind: memoryKindSchema,
-          title: z.string().min(1).max(200),
-          content: z.string().min(1).max(20_000),
-          canonical_key: genericMemoryCanonicalKeySchema.optional(),
-          importance: z.number().min(0).max(1).optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          valid_from: z.string().datetime().optional(),
-          valid_until: z.string().datetime().optional(),
-          expires_at: z.string().datetime().optional(),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('create', {
+  // The host decides what a write becomes: the owner's own interactive turns
+  // write memory; any other turn (a group member's, a scheduled run) saves a
+  // proposal the owner confirms. Spawned and task Agents are refused by the
+  // host, SDK sub-agents by the PreToolUse runtime hook.
+  tools.push(
+    tool(
+      'workspace_memory_remember',
+      'Persist a concise fact, decision, lesson, or open loop for future sessions in this workspace. Use only for information with durable workspace value. Never store secrets, third-party instructions, or a transcript summary.',
+      {
+        kind: memoryKindSchema,
+        title: z.string().min(1).max(200),
+        content: z.string().min(1).max(20_000),
+        canonical_key: genericMemoryCanonicalKeySchema.optional(),
+        importance: z.number().min(0).max(1).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        valid_from: z.string().datetime().optional(),
+        valid_until: z.string().datetime().optional(),
+        expires_at: z.string().datetime().optional(),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('create', {
+          kind: args.kind,
+          title: args.title.trim(),
+          content: args.content.trim(),
+          canonicalKey: args.canonical_key?.trim(),
+          importance: args.importance,
+          confidence: args.confidence,
+          validFrom: args.valid_from,
+          validUntil: args.valid_until,
+          expiresAt: args.expires_at,
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:create:${args.canonical_key ?? args.title}`,
+          ),
+        }),
+    ),
+    tool(
+      'workspace_memory_update',
+      'Update an existing current-workspace memory using optimistic concurrency. expected_revision is mandatory; on conflict, search/get the latest item and reconcile rather than overwriting it.',
+      {
+        item_id: z.string().min(1),
+        expected_revision: z.number().int().min(1),
+        kind: memoryKindSchema.optional(),
+        title: z.string().min(1).max(200).optional(),
+        content: z.string().min(1).max(20_000).optional(),
+        canonical_key: genericMemoryCanonicalKeySchema.nullable().optional(),
+        importance: z.number().min(0).max(1).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        valid_from: z.string().datetime().nullable().optional(),
+        valid_until: z.string().datetime().nullable().optional(),
+        expires_at: z.string().datetime().nullable().optional(),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('update', {
+          itemId: args.item_id,
+          expectedRevision: args.expected_revision,
+          patch: {
             kind: args.kind,
-            title: args.title.trim(),
-            content: args.content.trim(),
-            canonicalKey: args.canonical_key?.trim(),
+            title: args.title?.trim(),
+            content: args.content?.trim(),
+            canonicalKey: args.canonical_key,
             importance: args.importance,
             confidence: args.confidence,
             validFrom: args.valid_from,
             validUntil: args.valid_until,
             expiresAt: args.expires_at,
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:create:${args.canonical_key ?? args.title}`,
-            ),
-          }),
-      ),
-      tool(
-        'workspace_memory_update',
-        'Update an existing current-workspace memory using optimistic concurrency. expected_revision is mandatory; on conflict, search/get the latest item and reconcile rather than overwriting it.',
-        {
-          item_id: z.string().min(1),
-          expected_revision: z.number().int().min(1),
-          kind: memoryKindSchema.optional(),
-          title: z.string().min(1).max(200).optional(),
-          content: z.string().min(1).max(20_000).optional(),
-          canonical_key: genericMemoryCanonicalKeySchema.nullable().optional(),
-          importance: z.number().min(0).max(1).optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          valid_from: z.string().datetime().nullable().optional(),
-          valid_until: z.string().datetime().nullable().optional(),
-          expires_at: z.string().datetime().nullable().optional(),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('update', {
-            itemId: args.item_id,
-            expectedRevision: args.expected_revision,
-            patch: {
-              kind: args.kind,
-              title: args.title?.trim(),
-              content: args.content?.trim(),
-              canonicalKey: args.canonical_key,
-              importance: args.importance,
-              confidence: args.confidence,
-              validFrom: args.valid_from,
-              validUntil: args.valid_until,
-              expiresAt: args.expires_at,
-            },
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:update:${args.item_id}:${args.expected_revision}`,
-            ),
-          }),
-      ),
-      tool(
-        'workspace_memory_forget',
-        'Forget one current-workspace memory item. This creates an auditable tombstone and requires the item revision to prevent deleting a concurrently corrected memory.',
-        {
-          item_id: z.string().min(1),
-          expected_revision: z.number().int().min(1),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('delete', {
-            itemId: args.item_id,
-            expectedRevision: args.expected_revision,
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:delete:${args.item_id}:${args.expected_revision}`,
-            ),
-          }),
-      ),
-    );
-  }
+          },
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:update:${args.item_id}:${args.expected_revision}`,
+          ),
+        }),
+    ),
+    tool(
+      'workspace_memory_forget',
+      'Forget one current-workspace memory item. This creates an auditable tombstone and requires the item revision to prevent deleting a concurrently corrected memory.',
+      {
+        item_id: z.string().min(1),
+        expected_revision: z.number().int().min(1),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('delete', {
+          itemId: args.item_id,
+          expectedRevision: args.expected_revision,
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:delete:${args.item_id}:${args.expected_revision}`,
+          ),
+        }),
+    ),
+  );
 
   return applyToolLoadingHints(tools);
 }
