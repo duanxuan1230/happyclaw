@@ -1,13 +1,27 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import type { Variables } from '../web-context.js';
 import {
   getWebDeps,
+  hasHostExecutionPermission,
+  isHostExecutionGroup,
   projectWebAgentRemoved,
   projectWebAgentStatus,
 } from '../web-context.js';
+import {
+  createSessionWorktree,
+  findDirtySessionWorktrees,
+  removeSessionWorktree,
+  toSessionWorktreePayload,
+  WorktreeUnavailableError,
+} from '../session-worktree.js';
+import {
+  getSessionWorktree,
+  listSessionWorktreesByFolder,
+  type SessionWorktree,
+} from '../session-worktree-store.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { canAccessGroup, canModifyGroup } from '../group-acl.js';
 import {
@@ -197,6 +211,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   const linkedByAgent = getGroupsByTargetAgents(
     agents.filter((a) => a.kind === 'conversation').map((a) => a.id),
   );
+  const worktrees = worktreesBySession(group.folder);
   return c.json({
     agents: agents.map((a) => {
       const base = {
@@ -229,6 +244,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
             jid: l.jid,
             name: l.group.name,
           })),
+          worktree: toSessionWorktreePayload(worktrees.get(a.id)),
         };
       }
       return base;
@@ -258,6 +274,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
       [...mountsBySession.values()].flat().map((mount) => mount.channel_jid),
     ),
   ]);
+  const worktrees = worktreesBySession(group.folder);
 
   return c.json({
     sessions: [
@@ -305,6 +322,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
             jid: mount.channel_jid,
             name: mountNames.get(mount.channel_jid) ?? mount.channel_jid,
           })),
+          worktree: toSessionWorktreePayload(worktrees.get(a.id)),
         };
       }),
     ],
@@ -323,6 +341,170 @@ const NON_WORKSPACE_SESSION_PARENT_ERROR =
 
 function isWorkspaceSessionParent(jid: string): boolean {
   return jid.startsWith('web:') && !jid.includes('#');
+}
+
+/**
+ * Create the worktree a new session asked for (`worktree: true`) before the
+ * session itself, so a failure leaves nothing behind. Returns null when none
+ * was requested, or the error response.
+ */
+async function createRequestedWorktree(
+  c: Context<{ Variables: Variables }>,
+  input: {
+    body: Record<string, unknown>;
+    jid: string;
+    group: RegisteredGroup;
+    user: AuthUser;
+    sessionId: string;
+  },
+): Promise<SessionWorktree | null | Response> {
+  if (input.body.worktree !== true) return null;
+  if (
+    isHostExecutionGroup(input.group) &&
+    !hasHostExecutionPermission(input.user)
+  ) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
+  }
+  try {
+    return await createSessionWorktree({
+      group: input.group,
+      chatJid: input.jid,
+      agentId: input.sessionId,
+    });
+  } catch (error) {
+    if (error instanceof WorktreeUnavailableError) {
+      return c.json(
+        {
+          error: error.message,
+          code: 'WORKTREE_UNAVAILABLE',
+          reason: error.reason,
+        },
+        400,
+      );
+    }
+    logger.error(
+      { err: error, jid: input.jid, sessionId: input.sessionId },
+      'Failed to create session worktree',
+    );
+    return c.json(
+      {
+        error: `创建 worktree 失败：${error instanceof Error ? error.message : String(error)}`,
+        code: 'WORKTREE_CREATE_FAILED',
+      },
+      500,
+    );
+  }
+}
+
+function worktreesBySession(folder: string): Map<string, SessionWorktree> {
+  return new Map(
+    listSessionWorktreesByFolder(folder).map((record) => [
+      record.agent_id,
+      record,
+    ]),
+  );
+}
+
+/** Insert the session; a failed insert must not strand its new worktree. */
+async function insertSession(
+  session: SubAgent,
+  worktree: SessionWorktree | null,
+): Promise<void> {
+  try {
+    createAgent(session);
+  } catch (error) {
+    if (worktree) {
+      await removeSessionWorktree(session.id, { force: true }).catch(
+        (cleanupError) =>
+          logger.error(
+            { err: cleanupError, sessionId: session.id },
+            'Failed to remove the worktree of a session that was not created',
+          ),
+      );
+    }
+    throw error;
+  }
+}
+
+function worktreeDirtyResponse(
+  c: Context<{ Variables: Variables }>,
+  branch: string,
+  changedFiles: number,
+): Response {
+  return c.json(
+    {
+      error: `会话的 worktree 有 ${changedFiles} 个未提交的改动，确认后才会移除（分支 ${branch} 会保留）`,
+      code: 'WORKTREE_DIRTY',
+      worktree: { branch, changed_files: changedFiles },
+    },
+    409,
+  );
+}
+
+/**
+ * Refuse to delete a session whose worktree holds uncommitted changes until
+ * the caller confirms with `force_worktree=true`. Checked before the runner
+ * is stopped, so a refused delete leaves the session untouched.
+ */
+async function checkWorktreeBeforeDelete(
+  c: Context<{ Variables: Variables }>,
+  sessionId: string,
+  force: boolean,
+): Promise<Response | null> {
+  const worktree = getSessionWorktree(sessionId);
+  if (!worktree || force) return null;
+  try {
+    const [dirty] = await findDirtySessionWorktrees([worktree]);
+    return dirty
+      ? worktreeDirtyResponse(c, dirty.branch, dirty.dirtyFiles)
+      : null;
+  } catch (error) {
+    logger.error({ err: error, sessionId }, 'Failed to inspect worktree');
+    return c.json({ error: '无法检查会话 worktree 的改动，会话未删除' }, 500);
+  }
+}
+
+/**
+ * Remove a deleted session's worktree, keeping its branch. Without `force`
+ * uncommitted changes block the deletion with 409. Returns a response only
+ * when the session must not be deleted.
+ */
+async function releaseSessionWorktree(
+  c: Context<{ Variables: Variables }>,
+  input: { jid: string; sessionId: string; force: boolean },
+): Promise<Response | null> {
+  const worktree = getSessionWorktree(input.sessionId);
+  if (!worktree) return null;
+  // Settle the runner first so nothing writes into the checkout while it
+  // is checked and removed.
+  await getWebDeps()?.queue?.stopGroup(
+    `${input.jid}#agent:${input.sessionId}`,
+    { force: true },
+  );
+  try {
+    const result = await removeSessionWorktree(input.sessionId, {
+      force: input.force,
+    });
+    if (result && !result.removed) {
+      return worktreeDirtyResponse(c, result.branch, result.dirtyFiles);
+    }
+    return null;
+  } catch (error) {
+    logger.error(
+      { err: error, sessionId: input.sessionId },
+      'Failed to remove session worktree',
+    );
+    return c.json(
+      {
+        error: `移除 worktree 失败，会话未删除：${error instanceof Error ? error.message : String(error)}`,
+        code: 'WORKTREE_REMOVE_FAILED',
+      },
+      500,
+    );
+  }
 }
 
 // POST /api/groups/:jid/agents — create a user conversation
@@ -361,6 +543,14 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
     typeof body.description === 'string' ? body.description.trim() : '';
 
   const agentId = crypto.randomUUID();
+  const worktree = await createRequestedWorktree(c, {
+    body,
+    jid,
+    group,
+    user,
+    sessionId: agentId,
+  });
+  if (worktree instanceof Response) return worktree;
   const now = new Date().toISOString();
 
   const agent: SubAgent = {
@@ -384,7 +574,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
     title_source: isAutoTitle ? 'auto_pending' : 'manual',
   };
 
-  createAgent(agent);
+  await insertSession(agent, worktree);
 
   // Create IPC + session directories
   ensureAgentDirectories(group.folder, agentId);
@@ -414,6 +604,7 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
       root_message_id: agent.root_message_id ?? null,
       title_source: agent.title_source ?? null,
       last_active_at: agent.last_active_at ?? null,
+      worktree: toSessionWorktreePayload(worktree ?? undefined),
     },
   });
 });
@@ -450,6 +641,14 @@ router.post('/:jid/sessions', authMiddleware, async (c) => {
     typeof body.description === 'string' ? body.description.trim() : '';
 
   const sessionId = crypto.randomUUID();
+  const worktree = await createRequestedWorktree(c, {
+    body,
+    jid,
+    group,
+    user,
+    sessionId,
+  });
+  if (worktree instanceof Response) return worktree;
   const now = new Date().toISOString();
   const session: SubAgent = {
     id: sessionId,
@@ -472,7 +671,7 @@ router.post('/:jid/sessions', authMiddleware, async (c) => {
     title_source: isAutoTitle ? 'auto_pending' : 'manual',
   };
 
-  createAgent(session);
+  await insertSession(session, worktree);
   ensureAgentDirectories(group.folder, sessionId);
   ensureChatExists(`${jid}#agent:${sessionId}`);
 
@@ -496,6 +695,7 @@ router.post('/:jid/sessions', authMiddleware, async (c) => {
     title_source: session.title_source ?? null,
     last_active_at: session.last_active_at ?? null,
     is_main: false,
+    worktree: toSessionWorktreePayload(worktree ?? undefined),
   };
   return c.json({ session: payload, agent: payload });
 });
@@ -699,6 +899,14 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     }
   }
 
+  const forceWorktree = c.req.query('force_worktree') === 'true';
+  const worktreeBlock = await checkWorktreeBeforeDelete(
+    c,
+    agentId,
+    forceWorktree,
+  );
+  if (worktreeBlock) return worktreeBlock;
+
   // If the agent is still running or idle, stop the process
   if (agent.status === 'running' || agent.status === 'idle') {
     updateAgentStatus(agentId, 'error', '用户手动停止');
@@ -709,6 +917,12 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
       deps.queue.stopGroup(virtualJid);
     }
   }
+  const worktreeFailure = await releaseSessionWorktree(c, {
+    jid,
+    sessionId: agentId,
+    force: forceWorktree,
+  });
+  if (worktreeFailure) return worktreeFailure;
 
   // Clean up IPC/session directories
   const agentIpcDir = path.join(
@@ -841,11 +1055,25 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
     );
   }
 
+  const forceWorktree = c.req.query('force_worktree') === 'true';
+  const worktreeBlock = await checkWorktreeBeforeDelete(
+    c,
+    sessionId,
+    forceWorktree,
+  );
+  if (worktreeBlock) return worktreeBlock;
+
   if (session.status === 'running' || session.status === 'idle') {
     updateAgentStatus(sessionId, 'error', '用户手动停止');
     const deps = getWebDeps();
     if (deps) deps.queue.stopGroup(`${jid}#agent:${sessionId}`);
   }
+  const worktreeFailure = await releaseSessionWorktree(c, {
+    jid,
+    sessionId,
+    force: forceWorktree,
+  });
+  if (worktreeFailure) return worktreeFailure;
 
   for (const dir of [
     path.join(DATA_DIR, 'ipc', group.folder, 'agents', sessionId),

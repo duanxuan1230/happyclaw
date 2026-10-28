@@ -144,6 +144,12 @@ import {
   syncHostClaudeContext,
 } from './claude-context-resolver.js';
 import { pluginSkillLayers } from './effective-skill-resolver.js';
+import {
+  resolveSessionWorkingDirectory,
+  resolveWorkspaceSkillRoots,
+  sessionWorktreeRunError,
+} from './session-worktree.js';
+import { getSessionWorktree } from './session-worktree-store.js';
 import { RegisteredGroup } from './types.js';
 import type {
   AgentProfileRuntimePolicy,
@@ -1167,6 +1173,8 @@ function resolveAgentProfileMcpPolicy(
 function resolveRuntimeMcpServers(
   group: RegisteredGroup,
   agentProfile?: RunnerAgentProfile,
+  /** The run's project root; see resolveWorkspaceProjectRoot. */
+  workspaceDir = path.join(GROUPS_DIR, group.folder),
 ): Record<string, Record<string, unknown>> {
   const managedLayers = group.created_by
     ? loadManagedMcpLayers(group.created_by, {
@@ -1180,7 +1188,7 @@ function resolveRuntimeMcpServers(
     agentProfile,
   ).servers;
   const context = loadClaudeContextMcpServers({
-    workspaceDir: path.join(GROUPS_DIR, group.folder),
+    workspaceDir,
     externalClaudeDir: getEffectiveExternalDir(),
     includeHostClaudeContext: shouldIncludeHostClaudeContext(agentProfile),
   });
@@ -3215,6 +3223,17 @@ export async function runContainerAgent(
   const hostIdentity = await detectContainerHostIdentityAsync();
   const sessionAgentId = input.sessionAgentId ?? input.agentId;
 
+  // Worktrees are host checkouts; a container would run this session in the
+  // shared workspace directory instead, so refuse rather than substitute.
+  const sessionWorktree = getSessionWorktree(input.agentId);
+  if (sessionWorktree) {
+    const message = sessionWorktreeRunError(
+      sessionWorktree,
+      '独立 worktree 只能在宿主机模式运行',
+    );
+    return { status: 'error', result: message, error: message };
+  }
+
   const groupDir = path.join(GROUPS_DIR, group.folder);
   mkdirForContainer(groupDir);
   // Like the probe above, the host-owned OAuth renewal awaits ahead of the
@@ -4159,6 +4178,15 @@ export async function runHostAgent(
 
   // 1. 确定工作目录
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
+  // A session that owns a worktree runs only there. A missing or damaged
+  // checkout fails the run; falling back would put its edits in the main
+  // checkout.
+  const sessionWorkdir = resolveSessionWorkingDirectory(input.agentId);
+  if (sessionWorkdir.kind === 'broken') {
+    return hostModeSetupError(
+      sessionWorktreeRunError(sessionWorkdir.worktree, sessionWorkdir.reason),
+    );
+  }
   if (!group.customCwd) {
     fs.mkdirSync(defaultGroupDir, { recursive: true });
     // 确保 group 目录是独立 git root，防止 Claude Code 向上找到父项目的 .git
@@ -4182,7 +4210,10 @@ export async function runHostAgent(
       }
     }
   }
-  let groupDir = group.customCwd || defaultGroupDir;
+  let groupDir =
+    sessionWorkdir.kind === 'worktree'
+      ? sessionWorkdir.cwd
+      : group.customCwd || defaultGroupDir;
   if (!path.isAbsolute(groupDir)) {
     return hostModeSetupError(`工作目录必须是绝对路径：${groupDir}`);
   }
@@ -4199,6 +4230,18 @@ export async function runHostAgent(
   // Runtime allowlist validation for custom CWD (defense-in-depth: web.ts validates at creation,
   // but re-check here in case allowlist was tightened or path was injected via DB)
   if (group.customCwd) {
+    // A worktree lives under data/worktrees; the directory the allowlist
+    // governs is still the workspace's own custom directory.
+    let allowlistTarget = groupDir;
+    if (sessionWorkdir.kind === 'worktree') {
+      try {
+        allowlistTarget = fs.realpathSync(group.customCwd);
+      } catch {
+        return hostModeSetupError(
+          `工作目录不存在或无法解析：${group.customCwd}`,
+        );
+      }
+    }
     const allowlist = loadMountAllowlist();
     if (
       allowlist &&
@@ -4221,7 +4264,7 @@ export async function runHostAgent(
           continue;
         }
 
-        const relative = path.relative(realRoot, groupDir);
+        const relative = path.relative(realRoot, allowlistTarget);
         if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
           allowed = true;
           break;
@@ -4230,7 +4273,7 @@ export async function runHostAgent(
 
       if (!allowed) {
         return hostModeSetupError(
-          `工作目录 ${groupDir} 不在允许的根目录下，请检查 mount-allowlist.json`,
+          `工作目录 ${allowlistTarget} 不在允许的根目录下，请检查 mount-allowlist.json`,
         );
       }
     }
@@ -4306,6 +4349,9 @@ export async function runHostAgent(
     mountUserSkills: hostUserSkillsPolicy.mountUserSkills,
     userSkillsDirOverride: hostUserSkillsPolicy.userSkillsDirOverride,
     managedSkillPolicy: input.agentProfile?.runtimePolicy?.skills,
+    workspaceSkillRoots: resolveWorkspaceSkillRoots(group, {
+      agentId: input.agentId,
+    }),
     pluginSkillLayers: pluginSkillLayers(preparedHostPlugins),
   });
   const hostClaudeContextSync = syncHostClaudeContext(
@@ -4316,7 +4362,11 @@ export async function runHostAgent(
     hostClaudeContextSync.claudeMdStatus;
   hostClaudeContextPlan.audit.warnings = hostClaudeContextSync.warnings;
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = resolveRuntimeMcpServers(group, input.agentProfile);
+  const hostMcpServers = resolveRuntimeMcpServers(
+    group,
+    input.agentProfile,
+    groupDir,
+  );
   ensureSettingsJson(settingsFile, hostMcpServers, {
     replaceMcpServers: true,
     baseSettings: loadHostClaudeSettings(hostClaudeContextPlan),

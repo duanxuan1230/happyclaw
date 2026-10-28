@@ -36,6 +36,11 @@ import {
 } from '../group-acl.js';
 import { MAX_GROUP_NAME_LEN } from '../group-constants.js';
 import {
+  findDirtySessionWorktrees,
+  removeSessionWorktree,
+} from '../session-worktree.js';
+import { listSessionWorktreesByFolder } from '../session-worktree-store.js';
+import {
   clearSessionChannelOwner,
   getRegisteredGroup,
   setRegisteredGroup,
@@ -636,6 +641,116 @@ function stageWorkspaceResetForGroup(folder: string): StagedWorkspaceReset {
   };
 }
 
+type DirtyWorktree = Awaited<
+  ReturnType<typeof findDirtySessionWorktrees>
+>[number];
+
+class DirtyWorktreesError extends Error {
+  constructor(readonly dirty: DirtyWorktree[]) {
+    super('Session worktrees have uncommitted changes');
+    this.name = 'DirtyWorktreesError';
+  }
+}
+
+function dirtyWorktreesResponse(
+  c: Context<{ Variables: Variables }>,
+  dirty: DirtyWorktree[],
+): Response {
+  const files = dirty.reduce((sum, item) => sum + item.dirtyFiles, 0);
+  return c.json(
+    {
+      error: `有 ${dirty.length} 个会话的 worktree 存在 ${files} 个未提交的改动，确认后才会移除（分支会保留）`,
+      code: 'WORKTREE_DIRTY',
+      dirty_worktrees: dirty.map((item) => ({
+        session_id: item.agentId,
+        branch: item.branch,
+        changed_files: item.dirtyFiles,
+      })),
+    },
+    409,
+  );
+}
+
+/**
+ * Deleting or rebuilding a workspace removes its sessions' worktrees. Until
+ * the caller confirms with `force_worktrees=true`, uncommitted changes in
+ * any of them refuse the operation with 409.
+ */
+async function workspaceWorktreeBlock(
+  c: Context<{ Variables: Variables }>,
+  folder: string,
+  force: boolean,
+): Promise<Response | null> {
+  if (force) return null;
+  const records = listSessionWorktreesByFolder(folder);
+  if (records.length === 0) return null;
+  try {
+    const dirty = await findDirtySessionWorktrees(records);
+    return dirty.length > 0 ? dirtyWorktreesResponse(c, dirty) : null;
+  } catch (error) {
+    logger.error({ err: error, folder }, 'Failed to inspect session worktrees');
+    return c.json({ error: '无法检查会话 worktree 的改动，操作未执行' }, 500);
+  }
+}
+
+/** Drop the worktrees of a workspace whose sessions are gone; branches stay. */
+async function releaseWorkspaceWorktrees(folder: string): Promise<void> {
+  for (const record of listSessionWorktreesByFolder(folder)) {
+    try {
+      await removeSessionWorktree(record.agent_id, { force: true });
+    } catch (error) {
+      logger.warn(
+        { err: error, folder, worktreePath: record.worktree_path },
+        'Failed to remove the worktree of a deleted session',
+      );
+    }
+  }
+}
+
+/**
+ * Other Host workspaces of the same owner that already work in this exact
+ * directory. Creation is not blocked: concurrent sessions are allowed, the
+ * owner is only told their edits may collide.
+ */
+function sharedCustomCwdWarnings(
+  ownerId: string,
+  customCwd: string | undefined,
+  excludeJid: string,
+): Array<{
+  code: 'shared_custom_cwd';
+  message: string;
+  workspaces: Array<{ jid: string; name: string }>;
+}> {
+  if (!customCwd) return [];
+  const real = (dir: string) => {
+    try {
+      return fs.realpathSync(dir);
+    } catch {
+      return path.resolve(dir);
+    }
+  };
+  const target = real(customCwd);
+  const workspaces = Object.entries(getAllRegisteredGroups())
+    .filter(
+      ([jid, group]) =>
+        jid !== excludeJid &&
+        jid.startsWith('web:') &&
+        group.created_by === ownerId &&
+        isHostExecutionGroup(group) &&
+        !!group.customCwd &&
+        real(group.customCwd) === target,
+    )
+    .map(([jid, group]) => ({ jid, name: group.name }));
+  if (workspaces.length === 0) return [];
+  return [
+    {
+      code: 'shared_custom_cwd',
+      message: `工作区「${workspaces.map((w) => w.name).join('」「')}」已在使用这个目录。多个会话同时运行时改动可能互相覆盖；需要并行开发时，可以为会话开启独立 worktree。`,
+      workspaces,
+    },
+  ];
+}
+
 function toPublicContainerEnvForUser(
   config: ReturnType<typeof getContainerEnvConfig>,
   user: AuthUser,
@@ -1232,6 +1347,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     success: true,
     jid,
     group: responseGroup,
+    warnings: sharedCustomCwdWarnings(authUser.id, group.customCwd, jid),
   });
 });
 
@@ -1353,6 +1469,22 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       return c.json(
         { error: 'Only web workspaces can change process visibility' },
         403,
+      );
+    }
+    // Session worktrees are host checkouts; a container run would put those
+    // sessions back in the shared workspace directory.
+    if (
+      execution_mode === 'container' &&
+      isHostExecutionGroup(existing) &&
+      listSessionWorktreesByFolder(existing.folder).length > 0
+    ) {
+      return c.json(
+        {
+          error:
+            '该工作区有使用独立 worktree 的会话，删除这些会话后才能切换到 Docker 执行',
+          code: 'WORKTREE_SESSIONS_EXIST',
+        },
+        409,
       );
     }
   }
@@ -1884,6 +2016,13 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
       409,
     );
   }
+  const forceWorktrees = c.req.query('force_worktrees') === 'true';
+  const initialWorktreeBlock = await workspaceWorktreeBlock(
+    c,
+    existing.folder,
+    forceWorktrees,
+  );
+  if (initialWorktreeBlock) return initialWorktreeBlock;
 
   // Wait for container to fully stop before cleaning up its files.
   // Must include sibling JIDs (same folder) AND descendant virtual JIDs —
@@ -1945,6 +2084,13 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
         409,
       );
     }
+    // Runners were still writing during the first check.
+    const freshWorktreeBlock = await workspaceWorktreeBlock(
+      c,
+      freshExisting.folder,
+      forceWorktrees,
+    );
+    if (freshWorktreeBlock) return freshWorktreeBlock;
 
     const channelUpdates: Array<{ jid: string; group: RegisteredGroup }> = [];
     deleteGroupData(jid, freshExisting.folder, {
@@ -1976,6 +2122,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
     deps.setLastAgentTimestamp(jid, { timestamp: '', id: '' });
 
     removeFlowArtifacts(freshExisting.folder);
+    await releaseWorkspaceWorktrees(freshExisting.folder);
 
     logger.info(
       {
@@ -2648,6 +2795,14 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     );
   }
 
+  const forceWorktrees = c.req.query('force_worktrees') === 'true';
+  const worktreeBlock = await workspaceWorktreeBlock(
+    c,
+    group.folder,
+    forceWorktrees,
+  );
+  if (worktreeBlock) return worktreeBlock;
+
   // Collect all JIDs sharing the same folder (e.g., web:main + feishu groups)
   const siblingJids = getJidsByFolder(group.folder);
   const workspaceJids = siblingJids.filter((candidate) =>
@@ -2704,6 +2859,13 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
         'Scheduler cannot confirm task process shutdown; workspace not rebuilt',
       );
     }
+    // Runners were still writing during the first check.
+    if (!forceWorktrees) {
+      const dirty = await findDirtySessionWorktrees(
+        listSessionWorktreesByFolder(group.folder),
+      );
+      if (dirty.length > 0) throw new DirtyWorktreesError(dirty);
+    }
 
     // Files are moved aside rather than deleted. The SQLite transaction below
     // either commits the whole rebuild or leaves the database untouched, in
@@ -2724,6 +2886,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
         'Workspace rebuild committed but backup cleanup was incomplete',
       );
     }
+    await releaseWorkspaceWorktrees(group.folder);
 
     // Refresh process-local projections only after the durable commit. A cache
     // refresh failure must not turn a successfully committed rebuild into a
@@ -2797,6 +2960,9 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
           ? new AggregateError([rollbackError, error])
           : error;
       }
+    }
+    if (err instanceof DirtyWorktreesError && !rollbackError) {
+      return dirtyWorktreesResponse(c, err.dirty);
     }
     logger.error(
       {
