@@ -17,6 +17,11 @@ import {
 import type { AuthUser } from '../types.js';
 import { isBillingEnabled } from '../billing.js';
 import { VersionedTtlCache } from '../versioned-ttl-cache.js';
+import { getProviders } from '../runtime-config.js';
+import {
+  getUsageCacheRates,
+  type UsageCacheRateRow,
+} from '../runtime-state-store.js';
 
 const usage = new Hono<{ Variables: Variables }>();
 usage.use('*', authMiddleware);
@@ -202,6 +207,33 @@ usage.get('/stats', (c) => {
       to: window.to,
       activeDays: data.summary.activeDays,
     },
+  });
+});
+
+/**
+ * Prompt-cache hit rate by day, model and connection, under the same filters
+ * as /stats. The rate is cache_read ÷ (input + cache_creation + cache_read)
+ * in Anthropic usage semantics, with the raw token counts alongside it.
+ */
+usage.get('/cache', (c) => {
+  const user = c.get('user') as AuthUser;
+  const { window, filters } = queryContext(c, user);
+  const rates = getUsageCacheRates(filters);
+  const names = new Map(
+    getProviders().map((provider) => [provider.id, provider.name]),
+  );
+  const rate = ({ key: _key, ...row }: UsageCacheRateRow) => row;
+  return c.json({
+    window,
+    semantics: 'anthropic',
+    summary: rates.summary,
+    daily: rates.daily.map((row) => ({ date: row.key, ...rate(row) })),
+    models: rates.models.map((row) => ({ model: row.key, ...rate(row) })),
+    connections: rates.connections.map((row) => ({
+      connectionId: row.key || null,
+      name: row.key ? (names.get(row.key) ?? null) : null,
+      ...rate(row),
+    })),
   });
 });
 

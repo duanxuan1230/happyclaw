@@ -95,6 +95,7 @@ import {
   setSessionModel,
   setSessionProviderId,
 } from './db.js';
+import { recordUsageEventConnection } from './runtime-state-store.js';
 import {
   chatGptDefaultModel,
   chatGptLaunchModel,
@@ -909,6 +910,27 @@ function applyKnownProviderFailureDisposition(
   if (terminal) {
     const notice = resolveTerminalProviderFailureNotice(output);
     if (notice) output.providerFailureNotice = notice;
+  }
+}
+
+/**
+ * Remember which connection served a usage event, so cache hit rates can be
+ * read per connection. The usage row itself is written by the caller under
+ * the same event id.
+ */
+function recordUsageConnection(
+  output: ContainerOutput,
+  profileId: string | null,
+): void {
+  const eventId =
+    output.streamEvent?.eventType === 'usage'
+      ? output.streamEvent.usage?.eventId
+      : undefined;
+  if (!profileId || !eventId || !isDatabaseInitialized()) return;
+  try {
+    recordUsageEventConnection(eventId, profileId);
+  } catch (err) {
+    logger.warn({ err, eventId }, 'Failed to record the usage connection');
   }
 }
 
@@ -3499,6 +3521,7 @@ export async function runContainerAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, selectedProfileId);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
@@ -4848,6 +4871,7 @@ export async function runHostAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, hostSelectedProfileId);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
