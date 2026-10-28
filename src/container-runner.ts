@@ -3217,22 +3217,19 @@ export async function runContainerAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  // Worktrees are host checkouts; a container would run this session in the
+  // shared workspace directory instead, so refuse rather than substitute.
+  const sessionWorktree = getSessionWorktree(input.agentId);
+  if (sessionWorktree) {
+    const message = `会话使用独立 worktree（分支 ${sessionWorktree.branch}），只能在宿主机模式运行，本次运行已停止。`;
+    return { status: 'error', result: message, error: message };
+  }
+
   // Probed per launch as before, but asynchronously and ahead of provider
   // selection, so everything from selection to spawn stays one synchronous
   // step while the docker CLI round trip no longer blocks the event loop.
   const hostIdentity = await detectContainerHostIdentityAsync();
   const sessionAgentId = input.sessionAgentId ?? input.agentId;
-
-  // Worktrees are host checkouts; a container would run this session in the
-  // shared workspace directory instead, so refuse rather than substitute.
-  const sessionWorktree = getSessionWorktree(input.agentId);
-  if (sessionWorktree) {
-    const message = sessionWorktreeRunError(
-      sessionWorktree,
-      '独立 worktree 只能在宿主机模式运行',
-    );
-    return { status: 'error', result: message, error: message };
-  }
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
   mkdirForContainer(groupDir);
