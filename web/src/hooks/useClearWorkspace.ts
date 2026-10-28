@@ -10,7 +10,7 @@ import type { GroupInfo } from '../types';
  * data/groups/<folder> is emptied and session worktrees are removed (their
  * branches stay), but a Host workspace's custom directory is never touched.
  */
-function rebuildMessage(
+export function workspaceRebuildMessage(
   name: string,
   group: Pick<GroupInfo, 'execution_mode' | 'custom_cwd'> | undefined,
 ): string {
@@ -37,7 +37,7 @@ export function useClearWorkspace() {
   const clearGroup = useChatStore((s) =>
     clearState.jid ? s.groups[clearState.jid] : undefined,
   );
-  const clearMessage = rebuildMessage(clearState.name, clearGroup);
+  const clearMessage = workspaceRebuildMessage(clearState.name, clearGroup);
 
   const openClear = (jid: string, name: string) =>
     setClearState({ open: true, jid, name });

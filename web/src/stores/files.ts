@@ -116,6 +116,8 @@ export function formatUploadRetryStatus(
  * files live there. Absent means the workspace directory.
  */
 const fileScopeSessions = new Map<string, string>();
+/** Workspaces whose listing was requested, so a scope change refreshes it. */
+const listedWorkspaces = new Set<string>();
 
 /** `/api/groups/:jid/<suffix>` in the workspace's current file scope. */
 export function workspaceFilesUrl(
@@ -213,6 +215,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   cancelUpload: () => activeUploadController?.abort(),
 
   loadFiles: async (jid: string, path?: string) => {
+    listedWorkspaces.add(jid);
     set({ loading: true, error: null });
     try {
       const targetPath =
@@ -449,7 +452,6 @@ export const useFileStore = create<FileState>((set, get) => ({
     if ((fileScopeSessions.get(jid) ?? null) === agentId) return;
     if (agentId) fileScopeSessions.set(jid, agentId);
     else fileScopeSessions.delete(jid);
-    const wasLoaded = jid in get().files;
     set((s) => {
       const files = { ...s.files };
       const currentPath = { ...s.currentPath };
@@ -457,7 +459,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       delete currentPath[jid];
       return { files, currentPath };
     });
-    if (wasLoaded) void get().loadFiles(jid, '');
+    if (listedWorkspaces.has(jid)) void get().loadFiles(jid, '');
   },
 
   saveFileContent: async (jid: string, filePath: string, content: string) => {

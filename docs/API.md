@@ -22,6 +22,7 @@
 | `/api/groups`                      | `src/routes/agents.ts`           | Runtime Session 与渠道绑定    |
 | `/api/groups`                      | `src/routes/turn-traces.ts`      | 回合的思考摘要与执行轨迹      |
 | `/api/groups`                      | `src/routes/workspace-config.ts` | 项目 Skills/MCP               |
+| `/api/groups`                      | `src/routes/git-review.ts`       | 代码改动与会话 worktree       |
 | `/api/workspaces`                  | `src/routes/workspaces.ts`       | Agent-first 工作区投影        |
 | `/api/agent-profiles`              | `src/routes/agent-profiles.ts`   | 产品级 Agent                  |
 | `/api/channel-accounts`            | `src/routes/channel-accounts.ts` | 多渠道账号                    |
@@ -79,7 +80,10 @@ Public：
 
 ## 工作区、消息和运行控制
 
-- `GET|POST /api/groups`
+- `GET|POST /api/groups`；`POST` 的响应带 `warnings`，`custom_cwd` 与同一用户的其他
+  宿主机工作区目录相同时为
+  `[{"code": "shared_custom_cwd", "message": "…", "workspaces": [{"jid", "name"}]}]`，
+  不阻止创建
 - `PATCH|DELETE /api/groups/:jid`
 - `PATCH /api/groups/:jid/agent-profile`
 - `POST /api/groups/:jid/stop`
@@ -88,9 +92,10 @@ Public：
 - `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型与推理档位选择
 - `GET /api/groups/:jid/context-usage`，会话当前的上下文占用（输入框旁的圆环）
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
-  Runtime Session、子对话、工作目录及 Workspace Memory（含版本历史和
-  Home Owner Profile），关联定时任务停止并移入回收站；保留工作区外壳、
-  `data/extra/` 和任务运行历史
+  Runtime Session、子对话、`data/groups/{folder}` 工作目录、会话 worktree 目录及
+  Workspace Memory（含版本历史和 Home Owner Profile），关联定时任务停止并移入回收站；
+  保留工作区外壳、`data/extra/`、任务运行历史、worktree 分支和宿主机模式的自定义
+  工作目录
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
 - `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要、执行轨迹与有序步骤
@@ -368,6 +373,85 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 
 路径必须位于目标工作区允许范围内；系统目录、路径穿越和不安全符号链接会被拒绝。
 
+文件根与该会话运行时的工作目录一致：宿主机模式的自定义目录、否则
+`data/groups/{folder}`。以上接口都接受查询参数 `agentId`（Runtime Session ID，`main`
+或缺省为主会话）；会话有独立 worktree 时以 worktree 为根。`agentId` 不属于该工作区时
+返回 404。
+
+## 代码改动与会话 worktree
+
+- `GET /api/groups/:jid/git/status?agentId=`
+- `GET /api/groups/:jid/git/diff?agentId=&path=&orig_path=`
+- `GET /api/groups/:jid/git/worktree-support`
+- `GET /api/groups/:jid/workdir/peers?agentId=`
+
+访问检查与文件接口相同：看不到的工作区返回 404，宿主机工作区需要宿主机执行权限
+（403）。git 只对宿主机模式的工作区执行，命令使用参数数组、有超时与输出上限，不访问
+网络。Docker 工作区的仓库配置和 hook 由容器内的 Agent 控制，不在宿主机上执行。
+
+`git/status` 读取会话的 worktree，或工作目录所在的仓库（`data/groups/{folder}` 只认它
+自己的仓库），返回 200：
+
+```json
+{
+  "state": "ok",
+  "root": "/srv/repo",
+  "worktree": null,
+  "branch": "main",
+  "head": "3f2c…",
+  "upstream": "origin/main",
+  "ahead": 1,
+  "behind": 0,
+  "files": [
+    {
+      "path": "src/app.ts",
+      "status": "modified",
+      "index_status": ".",
+      "worktree_status": "M",
+      "additions": 12,
+      "deletions": 3,
+      "binary": false
+    },
+    {
+      "path": "new.txt",
+      "orig_path": "old.txt",
+      "status": "renamed",
+      "index_status": "R",
+      "worktree_status": ".",
+      "additions": 0,
+      "deletions": 0,
+      "binary": false
+    }
+  ],
+  "total_files": 2,
+  "truncated": false
+}
+```
+
+`status` 取值 `modified`、`added`、`deleted`、`renamed`、`copied`、`type_changed`、
+`untracked`、`conflicted`；`+/-` 为相对 HEAD（暂存与未暂存合计）的行数，未跟踪文件按
+行数计入新增，二进制或过大时为 `null`。最多返回 1000 个文件，原始输出上限 2 MB，超出时
+`truncated: true`。无法读取时同样返回 200：`{"state": "unavailable", "reason":
+"container_mode" | "worktree_broken", "message": "…"}`、`{"state": "not_git_repo",
+"message": "工作目录不是 git 仓库"}` 或 `{"state": "error", "error": "…"}`，都带
+`worktree`。
+
+`git/diff` 返回单个文件相对 HEAD 的 unified diff，未跟踪文件与 `/dev/null` 比较：
+`{"state": "ok", "path": "src/app.ts", "diff": "diff --git …", "binary": false,
+"truncated": false, "untracked": false}`。输出上限 512 KB（`truncated: true`）；二进制
+文件 `binary: true`。`path`、`orig_path`（重命名的原路径）必须是仓库内的相对路径：
+绝对路径、`..`、NUL 和经符号链接逃出仓库的路径返回 400。
+
+`git/worktree-support` 返回 `{"available": true}`，或
+`{"available": false, "reason": "container_mode" | "directory_missing" |
+"not_git_repo" | "repo_has_no_commits", "message": "…"}`。
+
+`workdir/peers` 列出与该会话共用工作目录、且正在运行一轮的其他会话（同工作区未用
+worktree 的会话、主会话、定时任务，或自定义目录相同的其他工作区），只提示不限制：
+`{"peers": [{"workspace_jid": "web:…", "workspace_name": "Repo", "kind": "main" |
+"session" | "task", "session_id": null, "session_name": null}], "hidden_count": 0}`；
+调用者看不到的工作区只计入 `hidden_count`。
+
 ## Runtime Session 与渠道绑定
 
 推荐使用 `/sessions` 语义：
@@ -395,6 +479,19 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 
 - `POST /api/groups/:jid/sessions`（及 `/agents`）只接受工作区 `web:*` JID；IM 聊天
   JID 返回 400，IM 聊天应绑定到 Session 而不是在其下创建 Session。
+- 请求体可带 `worktree: true`：宿主机模式、工作目录是有提交的 git 仓库时，宿主在
+  `data/worktrees/{folder}/{sessionId}` 以当前 HEAD 新建分支 `happyclaw/<短 ID>` 的
+  worktree，该会话此后每次运行都以它为工作目录（工作区在仓库子目录时进入同一子目录）。
+  不满足条件返回 400 `{"code": "WORKTREE_UNAVAILABLE", "reason": …}`，不创建会话；
+  git 失败返回 500 `WORKTREE_CREATE_FAILED`。响应与 `GET` 列表的会话带
+  `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
+  或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
+- 删除带 worktree 的会话会移除 worktree 目录、保留分支；有未提交改动（含未跟踪文件）
+  时返回 409 `{"code": "WORKTREE_DIRTY", "worktree": {"branch", "changed_files"}}`，
+  带 `?force_worktree=true` 确认后才丢弃。删除工作区和 `clear-history` 同理，409 带
+  `dirty_worktrees: [{"session_id", "branch", "changed_files"}]`，确认参数为
+  `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
+  （409 `WORKTREE_SESSIONS_EXIST`）。
 - 工作区绑定只接受原生话题群（飞书话题群或 Telegram Forum）。
 - Runtime Session 绑定接受私聊和普通群，`sessionId=main` 表示该 Workspace 的主会话。
 - 话题群使用 `thread_map`，每个原生话题映射独立 Session；普通群的 @ 策略不改变绑定层级。

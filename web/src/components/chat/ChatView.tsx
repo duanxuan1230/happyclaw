@@ -28,6 +28,9 @@ import {
 } from './composer/EmptyConversation';
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
+import { SharedWorkdirNotice, useWorkdirPeers } from './SharedWorkdirNotice';
+import { WorktreeBranchTag } from './WorktreeBranchTag';
+import { useFileStore } from '../../stores/files';
 import { RunStatusBar } from './RunStatusBar';
 import { ConversationContextUsage } from './composer/ContextUsageRing';
 import { ActionSheet, type SheetAction } from './composer/ActionSheet';
@@ -45,6 +48,7 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  GitCompare,
   Link,
   MoreHorizontal,
   Paintbrush,
@@ -90,6 +94,11 @@ const lazyContainerEnvPanel = preloadedComponent(
     import('./ContainerEnvPanel').then((m) => ({
       default: m.ContainerEnvPanel,
     })),
+  Nothing,
+);
+const lazyReviewPanel = preloadedComponent(
+  () =>
+    import('../review/ReviewPanel').then((m) => ({ default: m.ReviewPanel })),
   Nothing,
 );
 const lazyImBindingDialog = preloadedComponent(
@@ -139,6 +148,7 @@ const lazyInteractionModeDialog = preloadedComponent(
 );
 const FilePanel = lazyFilePanel.Component;
 const ContainerEnvPanel = lazyContainerEnvPanel.Component;
+const ReviewPanel = lazyReviewPanel.Component;
 const ImBindingDialog = lazyImBindingDialog.Component;
 const SessionSidebar = lazySessionSidebar.Component;
 const WorkspaceInteractionModeDialog = lazyInteractionModeDialog.Component;
@@ -193,9 +203,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     if (panelOpen) setPanelEverOpened(true);
   }, [panelOpen]);
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
-  const [contextPanelView, setContextPanelView] = useState<'files' | 'env'>(
-    'files',
-  );
+  const [contextPanelView, setContextPanelView] = useState<
+    'files' | 'env' | 'review'
+  >('files');
 
   // The nav rows eat ~11rem of an 80dvh sheet — a third of the file list on a
   // 390x844 viewport. Fold them into a single icon bar once the pane scrolls
@@ -234,6 +244,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       preloadWhenIdle(
         lazyFilePanel.preload,
         lazyContainerEnvPanel.preload,
+        lazyReviewPanel.preload,
         lazyImBindingDialog.preload,
         lazySessionSidebar.preload,
         lazyInteractionModeDialog.preload,
@@ -390,6 +401,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       setContextPanelView('files');
     }
   }, [canModifyWorkspaceConfig, contextPanelView]);
+  // Git runs only for Host workspaces (see src/routes/git-review.ts).
+  const isHostWorkspace = group?.execution_mode === 'host';
+  useEffect(() => {
+    if (!isHostWorkspace && contextPanelView === 'review') {
+      setContextPanelView('files');
+    }
+  }, [isHostWorkspace, contextPanelView]);
 
   // Fetch IM connection status for home groups
   const isOwnHome =
@@ -567,6 +585,16 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const isConversationTab = activeAgent?.kind === 'conversation';
   const sessionTab = !!activeAgentTab && isConversationTab;
   const composerAgentId = sessionTab ? activeAgentTab : null;
+  // A session with its own worktree works there: files, the @ picker and
+  // uploads follow it.
+  const activeWorktree = sessionTab ? (activeAgent?.worktree ?? null) : null;
+  const worktreeSessionId = activeWorktree ? activeAgentTab : null;
+  useEffect(() => {
+    useFileStore.getState().setFileScopeSession(groupJid, worktreeSessionId);
+  }, [groupJid, worktreeSessionId]);
+  const workdirPeers = useWorkdirPeers(groupJid, composerAgentId, !!group);
+  const showWorkdirNotice =
+    workdirPeers.peers.length + workdirPeers.hiddenCount > 0;
   // Memoized so the memoized composer does not re-render with a fresh element.
   const modelSelector = useMemo(
     () => (
@@ -1083,6 +1111,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       chevron: true,
       onClick: () => setContextPanelView('files'),
     },
+    ...(isHostWorkspace
+      ? [
+          {
+            key: 'review',
+            icon: GitCompare,
+            label: '代码改动',
+            current: contextPanelView === 'review',
+            chevron: true,
+            onClick: () => setContextPanelView('review'),
+          },
+        ]
+      : []),
     ...(canUseTerminal
       ? [
           {
@@ -1188,6 +1228,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         {contextPanelView === 'env' && canModifyWorkspaceConfig ? (
           <ContainerEnvPanel groupJid={groupJid} />
+        ) : contextPanelView === 'review' && isHostWorkspace ? (
+          <ReviewPanel groupJid={groupJid} agentId={composerAgentId} />
         ) : (
           <FilePanel groupJid={groupJid} />
         )}
@@ -1262,8 +1304,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           'relative min-w-0 flex-1 flex-col phone:[--chat-header-height:3.5rem]',
           mobileSessionsVisible ? 'hidden lg:flex' : 'flex',
           // A phone's header floats over the conversation; the list keeps
-          // that much room on top (the channel banner takes it instead).
-          !showImBanner && 'phone:[--chat-top-inset:var(--chat-header-height)]',
+          // that much room on top (a banner under it takes it instead).
+          !showImBanner &&
+            !showWorkdirNotice &&
+            'phone:[--chat-top-inset:var(--chat-header-height)]',
         )}
       >
         {/* Header. On a phone it is transparent over the conversation, which
@@ -1311,6 +1355,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   <h2 className="truncate px-1 font-medium text-foreground phone:font-semibold">
                     {currentContextName}
                   </h2>
+                  {activeWorktree && (
+                    <WorktreeBranchTag
+                      worktree={activeWorktree}
+                      className="max-w-48 phone:hidden"
+                    />
+                  )}
                 </>
               )}
             </nav>
@@ -1457,6 +1507,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               }}
             />
           </div>
+        )}
+        {showWorkdirNotice && (
+          <SharedWorkdirNotice
+            groupJid={groupJid}
+            peers={workdirPeers.peers}
+            hiddenCount={workdirPeers.hiddenCount}
+            className={cn(!showImBanner && 'phone:mt-(--chat-header-height)')}
+          />
         )}
 
         {/* Main conversation canvas */}
