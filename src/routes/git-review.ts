@@ -127,15 +127,29 @@ function gitErrorPayload(error: unknown): { state: 'error'; error: string } {
   return { state: 'error', error: message.slice(0, 500) };
 }
 
+function parseReviewScopeQuery(
+  raw: string | undefined,
+): 'working' | 'branch' | null {
+  if (raw === undefined || raw === '' || raw === 'working') return 'working';
+  if (raw === 'branch') return 'branch';
+  return null;
+}
+
 gitReviewRoutes.get('/:jid/git/status', authMiddleware, async (c) => {
   c.header('Cache-Control', 'private, no-store');
   const scope = resolveReviewScope(c);
   if (scope instanceof Response) return scope;
+  const reviewScope = parseReviewScopeQuery(c.req.query('scope'));
+  if (!reviewScope) return c.json({ error: 'Invalid scope' }, 400);
   const root = await resolveReviewRoot(scope);
-  const worktree = toSessionWorktreePayload(getSessionWorktree(scope.agentId));
+  const storedWorktree = getSessionWorktree(scope.agentId);
+  const worktree = toSessionWorktreePayload(storedWorktree);
   if (root.state !== 'ok') return c.json({ ...root, worktree });
   try {
-    const status = await readGitStatus(root.root);
+    const status = await readGitStatus(root.root, {
+      baseCommit: storedWorktree?.base_commit ?? null,
+      scope: reviewScope,
+    });
     return c.json({ state: 'ok', root: root.root, worktree, ...status });
   } catch (error) {
     logger.warn({ err: error, root: root.root }, 'git status failed');
@@ -149,13 +163,20 @@ gitReviewRoutes.get('/:jid/git/diff', authMiddleware, async (c) => {
   if (scope instanceof Response) return scope;
   const filePath = c.req.query('path');
   if (!filePath) return c.json({ error: 'path is required' }, 400);
+  const reviewScope = parseReviewScopeQuery(c.req.query('scope'));
+  if (!reviewScope) return c.json({ error: 'Invalid scope' }, 400);
   const root = await resolveReviewRoot(scope);
   if (root.state !== 'ok') return c.json(root);
+  const storedWorktree = getSessionWorktree(scope.agentId);
   try {
     const diff = await readGitFileDiff(
       root.root,
       filePath,
       c.req.query('orig_path') || undefined,
+      {
+        baseCommit: storedWorktree?.base_commit ?? null,
+        scope: reviewScope,
+      },
     );
     return c.json({ state: 'ok', ...diff });
   } catch (error) {

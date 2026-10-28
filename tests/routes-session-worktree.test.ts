@@ -343,6 +343,49 @@ describe('Review panel and file panel roots', () => {
     expect(mainFiles.body.files.map((f: any) => f.name)).not.toContain(
       'only-here.txt',
     );
+
+    // Committing in the worktree leaves working scope empty, while scope=branch
+    // shows committed changes since base_commit and baseAhead=1.
+    git(worktree.worktree_path, 'add', '.');
+    git(worktree.worktree_path, 'commit', '-qm', 'worktree commit');
+
+    const workingAfterCommit = await call(
+      gitRoutes,
+      `/${enc(jid)}/git/status?agentId=${sessionId}`,
+    );
+    expect(workingAfterCommit.body).toMatchObject({
+      state: 'ok',
+      baseCommit: worktree.base_commit,
+      baseAhead: 1,
+      files: [],
+      total_files: 0,
+    });
+
+    const branchAfterCommit = await call(
+      gitRoutes,
+      `/${enc(jid)}/git/status?agentId=${sessionId}&scope=branch`,
+    );
+    expect(branchAfterCommit.body).toMatchObject({
+      state: 'ok',
+      baseCommit: worktree.base_commit,
+      baseAhead: 1,
+      scope: 'branch',
+      total_files: 2,
+    });
+    expect(branchAfterCommit.body.files.map((f: any) => f.path).sort()).toEqual(
+      ['README.md', 'only-here.txt'],
+    );
+
+    const branchDiff = await call(
+      gitRoutes,
+      `/${enc(jid)}/git/diff?agentId=${sessionId}&path=only-here.txt&scope=branch`,
+    );
+    expect(branchDiff.body).toMatchObject({
+      state: 'ok',
+      path: 'only-here.txt',
+      untracked: false,
+    });
+    expect(branchDiff.body.diff).toContain('+x');
   });
 
   test('explains unsupported workspaces instead of failing', async () => {

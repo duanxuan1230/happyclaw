@@ -49,16 +49,55 @@ export interface GitRunResult {
  * data/groups/<folder>/.git/config, and HappyClaw must never execute what it
  * planted, so every call but `worktree add` turns these off.
  */
-const READ_ONLY_GIT_ARGS = [
+export const SAFE_GIT_READ_ARGS = [
   '--no-optional-locks',
   '-c',
   'core.fsmonitor=false',
   '-c',
   'core.hooksPath=/dev/null',
+  '-c',
+  'status.submodulesummary=false',
+  '-c',
+  'diff.submodule=short',
 ];
+
+const READ_ONLY_GIT_ARGS = SAFE_GIT_READ_ARGS;
 
 /** Diff options that keep textconv and external diff drivers from running. */
 export const NO_DIFF_DRIVERS = ['--no-textconv', '--no-ext-diff'];
+
+export interface GitConfigEntry {
+  key: string;
+  value: string;
+}
+
+function parseConfigEntries(
+  config: ReadonlyArray<string | GitConfigEntry> | undefined,
+): GitConfigEntry[] {
+  if (!config || config.length === 0) return [];
+  const entries: GitConfigEntry[] = [];
+  for (let i = 0; i < config.length; i++) {
+    const item = config[i];
+    if (typeof item === 'object' && item !== null) {
+      entries.push({ key: item.key, value: item.value });
+      continue;
+    }
+    const raw = item === '-c' ? config[++i] : item;
+    if (typeof raw !== 'string') continue;
+    // Filter subsection names may contain `=` (`[filter "a=b"]`), while the
+    // neutralized values (`cat`, ``, `false`) never do. Splitting at the last
+    // `=` preserves arbitrary `=` characters inside the subsection name.
+    const eq = raw.startsWith('filter.')
+      ? raw.lastIndexOf('=')
+      : raw.indexOf('=');
+    if (eq <= 0) continue;
+    entries.push({
+      key: raw.slice(0, eq),
+      value: raw.slice(eq + 1),
+    });
+  }
+  return entries;
+}
 
 export async function runGit(
   cwd: string,
@@ -68,8 +107,8 @@ export async function runGit(
     maxBytes?: number;
     /** Exit codes treated as success (git diff --no-index exits 1). */
     okExitCodes?: number[];
-    /** Extra `-c` pairs, e.g. from neutralFilterArgs. */
-    config?: string[];
+    /** Extra config overrides, e.g. from neutralFilterArgs. */
+    config?: ReadonlyArray<string | GitConfigEntry>;
     /**
      * Keep git's default behaviour (hooks, fsmonitor) for a write the user
      * asked for in their own repository: `worktree add`.
@@ -80,12 +119,20 @@ export async function runGit(
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? GIT_STATUS_MAX_BYTES;
   const okExitCodes = options.okExitCodes ?? [0];
+  const configEntries = parseConfigEntries(options.config);
+  const configEnv: Record<string, string> = {};
+  if (configEntries.length > 0) {
+    configEnv.GIT_CONFIG_COUNT = String(configEntries.length);
+    for (let i = 0; i < configEntries.length; i++) {
+      configEnv[`GIT_CONFIG_KEY_${i}`] = configEntries[i].key;
+      configEnv[`GIT_CONFIG_VALUE_${i}`] = configEntries[i].value;
+    }
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(
       'git',
       [
         ...(options.trustRepoConfig ? [] : READ_ONLY_GIT_ARGS),
-        ...(options.config ?? []),
         '-c',
         'core.quotePath=false',
         '-C',
@@ -97,6 +144,7 @@ export async function runGit(
           ...process.env,
           GIT_TERMINAL_PROMPT: '0',
           GIT_OPTIONAL_LOCKS: '0',
+          ...configEnv,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
@@ -163,23 +211,31 @@ export async function runGit(
   });
 }
 
+const GIT_FILTER_CONFIG_MAX_BYTES = 512 * 1024;
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
 /**
- * `-c` overrides that turn every configured filter driver (LFS included)
+ * Config overrides that turn every configured filter driver (LFS included)
  * into a no-op, so comparing work-tree files never runs a clean, smudge or
  * process command from the repository's config. Reading config runs nothing.
+ * Fails closed when filter config output is truncated or git config fails.
  */
 export async function neutralFilterArgs(cwd: string): Promise<string[]> {
-  let keys: string[];
-  try {
-    const result = await runGit(
-      cwd,
-      ['config', '--null', '--name-only', '--get-regexp', '^filter\\.'],
-      { maxBytes: 64 * 1024, okExitCodes: [0, 1] },
+  const result = await runGit(
+    cwd,
+    ['config', '--null', '--name-only', '--get-regexp', '^filter\\.'],
+    { maxBytes: GIT_FILTER_CONFIG_MAX_BYTES, okExitCodes: [0, 1] },
+  );
+  if (result.truncated || (result.exitCode !== 0 && result.exitCode !== 1)) {
+    throw new GitCommandError(
+      result.truncated
+        ? `git config filter scan exceeded ${GIT_FILTER_CONFIG_MAX_BYTES} bytes`
+        : `git config exited with ${result.exitCode}`,
+      result.exitCode,
+      '',
     );
-    keys = result.stdout.split('\0').filter(Boolean);
-  } catch {
-    return [];
   }
+  const keys = result.stdout.split('\0').filter(Boolean);
   const names = new Set(
     keys
       .filter((key) => key.lastIndexOf('.') > 'filter.'.length)
@@ -269,12 +325,23 @@ export interface GitReviewFile {
   binary: boolean;
 }
 
+export type GitReviewScope = 'working' | 'branch';
+
+export interface GitReviewReadOptions {
+  baseCommit?: string | null;
+  scope?: GitReviewScope;
+  origPath?: string;
+}
+
 export interface GitStatusSnapshot {
   branch: string | null;
   head: string | null;
   upstream: string | null;
   ahead: number;
   behind: number;
+  baseCommit?: string | null;
+  baseAhead?: number;
+  scope?: GitReviewScope;
   files: GitReviewFile[];
   total_files: number;
   truncated: boolean;
@@ -452,26 +519,185 @@ async function countUntrackedLines(
   }
 }
 
+async function resolveValidBaseCommit(
+  root: string,
+  raw: string | null | undefined,
+): Promise<string | null> {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.startsWith('-') || /[\s\0]/.test(trimmed)) {
+    return null;
+  }
+  if (COMMIT_SHA_RE.test(trimmed)) return trimmed;
+  try {
+    const resolved = await runGit(
+      root,
+      [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        '--end-of-options',
+        `${trimmed}^{commit}`,
+      ],
+      { maxBytes: 1024 },
+    );
+    const sha = resolved.stdout.trim();
+    return COMMIT_SHA_RE.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+async function countBaseAhead(
+  root: string,
+  baseCommit: string,
+  head: string | null,
+): Promise<number> {
+  if (!head || head === baseCommit) return 0;
+  try {
+    const result = await runGit(
+      root,
+      ['rev-list', '--count', `${baseCommit}..HEAD`],
+      { maxBytes: 1024 },
+    );
+    const count = Number.parseInt(result.stdout.trim(), 10);
+    return Number.isFinite(count) && count >= 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Parse `git diff --name-status -z -M <base>` + `git ls-files --others -z`. */
+function parseBranchChanges(
+  nameStatusOutput: string,
+  untrackedOutput: string,
+): GitReviewFile[] {
+  const files: GitReviewFile[] = [];
+  const seenPaths = new Set<string>();
+  const tokens = nameStatusOutput.split('\0');
+  for (let i = 0; i < tokens.length; i++) {
+    const rawStatus = tokens[i];
+    if (!rawStatus) continue;
+    const code = rawStatus[0] ?? 'M';
+    let origPath: string | undefined;
+    let filePath: string;
+    if (code === 'R' || code === 'C') {
+      origPath = tokens[++i] ?? '';
+      filePath = tokens[++i] ?? '';
+    } else {
+      filePath = tokens[++i] ?? '';
+    }
+    if (!filePath) continue;
+    let status: GitReviewFileStatus = 'modified';
+    if (code === 'R') status = 'renamed';
+    else if (code === 'C') status = 'copied';
+    else if (code === 'A') status = 'added';
+    else if (code === 'D') status = 'deleted';
+    else if (code === 'T') status = 'type_changed';
+    else if (code === 'U') status = 'conflicted';
+    seenPaths.add(filePath);
+    files.push({
+      path: filePath,
+      ...(origPath ? { orig_path: origPath } : {}),
+      status,
+      index_status: code,
+      worktree_status: '.',
+      additions: null,
+      deletions: null,
+      binary: false,
+    });
+  }
+  for (const untrackedPath of untrackedOutput.split('\0')) {
+    if (!untrackedPath || seenPaths.has(untrackedPath)) continue;
+    seenPaths.add(untrackedPath);
+    files.push({
+      path: untrackedPath,
+      status: 'untracked',
+      index_status: '?',
+      worktree_status: '?',
+      additions: null,
+      deletions: null,
+      binary: false,
+    });
+  }
+  return files;
+}
+
 /**
- * Working-tree status of the repository at `root` (its top level): branch,
- * ahead/behind its upstream, and every changed file with +/- line counts
- * against HEAD. Both the number of files and the raw output are capped.
+ * Working-tree or branch status of the repository at `root` (its top level):
+ * branch, ahead/behind its upstream (and ahead of `baseCommit` when given),
+ * and every changed file with +/- line counts. Both the number of files and
+ * the raw output are capped.
  */
-export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
+export async function readGitStatus(
+  root: string,
+  options: GitReviewReadOptions = {},
+): Promise<GitStatusSnapshot> {
   const config = await neutralFilterArgs(root);
   const status = await runGit(
     root,
-    ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'],
+    [
+      'status',
+      '--porcelain=v2',
+      '--branch',
+      '-z',
+      '--untracked-files=all',
+      '--ignore-submodules=all',
+    ],
     { maxBytes: GIT_STATUS_MAX_BYTES, config },
   );
   const parsed = parsePorcelainV2(status.stdout);
-  const totalFiles = parsed.files.length;
-  const files = parsed.files.slice(0, GIT_STATUS_MAX_FILES);
-  const base = parsed.head ?? (await emptyTreeHash(root));
+  const baseCommit = await resolveValidBaseCommit(root, options.baseCommit);
+  const baseAhead = baseCommit
+    ? await countBaseAhead(root, baseCommit, parsed.head)
+    : undefined;
+  const effectiveScope: GitReviewScope =
+    options.scope === 'branch' && baseCommit ? 'branch' : 'working';
+
+  let rawFiles = parsed.files;
+  let branchTruncated = false;
+  if (effectiveScope === 'branch' && baseCommit) {
+    const [diffNames, untrackedList] = await Promise.all([
+      runGit(
+        root,
+        [
+          'diff',
+          '--name-status',
+          '-z',
+          '-M',
+          '--ignore-submodules=all',
+          ...NO_DIFF_DRIVERS,
+          baseCommit,
+        ],
+        { maxBytes: GIT_STATUS_MAX_BYTES, config },
+      ),
+      runGit(root, ['ls-files', '--others', '--exclude-standard', '-z'], {
+        maxBytes: GIT_STATUS_MAX_BYTES,
+        config,
+      }),
+    ]);
+    rawFiles = parseBranchChanges(diffNames.stdout, untrackedList.stdout);
+    branchTruncated = diffNames.truncated || untrackedList.truncated;
+  }
+
+  const totalFiles = rawFiles.length;
+  const files = rawFiles.slice(0, GIT_STATUS_MAX_FILES);
+  const base =
+    effectiveScope === 'branch' && baseCommit
+      ? baseCommit
+      : (parsed.head ?? (await emptyTreeHash(root)));
   if (files.some((file) => file.status !== 'untracked')) {
     const numstat = await runGit(
       root,
-      ['diff', '--numstat', '-z', '-M', ...NO_DIFF_DRIVERS, base],
+      [
+        'diff',
+        '--numstat',
+        '-z',
+        '-M',
+        '--ignore-submodules=all',
+        ...NO_DIFF_DRIVERS,
+        base,
+      ],
       { maxBytes: GIT_STATUS_MAX_BYTES, config },
     );
     const stats = parseNumstat(numstat.stdout);
@@ -501,9 +727,11 @@ export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
     upstream: parsed.upstream,
     ahead: parsed.ahead,
     behind: parsed.behind,
+    ...(baseCommit !== null ? { baseCommit, baseAhead } : {}),
+    ...(options.scope ? { scope: effectiveScope } : {}),
     files,
     total_files: totalFiles,
-    truncated: status.truncated || totalFiles > files.length,
+    truncated: status.truncated || branchTruncated || totalFiles > files.length,
   };
 }
 
@@ -555,15 +783,26 @@ export interface GitFileDiff {
 }
 
 /**
- * Unified diff of one file against HEAD (staged and unstaged together).
- * Untracked files diff against /dev/null. Output is capped at
- * GIT_DIFF_MAX_BYTES; binary files report `binary` with git's summary line.
+ * Unified diff of one file against HEAD (staged and unstaged together) or
+ * against `baseCommit` when `scope: 'branch'` is requested. Untracked files
+ * diff against /dev/null. Output is capped at GIT_DIFF_MAX_BYTES; binary
+ * files report `binary` with git's summary line.
  */
 export async function readGitFileDiff(
   root: string,
   requestedPath: string,
-  requestedOrigPath?: string,
+  requestedOrigPathOrOptions?: string | GitReviewReadOptions,
+  maybeOptions?: GitReviewReadOptions,
 ): Promise<GitFileDiff> {
+  const options: GitReviewReadOptions =
+    typeof requestedOrigPathOrOptions === 'object' &&
+    requestedOrigPathOrOptions !== null
+      ? requestedOrigPathOrOptions
+      : (maybeOptions ?? {});
+  const requestedOrigPath =
+    typeof requestedOrigPathOrOptions === 'string'
+      ? requestedOrigPathOrOptions
+      : options.origPath;
   const filePath = normalizeRepoPath(root, requestedPath);
   const origPath =
     requestedOrigPath && requestedOrigPath !== requestedPath
@@ -572,7 +811,15 @@ export async function readGitFileDiff(
   const config = await neutralFilterArgs(root);
   const status = await runGit(
     root,
-    ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', filePath],
+    [
+      'status',
+      '--porcelain=v2',
+      '-z',
+      '--untracked-files=all',
+      '--ignore-submodules=all',
+      '--',
+      filePath,
+    ],
     { maxBytes: 64 * 1024, config },
   );
   const entry = parsePorcelainV2(status.stdout).files.find(
@@ -597,6 +844,7 @@ export async function readGitFileDiff(
         'diff',
         '--no-index',
         '--no-color',
+        '--ignore-submodules=all',
         ...NO_DIFF_DRIVERS,
         '--',
         '/dev/null',
@@ -605,13 +853,20 @@ export async function readGitFileDiff(
       { maxBytes: GIT_DIFF_MAX_BYTES, okExitCodes: [0, 1], config },
     );
   } else {
-    const head = await resolveHeadCommit(root);
-    const base = head ?? (await emptyTreeHash(root));
+    const baseCommit =
+      options.scope === 'branch'
+        ? await resolveValidBaseCommit(root, options.baseCommit)
+        : null;
+    const base =
+      baseCommit ??
+      (await resolveHeadCommit(root)) ??
+      (await emptyTreeHash(root));
     result = await runGit(
       root,
       [
         'diff',
         '--no-color',
+        '--ignore-submodules=all',
         ...NO_DIFF_DRIVERS,
         '-M',
         base,
