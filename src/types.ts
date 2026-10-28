@@ -387,9 +387,9 @@ export interface AgentProfileRuntimePolicy {
     mode: 'inherit' | 'custom' | 'disabled';
     ids: string[];
     /**
-     * Native host ~/.claude/skills selection. Missing is a legacy sentinel:
-     * follow the effective context source (host_claude => inherit, otherwise
-     * disabled). New profiles persist this field explicitly.
+     * Native host ~/.claude/skills selection. Every active profile stores it
+     * since schema v84; a row without it falls back to the effective context
+     * source (host_claude => inherit, otherwise disabled) with a warning.
      */
     host?: {
       mode: 'inherit' | 'custom' | 'disabled';

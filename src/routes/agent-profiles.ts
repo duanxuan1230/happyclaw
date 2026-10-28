@@ -1,18 +1,27 @@
 import { Hono } from 'hono';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
-import type { Variables } from '../web-context.js';
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { z } from 'zod';
+import type { Variables, WebDeps } from '../web-context.js';
 import { getWebDeps } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
+  AGENT_PROMPT_MAX_CHARS,
   AgentProfileCreateSchema,
   AgentProfileGenerateSchema,
+  AgentProfileImportSchema,
+  AgentProfileMigrateAndDeleteSchema,
   AgentProfilePatchSchema,
   AgentProfileRefinePromptSchema,
   AgentProfileRuntimePolicySchema,
 } from '../schemas.js';
-import type { AuthUser } from '../types.js';
+import type {
+  AgentProfile,
+  AgentProfileRuntimePolicy,
+  AuthUser,
+  RegisteredGroup,
+} from '../types.js';
 import {
   ClaudeProviderNotConfiguredError,
   generateAgentProfileDraft,
@@ -37,6 +46,7 @@ import {
 import {
   archiveAgentProfile,
   createAgentProfile,
+  findAgentProfileNameConflict,
   getAgentProfileForUser,
   getAllRegisteredGroups,
   getOrCreateDefaultAgentProfile,
@@ -45,9 +55,19 @@ import {
   listAgentProfilesForUser,
   listWorkspaceRuntimeSessionsByWorkspace,
   mergeAgentProfileRuntimePolicy,
+  migrateAgentProfileWorkspacesAndArchive,
   normalizeAgentProfileRuntimePolicy,
   updateAgentProfile,
 } from '../db.js';
+import {
+  buildAgentProfileExport,
+  dropMissingReferences,
+  hasMissingReferences,
+  importedRuntimePolicy,
+  parseAgentProfileExport,
+  stripHostGrants,
+} from '../agent-profile-transfer.js';
+import { resolvePinnedModelConfig } from '../container-runner.js';
 import {
   SYSTEM_CAPABILITY_LOCK_KEY,
   userCapabilityLockKey,
@@ -70,7 +90,11 @@ import {
   hashRuntimePolicy,
 } from '../run-context-snapshot.js';
 import { getProviders, getUsableDefaultProvider } from '../runtime-config.js';
-import { listConnectionModels } from '../session-model-overrides.js';
+import {
+  listConnectionModels,
+  resolveSessionLaunchOverrides,
+  unpickedLaunchModel,
+} from '../session-model-overrides.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
@@ -166,59 +190,158 @@ function agentModelRejection(
   };
 }
 
+const AGENT_PROMPT_FIELD_LABELS: Record<string, string> = {
+  identity_prompt: '身份定位（IDENTITY）',
+  soul_prompt: '人格与表达（SOUL）',
+  agents_prompt: '行为规则（AGENTS）',
+  tools_prompt: '工具说明（TOOLS）',
+};
+const AGENT_NAME_MAX_CHARS = 80;
+
+/** Say which field failed instead of a bare "Invalid request body". */
+function invalidAgentProfileBody(
+  error: z.ZodError,
+  body: unknown,
+): { error: string; code?: string; field?: string; max?: number } {
+  const issue = error.issues[0];
+  const field = typeof issue?.path[0] === 'string' ? issue.path[0] : undefined;
+  if (field && AGENT_PROMPT_FIELD_LABELS[field] && issue.code === 'too_big') {
+    const value = (body as Record<string, unknown> | null)?.[field];
+    return {
+      error: `${AGENT_PROMPT_FIELD_LABELS[field]}超过 ${AGENT_PROMPT_MAX_CHARS} 字上限${
+        typeof value === 'string' ? `（当前 ${value.length} 字）` : ''
+      }`,
+      code: 'PROMPT_TOO_LONG',
+      field,
+      max: AGENT_PROMPT_MAX_CHARS,
+    };
+  }
+  if (field === 'name') {
+    return {
+      error:
+        issue.code === 'too_big'
+          ? `名称不能超过 ${AGENT_NAME_MAX_CHARS} 个字`
+          : '请填写名称',
+      code: 'INVALID_NAME',
+      field,
+    };
+  }
+  return {
+    error: 'Invalid request body',
+    ...(issue?.path.length ? { field: issue.path.join('.') } : {}),
+  };
+}
+
+function agentNameTaken(conflict: { name: string }) {
+  return {
+    error: `已有名为「${conflict.name}」的智能体，请换一个名称`,
+    code: 'AGENT_NAME_TAKEN',
+    field: 'name',
+  };
+}
+
+/** "<name> 副本", then "<name> 副本 2", … within the name limit. */
+function nextCopyName(ownerUserId: string, name: string): string {
+  for (let n = 1; ; n += 1) {
+    const suffix = n === 1 ? ' 副本' : ` 副本 ${n}`;
+    const chars = Array.from(name);
+    while (chars.join('').length + suffix.length > AGENT_NAME_MAX_CHARS) {
+      chars.pop();
+    }
+    const candidate = `${chars.join('').trimEnd()}${suffix}`;
+    if (!findAgentProfileNameConflict(ownerUserId, candidate)) return candidate;
+  }
+}
+
+type ProfileRejection = {
+  status: 400 | 403;
+  body: Record<string, unknown>;
+};
+
+/**
+ * Everything a new profile must satisfy, whether it is created, duplicated or
+ * imported. References are checked against live capabilities, so call this
+ * under the user's capability scope lock.
+ */
+function newProfileRejection(
+  user: AuthUser,
+  input: {
+    runtimePolicy: AgentProfileRuntimePolicy;
+    modelConfigId?: string | null;
+    model?: string | null;
+  },
+): ProfileRejection | null {
+  if (isUnauthorizedHostClaudeContext(user, input.runtimePolicy)) {
+    return {
+      status: 403,
+      body: { error: 'host_claude context requires an admin role' },
+    };
+  }
+  if (isUnauthorizedHostSkills(user, input.runtimePolicy)) {
+    return {
+      status: 403,
+      body: { error: 'host skills require an admin role' },
+    };
+  }
+  if (input.modelConfigId && !modelConfigExists(input.modelConfigId)) {
+    return { status: 400, body: { error: '所选模型配置不存在' } };
+  }
+  if (input.model) {
+    const rejection = agentModelRejection(input.modelConfigId, input.model);
+    if (rejection) return { status: 400, body: rejection };
+  }
+  if (hasEmptyCustomHostSkillSelection(input.runtimePolicy)) {
+    return {
+      status: 400,
+      body: { error: 'Custom host skills require at least one selected skill' },
+    };
+  }
+  const invalidReferences = validateRuntimePolicyReferences(
+    user.id,
+    input.runtimePolicy,
+    user.role === 'admin',
+  );
+  if (hasInvalidRuntimePolicyReferences(invalidReferences)) {
+    return {
+      status: 400,
+      body: {
+        error: 'Runtime policy references unavailable capabilities',
+        invalid_runtime_policy: invalidReferences,
+      },
+    };
+  }
+  return null;
+}
+
 agentProfileRoutes.post('/', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const body = await c.req.json().catch(() => ({}));
   const parsed = AgentProfileCreateSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: 'Invalid request body' }, 400);
+    return c.json(invalidAgentProfileBody(parsed.error, body), 400);
   }
+  // Authorization is judged on the request as sent, before normalization.
   if (isUnauthorizedHostClaudeContext(user, parsed.data.runtime_policy)) {
     return c.json({ error: 'host_claude context requires an admin role' }, 403);
   }
   if (isUnauthorizedHostSkills(user, parsed.data.runtime_policy)) {
     return c.json({ error: 'host skills require an admin role' }, 403);
   }
-  if (
-    parsed.data.model_config_id &&
-    !modelConfigExists(parsed.data.model_config_id)
-  ) {
-    return c.json({ error: '所选模型配置不存在' }, 400);
-  }
-  if (parsed.data.model) {
-    const rejection = agentModelRejection(
-      parsed.data.model_config_id,
-      parsed.data.model,
-    );
-    if (rejection) return c.json(rejection, 400);
-  }
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(
     parsed.data.runtime_policy,
   );
   runtimePolicy.skills.host ??= { mode: 'disabled', ids: [] };
-  if (hasEmptyCustomHostSkillSelection(runtimePolicy)) {
-    return c.json(
-      { error: 'Custom host skills require at least one selected skill' },
-      400,
-    );
-  }
   return withCapabilityScopeLocks(
     [SYSTEM_CAPABILITY_LOCK_KEY, userCapabilityLockKey(user.id)],
     () => {
-      const invalidReferences = validateRuntimePolicyReferences(
-        user.id,
+      const rejection = newProfileRejection(user, {
         runtimePolicy,
-        user.role === 'admin',
-      );
-      if (hasInvalidRuntimePolicyReferences(invalidReferences)) {
-        return c.json(
-          {
-            error: 'Runtime policy references unavailable capabilities',
-            invalid_runtime_policy: invalidReferences,
-          },
-          400,
-        );
-      }
+        modelConfigId: parsed.data.model_config_id,
+        model: parsed.data.model,
+      });
+      if (rejection) return c.json(rejection.body, rejection.status);
+      const conflict = findAgentProfileNameConflict(user.id, parsed.data.name);
+      if (conflict) return c.json(agentNameTaken(conflict), 409);
       const profile = createAgentProfile({
         ownerUserId: user.id,
         name: parsed.data.name,
@@ -249,6 +372,157 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
   );
 });
 
+/** Give a copy its own avatar file; a missing source file just goes without. */
+function copyProfileAvatarFile(
+  source: AgentProfile,
+  targetProfileId: string,
+): string | null {
+  const filename = source.avatar_url?.startsWith('/api/auth/avatars/')
+    ? path.basename(source.avatar_url)
+    : null;
+  if (!filename?.startsWith(`agent-profile-${source.id}-`)) return null;
+  try {
+    const copy = `agent-profile-${targetProfileId}-${randomBytes(4).toString('hex')}${path.extname(filename)}`;
+    fs.copyFileSync(
+      path.join(AVATARS_DIR, filename),
+      path.join(AVATARS_DIR, copy),
+    );
+    return `/api/auth/avatars/${copy}`;
+  } catch (err) {
+    logger.warn(
+      { err, agentProfileId: source.id },
+      'Agent avatar file could not be copied',
+    );
+    return null;
+  }
+}
+
+agentProfileRoutes.post('/:id/duplicate', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const id = c.req.param('id');
+  return withCapabilityScopeLocks(
+    [SYSTEM_CAPABILITY_LOCK_KEY, userCapabilityLockKey(user.id)],
+    () => {
+      const source = getAgentProfileForUser(id, user.id);
+      if (!source) return c.json({ error: '智能体配置不存在' }, 404);
+      if (source.is_default) {
+        return c.json({ error: '内置 HappyClaw 不能复制' }, 400);
+      }
+      const { policy, stripped } = stripHostGrants(
+        source.runtime_policy,
+        user.role === 'admin',
+      );
+      const rejection = newProfileRejection(user, {
+        runtimePolicy: policy,
+        modelConfigId: source.model_config_id,
+        model: source.model,
+      });
+      if (rejection) return c.json(rejection.body, rejection.status);
+      const profileId = randomUUID();
+      createAgentProfile({
+        profileId,
+        ownerUserId: user.id,
+        name: nextCopyName(user.id, source.name),
+        identityPrompt: source.identity_prompt,
+        soulPrompt: source.soul_prompt,
+        agentsPrompt: source.agents_prompt,
+        toolsPrompt: source.tools_prompt,
+        promptMode: source.prompt_mode,
+        avatarEmoji: source.avatar_emoji,
+        avatarColor: source.avatar_color,
+        modelConfigId: source.model_config_id,
+        model: source.model,
+        runtimePolicy: policy,
+      });
+      const avatarUrl = copyProfileAvatarFile(source, profileId);
+      const profile = avatarUrl
+        ? updateAgentProfile(profileId, user.id, { avatarUrl })!
+        : getAgentProfileForUser(profileId, user.id)!;
+      return c.json({ profile, stripped }, 201);
+    },
+  );
+});
+
+agentProfileRoutes.get('/:id/export', authMiddleware, (c) => {
+  const user = c.get('user') as AuthUser;
+  const profile = getAgentProfileForUser(c.req.param('id'), user.id);
+  if (!profile) return c.json({ error: '智能体配置不存在' }, 404);
+  if (profile.is_default) {
+    return c.json({ error: '内置 HappyClaw 不能导出' }, 400);
+  }
+  return c.json(buildAgentProfileExport(profile));
+});
+
+agentProfileRoutes.post('/import', authMiddleware, async (c) => {
+  const user = c.get('user') as AuthUser;
+  const body = await c.req.json().catch(() => ({}));
+  const parsedBody = AgentProfileImportSchema.safeParse(body);
+  if (!parsedBody.success) {
+    return c.json(invalidAgentProfileBody(parsedBody.error, body), 400);
+  }
+  const parsed = parseAgentProfileExport(parsedBody.data.data);
+  if (!parsed.ok) {
+    return c.json({ error: parsed.error, code: parsed.code }, 400);
+  }
+  const { agent } = parsed;
+  const name = parsedBody.data.name ?? agent.name;
+  const imported = importedRuntimePolicy(agent, user.role === 'admin');
+  return withCapabilityScopeLocks(
+    [SYSTEM_CAPABILITY_LOCK_KEY, userCapabilityLockKey(user.id)],
+    () => {
+      const conflict = findAgentProfileNameConflict(user.id, name);
+      if (conflict) return c.json(agentNameTaken(conflict), 409);
+      const invalid = validateRuntimePolicyReferences(
+        user.id,
+        imported.policy,
+        user.role === 'admin',
+      );
+      const missing = {
+        skills: invalid.skills,
+        host_skills: invalid.host_skills,
+        mcp: invalid.mcp,
+      };
+      const dropped = hasMissingReferences(missing);
+      if (dropped && !parsedBody.data.drop_missing) {
+        return c.json(
+          {
+            error: '导入的智能体引用了当前账号没有的 Skills 或 MCP',
+            code: 'AGENT_IMPORT_MISSING_REFERENCES',
+            missing,
+            stripped: imported.stripped,
+          },
+          409,
+        );
+      }
+      const runtimePolicy = dropped
+        ? dropMissingReferences(imported.policy, missing)
+        : imported.policy;
+      const rejection = newProfileRejection(user, { runtimePolicy });
+      if (rejection) return c.json(rejection.body, rejection.status);
+      const profile = createAgentProfile({
+        ownerUserId: user.id,
+        name,
+        identityPrompt: agent.identity_prompt ?? '',
+        soulPrompt: agent.soul_prompt ?? '',
+        agentsPrompt: agent.agents_prompt ?? '',
+        toolsPrompt: agent.tools_prompt ?? '',
+        promptMode: agent.prompt_mode ?? 'append',
+        avatarEmoji: agent.avatar_emoji ?? null,
+        avatarColor: agent.avatar_color ?? null,
+        runtimePolicy,
+      });
+      return c.json(
+        {
+          profile,
+          stripped: imported.stripped,
+          dropped: dropped ? missing : { skills: [], host_skills: [], mcp: [] },
+        },
+        201,
+      );
+    },
+  );
+});
+
 agentProfileRoutes.post('/generate', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = AgentProfileGenerateSchema.safeParse(body);
@@ -272,6 +546,41 @@ agentProfileRoutes.post('/generate', authMiddleware, async (c) => {
     );
   }
 });
+
+/**
+ * The connection and model a run of this Agent uses, and which step of the
+ * pinning order chose it. With a Workspace this is its main Session, so a
+ * conversation pick and the Workspace's own provider environment count.
+ */
+function resolveAgentModelResolution(
+  profile: AgentProfile,
+  workspace?: RegisteredGroup,
+) {
+  const pinned = resolvePinnedModelConfig(
+    profile.model_config_id,
+    workspace ? { groupFolder: workspace.folder, agentId: null } : undefined,
+  );
+  const provider = pinned.id
+    ? getProviders().find((item) => item.id === pinned.id)
+    : undefined;
+  const folder = workspace?.folder ?? '';
+  const model = !provider
+    ? null
+    : pinned.source === 'session'
+      ? (resolveSessionLaunchOverrides(folder, null, provider, { warn: false })
+          .model ?? unpickedLaunchModel(provider, null, folder))
+      : unpickedLaunchModel(
+          provider,
+          pinned.source === 'agent' ? profile.model : null,
+          folder,
+        );
+  return {
+    source: pinned.source,
+    model_config_id: pinned.id,
+    model_config_name: provider?.name ?? null,
+    model,
+  };
+}
 
 agentProfileRoutes.post(
   '/:id/effective-capabilities',
@@ -360,6 +669,7 @@ agentProfileRoutes.post(
     const runContext = workspace ? getRunContextSnapshot(workspace.jid) : null;
     return c.json({
       preview,
+      model_resolution: resolveAgentModelResolution(existing, workspace?.group),
       run_context: runContext,
       run_context_status: classifyRunContextSnapshot(runContext, {
         agentProfile: {
@@ -495,7 +805,7 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = AgentProfilePatchSchema.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: 'Invalid request body' }, 400);
+    return c.json(invalidAgentProfileBody(parsed.error, body), 400);
   }
   if (isUnauthorizedHostClaudeContext(user, parsed.data.runtime_policy)) {
     return c.json({ error: 'host_claude context requires an admin role' }, 403);
@@ -528,6 +838,18 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
         // from being published between snapshot and post-commit cleanup.
         const existing = getAgentProfileForUser(id, user.id);
         if (!existing) return c.json({ error: '智能体配置不存在' }, 404);
+        // Only a rename is checked; names that already collide stay as-is.
+        if (
+          parsed.data.name !== undefined &&
+          parsed.data.name !== existing.name
+        ) {
+          const conflict = findAgentProfileNameConflict(
+            user.id,
+            parsed.data.name,
+            id,
+          );
+          if (conflict) return c.json(agentNameTaken(conflict), 409);
+        }
         if (
           parsed.data.model_config_id &&
           !modelConfigExists(parsed.data.model_config_id)
@@ -756,6 +1078,117 @@ agentProfileRoutes.delete('/:id', authMiddleware, async (c) => {
   });
 });
 
+const ARCHIVE_REFUSALS = {
+  not_found: { status: 404, error: '智能体配置不存在' },
+  is_default: { status: 400, error: '不能删除内置的 HappyClaw 智能体' },
+  has_workspaces: {
+    status: 409,
+    error: '迁移期间该智能体又有了新的工作区；请重试',
+  },
+  has_mounts: {
+    status: 409,
+    error: '该智能体仍有消息渠道挂载；请先解绑',
+  },
+} as const;
+
+/**
+ * Move every Workspace of an Agent to another Agent and archive it, all or
+ * nothing: the Workspaces' runners are stopped around one transaction that
+ * either moves them all and archives the Agent or changes nothing.
+ */
+agentProfileRoutes.post(
+  '/:id/migrate-and-delete',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = AgentProfileMigrateAndDeleteSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: 'Invalid request body' }, 400);
+    const targetId = parsed.data.target_agent_profile_id;
+    if (targetId === id) {
+      return c.json({ error: '目标智能体不能是要删除的智能体' }, 400);
+    }
+    return withAgentProfileLocks([id, targetId], async () => {
+      const source = getAgentProfileForUser(id, user.id);
+      if (!source) return c.json({ error: '智能体配置不存在' }, 404);
+      if (source.is_default) {
+        return c.json({ error: ARCHIVE_REFUSALS.is_default.error }, 400);
+      }
+      if (!getAgentProfileForUser(targetId, user.id)) {
+        return c.json({ error: '目标智能体不存在' }, 404);
+      }
+      // Membership changes for both Agents hold these locks, so the
+      // Workspace list cannot grow before the commit re-reads it.
+      const workspaces = listWorkspaceGroupsForAgentProfile(user.id, id);
+      const commit = () =>
+        migrateAgentProfileWorkspacesAndArchive(
+          id,
+          user.id,
+          targetId,
+          listWorkspaceGroupsForAgentProfile(user.id, id).map(
+            (workspace) => workspace.group.folder,
+          ),
+        );
+      const deps = getWebDeps();
+      let result: ReturnType<typeof commit>;
+      let invalidatedRuntimeJids = 0;
+      if (!deps || workspaces.length === 0) {
+        result = commit();
+      } else {
+        try {
+          const quiesced = await quiesceWorkspaceRunnersAroundCommit(
+            deps,
+            workspaces.map((workspace) => ({
+              folder: workspace.group.folder,
+              primaryJid: workspace.jid,
+            })),
+            {
+              reason: `Agent profile ${id} migrated to ${targetId} and archived`,
+              onPostCommitFailure: (runtimeJids) =>
+                deps.queue.blockGroupsForRuntimeSafety?.(
+                  runtimeJids,
+                  `Agent profile ${id} migration cleanup failed after commit`,
+                ),
+            },
+            commit,
+          );
+          result = quiesced.value;
+          invalidatedRuntimeJids = quiesced.runtimeJids.length;
+          deps.queue.unblockGroupsForRuntimeSafety?.(quiesced.runtimeJids);
+        } catch (err) {
+          if (!(err instanceof WorkspaceRuntimeQuiesceError)) throw err;
+          logger.error(
+            { err, agentProfileId: id, persisted: err.persisted },
+            err.persisted
+              ? 'Agent profile migrated and archived but runtime cleanup failed'
+              : 'Agent profile migration aborted before persistence',
+          );
+          return c.json(
+            {
+              error: err.persisted
+                ? '工作区已迁移且智能体已删除，但运行时清理失败；请在目标智能体页面重试清理'
+                : '无法停止活动工作区；没有迁移任何工作区，智能体未删除',
+              persisted: err.persisted,
+              retryable: !err.persisted,
+            },
+            503,
+          );
+        }
+      }
+      if (result !== 'ok') {
+        const refusal = ARCHIVE_REFUSALS[result];
+        return c.json({ error: refusal.error }, refusal.status);
+      }
+      return c.json({
+        success: true,
+        migrated_workspaces: workspaces.length,
+        invalidated_runtime_jids: invalidatedRuntimeJids,
+      });
+    });
+  },
+);
+
 agentProfileRoutes.post('/:id/runtime-cleanup', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
@@ -828,6 +1261,31 @@ agentProfileRoutes.post('/:id/runtime-cleanup', authMiddleware, async (c) => {
   );
 });
 
+/**
+ * How many of a Workspace's runtimes are mid-turn or have queued input: what
+ * a save that restarts the Agent's runners would interrupt. A warm runner
+ * that is only waiting for input is not counted.
+ */
+function countActiveConversations(deps: WebDeps) {
+  const busy = new Set(
+    deps.queue
+      .getStatus()
+      .groups.filter(
+        (group) =>
+          group.queryInFlight ||
+          group.pendingMessages ||
+          group.pendingTasks > 0,
+      )
+      .map((group) => group.jid),
+  );
+  return (folder: string, jid: string): number =>
+    busy.size === 0
+      ? 0
+      : getWorkspaceRuntimeJids(deps, folder, jid).filter((runtimeJid) =>
+          busy.has(runtimeJid),
+        ).length;
+}
+
 agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const id = c.req.param('id');
@@ -837,6 +1295,8 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
 
     const defaultProfile = getOrCreateDefaultAgentProfile(user.id);
     const groups = getAllRegisteredGroups();
+    const deps = getWebDeps();
+    const activeConversations = deps ? countActiveConversations(deps) : () => 0;
     const workspaces = Object.entries(groups)
       .filter(([jid, group]) => {
         if (!jid.startsWith('web:')) return false;
@@ -852,6 +1312,7 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
         is_home: !!group.is_home,
         execution_mode: group.executionMode ?? 'container',
         added_at: group.added_at,
+        active_conversations: activeConversations(group.folder, jid),
         runtime_sessions: listWorkspaceRuntimeSessionsByWorkspace(jid).map(
           (session) => ({
             runtime_agent_id: session.runtime_agent_id,
@@ -881,7 +1342,6 @@ agentProfileRoutes.get('/:id/workspaces', authMiddleware, async (c) => {
         owner_im_id: mount.owner_im_id ?? null,
         updated_at: mount.updated_at,
       }));
-    const deps = getWebDeps();
     const runtimeCleanupPending =
       deps != null &&
       listWorkspaceGroupsForAgentProfile(user.id, id).some((workspace) =>
