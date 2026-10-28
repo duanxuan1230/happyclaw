@@ -39,6 +39,8 @@ function fixture(surface: Surface) {
     SyntaxError,
     Error,
     GROUPS_DIR: directory,
+    resolveWorkspaceProjectRoot: (group: { folder: string }) =>
+      path.join(directory, group.folder),
   };
   const workspace = surface.startsWith('workspace');
   const harness = createRuntimeSourceHarness(
