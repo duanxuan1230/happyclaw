@@ -678,6 +678,10 @@ import {
   formatFreshWindowHandoff,
 } from './fresh-window.js';
 import {
+  reconcileSessionWorktrees,
+  resolveWorkspaceProjectRoot,
+} from './session-worktree.js';
+import {
   claimOwner,
   claimOwnerFromMention,
   releaseOwner,
@@ -4907,8 +4911,9 @@ async function handleFreshCommand(
     const targetGroup =
       registeredGroups[target.baseChatJid] ??
       getRegisteredGroup(target.baseChatJid);
-    const snapshotCwd =
-      targetGroup?.customCwd || path.join(GROUPS_DIR, target.folder);
+    const snapshotCwd = targetGroup
+      ? resolveWorkspaceProjectRoot(targetGroup, { agentId: target.agentId })
+      : path.join(GROUPS_DIR, target.folder);
     const snapshot = await captureWorkspaceSnapshot(snapshotCwd);
     const handoff = formatFreshWindowHandoff({
       notes: rawNotes,
@@ -22828,9 +22833,9 @@ async function handleFeishuSessionFresh(input: {
     return '当前绑定目标不存在，无法执行 /fresh。';
   }
   try {
-    const snapshotCwd =
-      runtime.effectiveGroup.customCwd ||
-      path.join(GROUPS_DIR, runtime.effectiveGroup.folder);
+    const snapshotCwd = resolveWorkspaceProjectRoot(runtime.effectiveGroup, {
+      agentId: runtime.agentId,
+    });
     const snapshot = await captureWorkspaceSnapshot(snapshotCwd);
     const handoff = formatFreshWindowHandoff({
       notes: input.notes,
@@ -23663,6 +23668,14 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to prune orphan turn traces at startup');
+  }
+
+  // A session whose worktree vanished while HappyClaw was down must fail
+  // clearly on its next run instead of running in the main checkout.
+  try {
+    reconcileSessionWorktrees();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to reconcile session worktrees at startup');
   }
 
   // Migrate system-level IM config → admin's per-user config (one-time)

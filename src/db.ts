@@ -105,6 +105,7 @@ import {
   HAPPYCLAW_OWNER_INTRODUCTION_FLOW_KEY,
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
+import { initSessionWorktreeStore } from './session-worktree-store.js';
 import { splitLegacyEmbeddedReferenceContent } from './message-prompt.js';
 
 let db: InstanceType<typeof Database>;
@@ -1058,6 +1059,8 @@ export function initDatabase(
       PRIMARY KEY (user_id, jid)
     );
   `);
+
+  initSessionWorktreeStore(db);
 
   // v65 -> v66: HappyClaw Owner Profile remains a reserved Workspace Memory
   // item; this table tracks only its one-shot onboarding lifecycle. Duplicate

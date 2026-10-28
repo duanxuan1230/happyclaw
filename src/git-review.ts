@@ -1,0 +1,574 @@
+/**
+ * Read-only git inspection for the Review panel and session worktrees.
+ *
+ * Every git call goes through `runGit`: execFile-style argument arrays (no
+ * shell), a timeout, a byte cap on stdout, no terminal prompts, and
+ * GIT_OPTIONAL_LOCKS=0 so a status refresh never takes index.lock while an
+ * Agent is running git in the same checkout. Nothing here talks to a remote.
+ */
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { isRealpathInside, realpathBestEffort } from './utils.js';
+
+export const GIT_TIMEOUT_MS = 15_000;
+export const GIT_STATUS_MAX_FILES = 1_000;
+export const GIT_STATUS_MAX_BYTES = 2 * 1024 * 1024;
+export const GIT_DIFF_MAX_BYTES = 512 * 1024;
+/** Untracked files larger than this are not read to count their lines. */
+const UNTRACKED_LINE_COUNT_MAX_BYTES = 512 * 1024;
+/** Total untracked bytes one status may read; the rest report null counts. */
+const UNTRACKED_LINE_COUNT_BUDGET_BYTES = 4 * 1024 * 1024;
+const STDERR_MAX_BYTES = 8 * 1024;
+
+export class GitCommandError extends Error {
+  constructor(
+    message: string,
+    readonly exitCode: number | null,
+    readonly stderr: string,
+  ) {
+    super(message);
+    this.name = 'GitCommandError';
+  }
+}
+
+export interface GitRunResult {
+  stdout: string;
+  /** stdout reached `maxBytes`; the process was stopped and output cut. */
+  truncated: boolean;
+  exitCode: number;
+}
+
+export async function runGit(
+  cwd: string,
+  args: string[],
+  options: {
+    timeoutMs?: number;
+    maxBytes?: number;
+    /** Exit codes treated as success (git diff --no-index exits 1). */
+    okExitCodes?: number[];
+  } = {},
+): Promise<GitRunResult> {
+  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+  const maxBytes = options.maxBytes ?? GIT_STATUS_MAX_BYTES;
+  const okExitCodes = options.okExitCodes ?? [0];
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'git',
+      ['-c', 'core.quotePath=false', '-C', cwd, ...args],
+      {
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_OPTIONAL_LOCKS: '0',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      },
+    );
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let truncated = false;
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (truncated) return;
+      const room = maxBytes - size;
+      if (chunk.length >= room) {
+        chunks.push(chunk.subarray(0, room));
+        size = maxBytes;
+        truncated = true;
+        child.kill('SIGKILL');
+        return;
+      }
+      chunks.push(chunk);
+      size += chunk.length;
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < STDERR_MAX_BYTES) stderr += chunk.toString('utf8');
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new GitCommandError(error.message, null, stderr));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const stdout = Buffer.concat(chunks).toString('utf8');
+      if (truncated) {
+        resolve({ stdout, truncated: true, exitCode: code ?? -1 });
+        return;
+      }
+      if (timedOut) {
+        reject(
+          new GitCommandError(
+            `git ${args[0]} timed out after ${timeoutMs}ms`,
+            null,
+            stderr,
+          ),
+        );
+        return;
+      }
+      if (code === null || !okExitCodes.includes(code)) {
+        reject(
+          new GitCommandError(
+            `git ${args[0]} exited with ${code}: ${stderr.trim().slice(0, 500)}`,
+            code,
+            stderr,
+          ),
+        );
+        return;
+      }
+      resolve({ stdout, truncated: false, exitCode: code });
+    });
+  });
+}
+
+export interface GitRepoLocation {
+  /** Real path of the repository's top level (a worktree root for worktrees). */
+  topLevel: string;
+  /** `dir` relative to `topLevel`, '' at the top level. */
+  subpath: string;
+}
+
+/**
+ * Locate the repository that contains `dir`. `requireTopLevel` refuses a
+ * directory that is only nested in some outer repository: HappyClaw's own
+ * data/groups/<folder> lives inside the HappyClaw checkout, and must never be
+ * mistaken for it.
+ */
+export async function locateGitRepo(
+  dir: string,
+  options: { requireTopLevel?: boolean } = {},
+): Promise<GitRepoLocation | null> {
+  if (!fs.existsSync(dir)) return null;
+  let topLevel: string;
+  try {
+    const result = await runGit(dir, ['rev-parse', '--show-toplevel'], {
+      maxBytes: 64 * 1024,
+    });
+    topLevel = result.stdout.trim();
+  } catch {
+    return null;
+  }
+  if (!topLevel) return null;
+  if (!isRealpathInside(dir, topLevel)) return null;
+  const realTop = realpathBestEffort(topLevel);
+  const subpath = path.relative(realTop, realpathBestEffort(dir));
+  if (options.requireTopLevel && subpath !== '') return null;
+  return { topLevel: realTop, subpath };
+}
+
+export async function resolveHeadCommit(
+  repoDir: string,
+): Promise<string | null> {
+  try {
+    const result = await runGit(
+      repoDir,
+      ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'],
+      { maxBytes: 1024 },
+    );
+    return result.stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export type GitReviewFileStatus =
+  | 'modified'
+  | 'added'
+  | 'deleted'
+  | 'renamed'
+  | 'copied'
+  | 'type_changed'
+  | 'untracked'
+  | 'conflicted';
+
+export interface GitReviewFile {
+  path: string;
+  orig_path?: string;
+  status: GitReviewFileStatus;
+  /** Porcelain v2 X (index) and Y (worktree) codes; '.' = unchanged. */
+  index_status: string;
+  worktree_status: string;
+  additions: number | null;
+  deletions: number | null;
+  binary: boolean;
+}
+
+export interface GitStatusSnapshot {
+  branch: string | null;
+  head: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitReviewFile[];
+  total_files: number;
+  truncated: boolean;
+}
+
+/** Split off the first `count` space-separated fields; the rest is a path. */
+function splitFields(record: string, count: number): string[] | null {
+  const fields: string[] = [];
+  let rest = record;
+  for (let i = 0; i < count; i++) {
+    const space = rest.indexOf(' ');
+    if (space === -1) return null;
+    fields.push(rest.slice(0, space));
+    rest = rest.slice(space + 1);
+  }
+  fields.push(rest);
+  return fields;
+}
+
+function statusFromCodes(
+  type: string,
+  index: string,
+  worktree: string,
+): GitReviewFileStatus {
+  if (type === '?') return 'untracked';
+  if (type === 'u') return 'conflicted';
+  const codes = [index, worktree];
+  if (type === '2') return codes.includes('C') ? 'copied' : 'renamed';
+  if (codes.includes('A')) return 'added';
+  if (codes.includes('D')) return 'deleted';
+  if (codes.includes('T')) return 'type_changed';
+  return 'modified';
+}
+
+/** Parse `git status --porcelain=v2 --branch -z` output. */
+export function parsePorcelainV2(output: string): {
+  branch: string | null;
+  head: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitReviewFile[];
+} {
+  const result = {
+    branch: null as string | null,
+    head: null as string | null,
+    upstream: null as string | null,
+    ahead: 0,
+    behind: 0,
+    files: [] as GitReviewFile[],
+  };
+  const records = output.split('\0');
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (!record) continue;
+    if (record.startsWith('# ')) {
+      const [key, ...valueParts] = record.slice(2).split(' ');
+      const value = valueParts.join(' ');
+      if (key === 'branch.oid') {
+        result.head = value === '(initial)' ? null : value;
+      } else if (key === 'branch.head') {
+        result.branch = value === '(detached)' ? null : value;
+      } else if (key === 'branch.upstream') {
+        result.upstream = value;
+      } else if (key === 'branch.ab') {
+        const match = /^\+(\d+) -(\d+)$/.exec(value);
+        if (match) {
+          result.ahead = Number(match[1]);
+          result.behind = Number(match[2]);
+        }
+      }
+      continue;
+    }
+    const type = record[0];
+    let fields: string[] | null = null;
+    let origPath: string | undefined;
+    if (type === '1') fields = splitFields(record, 8);
+    else if (type === '2') {
+      fields = splitFields(record, 9);
+      // With -z the rename source is the next NUL-separated field.
+      origPath = records[++i];
+    } else if (type === 'u') fields = splitFields(record, 10);
+    else if (type === '?') fields = ['?', '..', record.slice(2)];
+    else continue;
+    if (!fields) continue;
+    const xy = type === '?' ? '??' : fields[1];
+    const filePath = fields[fields.length - 1];
+    if (!filePath) continue;
+    const index = xy[0] ?? '.';
+    const worktree = xy[1] ?? '.';
+    result.files.push({
+      path: filePath,
+      ...(origPath ? { orig_path: origPath } : {}),
+      status: statusFromCodes(type, index, worktree),
+      index_status: index,
+      worktree_status: worktree,
+      additions: null,
+      deletions: null,
+      binary: false,
+    });
+  }
+  return result;
+}
+
+/** Parse `git diff --numstat -z -M` output into a map keyed by new path. */
+export function parseNumstat(
+  output: string,
+): Map<string, { additions: number | null; deletions: number | null }> {
+  const stats = new Map<
+    string,
+    { additions: number | null; deletions: number | null }
+  >();
+  const records = output.split('\0');
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (!record) continue;
+    const match = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(record);
+    if (!match) continue;
+    let filePath = match[3];
+    if (filePath === '') {
+      // Rename/copy: "<a>\t<d>\t\0<old>\0<new>\0".
+      i += 2;
+      filePath = records[i] ?? '';
+    }
+    if (!filePath) continue;
+    stats.set(filePath, {
+      additions: match[1] === '-' ? null : Number(match[1]),
+      deletions: match[2] === '-' ? null : Number(match[2]),
+    });
+  }
+  return stats;
+}
+
+async function emptyTreeHash(root: string): Promise<string> {
+  const result = await runGit(
+    root,
+    ['hash-object', '-t', 'tree', '/dev/null'],
+    {
+      maxBytes: 1024,
+    },
+  );
+  return result.stdout.trim();
+}
+
+function looksBinary(buffer: Buffer): boolean {
+  return buffer.subarray(0, 8000).includes(0);
+}
+
+/** Lines an untracked regular file would add, or null when not counted. */
+async function countUntrackedLines(
+  root: string,
+  relativePath: string,
+  budget: { bytes: number },
+): Promise<{ additions: number | null; binary: boolean }> {
+  const absolute = path.join(root, relativePath);
+  try {
+    const stats = await fs.promises.lstat(absolute);
+    if (
+      !stats.isFile() ||
+      stats.size > UNTRACKED_LINE_COUNT_MAX_BYTES ||
+      stats.size > budget.bytes
+    ) {
+      return { additions: null, binary: false };
+    }
+    budget.bytes -= stats.size;
+    const content = await fs.promises.readFile(absolute);
+    if (looksBinary(content)) return { additions: null, binary: true };
+    if (content.length === 0) return { additions: 0, binary: false };
+    let lines = 0;
+    for (const byte of content) if (byte === 0x0a) lines++;
+    if (content[content.length - 1] !== 0x0a) lines++;
+    return { additions: lines, binary: false };
+  } catch {
+    return { additions: null, binary: false };
+  }
+}
+
+/**
+ * Working-tree status of the repository at `root` (its top level): branch,
+ * ahead/behind its upstream, and every changed file with +/- line counts
+ * against HEAD. Both the number of files and the raw output are capped.
+ */
+export async function readGitStatus(root: string): Promise<GitStatusSnapshot> {
+  const status = await runGit(
+    root,
+    ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all'],
+    { maxBytes: GIT_STATUS_MAX_BYTES },
+  );
+  const parsed = parsePorcelainV2(status.stdout);
+  const totalFiles = parsed.files.length;
+  const files = parsed.files.slice(0, GIT_STATUS_MAX_FILES);
+  const base = parsed.head ?? (await emptyTreeHash(root));
+  if (files.some((file) => file.status !== 'untracked')) {
+    const numstat = await runGit(
+      root,
+      ['diff', '--numstat', '-z', '-M', '--no-ext-diff', base],
+      { maxBytes: GIT_STATUS_MAX_BYTES },
+    );
+    const stats = parseNumstat(numstat.stdout);
+    for (const file of files) {
+      const stat = stats.get(file.path);
+      if (!stat) continue;
+      file.additions = stat.additions;
+      file.deletions = stat.deletions;
+      file.binary = stat.additions === null && stat.deletions === null;
+    }
+  }
+  const budget = { bytes: UNTRACKED_LINE_COUNT_BUDGET_BYTES };
+  for (const file of files) {
+    if (file.status !== 'untracked') continue;
+    const { additions, binary } = await countUntrackedLines(
+      root,
+      file.path,
+      budget,
+    );
+    file.additions = additions;
+    file.deletions = additions === null ? null : 0;
+    file.binary = binary;
+  }
+  return {
+    branch: parsed.branch,
+    head: parsed.head,
+    upstream: parsed.upstream,
+    ahead: parsed.ahead,
+    behind: parsed.behind,
+    files,
+    total_files: totalFiles,
+    truncated: status.truncated || totalFiles > files.length,
+  };
+}
+
+export class GitPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GitPathError';
+  }
+}
+
+/**
+ * Normalize a repository-relative path from a request. Rejects absolute
+ * paths, `..` segments, NUL bytes, and paths whose existing parent resolves
+ * (through symlinks) outside `root`. Returns the cleaned relative path.
+ */
+export function normalizeRepoPath(root: string, input: string): string {
+  if (typeof input !== 'string' || input.length === 0) {
+    throw new GitPathError('path is required');
+  }
+  if (input.length > 4096 || input.includes('\0')) {
+    throw new GitPathError('invalid path');
+  }
+  if (path.isAbsolute(input) || path.posix.isAbsolute(input)) {
+    throw new GitPathError('path must be relative to the repository');
+  }
+  const segments = input.split('/');
+  if (segments.some((segment) => segment === '..')) {
+    throw new GitPathError('path must stay inside the repository');
+  }
+  const normalized = path.posix.normalize(input).replace(/^\.\/+/, '');
+  if (!normalized || normalized === '.' || normalized.startsWith('../')) {
+    throw new GitPathError('path must stay inside the repository');
+  }
+  // The file itself may be deleted, or be a symlink git reports as a link;
+  // its directory must still resolve inside the root.
+  if (!isRealpathInside(path.dirname(path.resolve(root, normalized)), root)) {
+    throw new GitPathError('path must stay inside the repository');
+  }
+  return normalized;
+}
+
+export interface GitFileDiff {
+  path: string;
+  orig_path?: string;
+  diff: string;
+  binary: boolean;
+  truncated: boolean;
+  untracked: boolean;
+}
+
+/**
+ * Unified diff of one file against HEAD (staged and unstaged together).
+ * Untracked files diff against /dev/null. Output is capped at
+ * GIT_DIFF_MAX_BYTES; binary files report `binary` with git's summary line.
+ */
+export async function readGitFileDiff(
+  root: string,
+  requestedPath: string,
+  requestedOrigPath?: string,
+): Promise<GitFileDiff> {
+  const filePath = normalizeRepoPath(root, requestedPath);
+  const origPath =
+    requestedOrigPath && requestedOrigPath !== requestedPath
+      ? normalizeRepoPath(root, requestedOrigPath)
+      : undefined;
+  const status = await runGit(
+    root,
+    ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', filePath],
+    { maxBytes: 64 * 1024 },
+  );
+  const entry = parsePorcelainV2(status.stdout).files.find(
+    (file) => file.path === filePath,
+  );
+  const untracked = entry?.status === 'untracked';
+  let result: GitRunResult;
+  if (untracked) {
+    const stats = fs.lstatSync(path.join(root, filePath));
+    if (stats.isFile() && looksBinary(readHead(path.join(root, filePath)))) {
+      return {
+        path: filePath,
+        diff: '',
+        binary: true,
+        truncated: false,
+        untracked: true,
+      };
+    }
+    result = await runGit(
+      root,
+      [
+        'diff',
+        '--no-index',
+        '--no-color',
+        '--no-ext-diff',
+        '--',
+        '/dev/null',
+        filePath,
+      ],
+      { maxBytes: GIT_DIFF_MAX_BYTES, okExitCodes: [0, 1] },
+    );
+  } else {
+    const head = await resolveHeadCommit(root);
+    const base = head ?? (await emptyTreeHash(root));
+    result = await runGit(
+      root,
+      [
+        'diff',
+        '--no-color',
+        '--no-ext-diff',
+        '-M',
+        base,
+        '--',
+        ...(origPath ? [origPath] : []),
+        filePath,
+      ],
+      { maxBytes: GIT_DIFF_MAX_BYTES },
+    );
+  }
+  const binary = /^Binary files .* differ$/m.test(result.stdout);
+  return {
+    path: filePath,
+    ...(origPath ? { orig_path: origPath } : {}),
+    diff: result.stdout,
+    binary,
+    truncated: result.truncated,
+    untracked,
+  };
+}
+
+function readHead(filePath: string): Buffer {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(8000);
+    const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+}

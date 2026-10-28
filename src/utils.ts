@@ -103,7 +103,7 @@ export function escapeCsvField(value: unknown): string {
  * resolve THAT, then re-append the not-yet-existing tail — so a not-yet-created
  * leaf under a symlinked parent is still resolved correctly.
  */
-function realpathBestEffort(p: string): string {
+export function realpathBestEffort(p: string): string {
   let checkPath = path.resolve(p);
   const tail: string[] = [];
   while (checkPath !== path.dirname(checkPath)) {

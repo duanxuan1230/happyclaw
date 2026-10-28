@@ -332,6 +332,8 @@ function runtimeControlLane(groups: Record<string, any>) {
     executeSessionReset,
     executeFreshWindowReset,
     captureWorkspaceSnapshot: async () => ({}),
+    resolveWorkspaceProjectRoot: (group: { folder: string }) =>
+      `/groups/${group.folder}`,
     formatFreshWindowHandoff: () => 'handoff',
     FRESH_WINDOW_SUCCESS_REPLY: 'FRESH_OK',
     FRESH_WINDOW_FAILURE_REPLY: 'FRESH_FAILED',

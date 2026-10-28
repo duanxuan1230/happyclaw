@@ -9,6 +9,10 @@ import { canAccessGroup } from '../group-acl.js';
 import type { AuthUser } from '../types.js';
 import type { RegisteredGroup } from '../types.js';
 import { getRegisteredGroup } from '../db.js';
+import {
+  resolveWorkspaceProjectRoot,
+  workspaceSessionFromQuery,
+} from '../session-worktree.js';
 import { logger } from '../logger.js';
 import {
   listFiles,
@@ -24,7 +28,7 @@ import {
   safeWriteWorkspaceFile,
 } from '../file-manager.js';
 import { checkStorageLimit, isBillingEnabled } from '../billing.js';
-import { MAX_FILE_SIZE_MB } from '../config.js';
+import { GROUPS_DIR, MAX_FILE_SIZE_MB } from '../config.js';
 import { createUploadBodyLimit } from '../http-upload-policy.js';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -176,26 +180,30 @@ const SAFE_PREVIEW_MIME_TYPES = new Set(
 );
 
 /**
- * 获取文件操作的根目录覆盖。
- * 宿主机模式下设置了 customCwd 时，文件面板以 customCwd 为根。
+ * 获取文件操作的根目录覆盖：与该会话运行时的工作目录一致。
+ * 会话有独立 worktree 时以 worktree 为根；宿主机模式设置了 customCwd 时
+ * 以 customCwd 为根；否则为 data/groups/{folder}（返回 undefined）。
  */
-function getFileRootOverride(group: RegisteredGroup): string | undefined {
-  return group.executionMode === 'host' && group.customCwd
-    ? group.customCwd
-    : undefined;
+function getFileRootOverride(
+  group: RegisteredGroup,
+  agentId?: string | null,
+): string | undefined {
+  const root = resolveWorkspaceProjectRoot(group, { agentId });
+  return root === path.join(GROUPS_DIR, group.folder) ? undefined : root;
 }
 
 /**
  * 计算 Agent 视角的绝对路径（供前端"复制路径"功能使用）。
  * - container 模式：容器内挂载路径 /workspace/group/<relative>
- * - host 模式：宿主机绝对路径（customCwd 或 data/groups/{folder}）+ relative
+ * - host 模式：宿主机绝对路径（worktree、customCwd 或 data/groups/{folder}）+ relative
  */
 function getAgentAbsolutePath(
   group: RegisteredGroup,
   relativePath: string,
+  rootOverride: string | undefined,
 ): string {
   if (group.executionMode === 'host') {
-    const base = getFileRoot(group.folder, getFileRootOverride(group));
+    const base = getFileRoot(group.folder, rootOverride);
     return relativePath ? path.join(base, relativePath) : base;
   }
   return relativePath
@@ -278,11 +286,29 @@ async function openDirectoryInFileManager(targetDir: string): Promise<void> {
   throw err;
 }
 
+/**
+ * The file root for the session named by `?agentId=` (a Runtime Session of
+ * this workspace; absent or `main` is the main session), or a 404.
+ */
+function resolveRequestFileRoot(
+  c: Context<{ Variables: Variables }>,
+  jid: string,
+  group: RegisteredGroup,
+): { rootOverride: string | undefined } | Response {
+  const agentId = workspaceSessionFromQuery(c.req.query('agentId'), jid);
+  if (agentId === undefined) {
+    return c.json({ error: 'Session not found' }, 404);
+  }
+  return { rootOverride: getFileRootOverride(group, agentId) };
+}
+
 /** Resolve the group for a file route, or the error response to return. */
 function authorizeFileGroup(
   c: Context<{ Variables: Variables }>,
   jid: string,
-): { group: RegisteredGroup; authUser: AuthUser } | Response {
+):
+  | { group: RegisteredGroup; authUser: AuthUser; rootOverride?: string }
+  | Response {
   const group = getRegisteredGroup(jid);
   if (!group) {
     return c.json({ error: 'Group not found' }, 404);
@@ -298,7 +324,9 @@ function authorizeFileGroup(
       403,
     );
   }
-  return { group, authUser };
+  const root = resolveRequestFileRoot(c, jid, group);
+  if (root instanceof Response) return root;
+  return { group, authUser, rootOverride: root.rootOverride };
 }
 
 const fileRoutes = new Hono<{ Variables: Variables }>();
@@ -310,13 +338,13 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
-    const result = listFiles(group.folder, subPath, getFileRootOverride(group));
+    const result = listFiles(group.folder, subPath, rootOverride);
     const files = result.files.map((entry) => ({
       ...entry,
-      absolutePath: getAgentAbsolutePath(group, entry.path),
+      absolutePath: getAgentAbsolutePath(group, entry.path, rootOverride),
     }));
     return c.json({ ...result, files });
   } catch (error) {
@@ -335,9 +363,7 @@ fileRoutes.post('/:jid/files', authMiddleware, uploadBodyLimit, async (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group, authUser } = access;
-
-  const rootOverride = getFileRootOverride(group);
+  const { group, authUser, rootOverride } = access;
 
   try {
     const body = await c.req.parseBody({ all: true });
@@ -501,13 +527,16 @@ fileRoutes.post('/:jid/files/open-directory', authMiddleware, async (c) => {
     );
   }
 
+  const root = resolveRequestFileRoot(c, jid, group);
+  if (root instanceof Response) return root;
+
   try {
     const body = await c.req.json().catch(() => ({}));
     const targetPath = typeof body.path === 'string' ? body.path : '';
     const absolutePath = validateAndResolvePath(
       group.folder,
       targetPath,
-      getFileRootOverride(group),
+      root.rootOverride,
     );
 
     if (!fs.existsSync(absolutePath)) {
@@ -547,7 +576,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
     // 解码 base64url 路径
@@ -557,7 +586,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
-      getFileRootOverride(group),
+      rootOverride,
     );
 
     if (!fs.existsSync(absolutePath)) {
@@ -636,7 +665,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
     // 解码 base64url 路径
@@ -646,7 +675,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
     const absolutePath = validateAndResolvePath(
       group.folder,
       relativePath,
-      getFileRootOverride(group),
+      rootOverride,
     );
 
     if (!fs.existsSync(absolutePath)) {
@@ -765,10 +794,9 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
-    const rootOverride = getFileRootOverride(group);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -816,10 +844,9 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group, authUser } = access;
+  const { group, authUser, rootOverride } = access;
 
   try {
-    const rootOverride = getFileRootOverride(group);
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
     );
@@ -903,10 +930,9 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
-    const rootOverride = getFileRootOverride(group);
     // 解码 base64url 路径
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
       'utf-8',
@@ -939,7 +965,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
 
   const access = authorizeFileGroup(c, jid);
   if (access instanceof Response) return access;
-  const { group } = access;
+  const { group, rootOverride } = access;
 
   try {
     const body = await c.req.json();
@@ -949,12 +975,7 @@ fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
       return c.json({ error: 'Directory name is required' }, 400);
     }
 
-    createDirectory(
-      group.folder,
-      parentPath || '',
-      name,
-      getFileRootOverride(group),
-    );
+    createDirectory(group.folder, parentPath || '', name, rootOverride);
 
     return c.json({ success: true });
   } catch (error) {

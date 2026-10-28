@@ -95,6 +95,8 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 - 查看会话当前使用的模型配置与上下文占用（`GET /api/groups/:jid/context-usage`）
 - 发送普通消息
 - 查看 Runtime Session、绑定和项目能力
+- 读取代码改动（`GET /api/groups/:jid/git/status|diff`）、worktree 可用性和同目录
+  运行提示（`workdir/peers`，看不到的工作区只计数不具名）
 - 打开 Web 终端前的资源检查
 
 Home 的 AgentProfile 归属也是系统不变量：只能绑定同一 owner 的 `is_default`
@@ -114,6 +116,8 @@ Host Workspace 在 Access 之外还要求 admin。
 - 切换会话模型与推理档位（`PUT /api/groups/:jid/model-selection`）；其中高于 `max` 的
   推理档位（目前是 `ultra`）另需 `manage_system_config`
 - 创建、修改、删除 Runtime Session
+- 为新会话创建独立 worktree（另需 Host 权限）；删除会话、工作区或 clear-history 时
+  移除 worktree、保留分支，有未提交改动须带 `force_worktree(s)=true` 确认
 - 写入工作区 Skills/MCP
 - 修改群聊绑定、激活方式、响应对象和 owner
 - `/clear`、`/fresh` 的 HTTP 与 WebSocket 分支

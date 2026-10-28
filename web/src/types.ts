@@ -380,6 +380,16 @@ export interface AgentInfo {
   title_generating?: boolean;
   last_active_at?: string | null;
   latest_message?: { content: string; timestamp: string } | null;
+  /** The session's own git worktree (Host workspaces only), if it has one. */
+  worktree?: SessionWorktreeInfo | null;
+}
+
+export interface SessionWorktreeInfo {
+  branch: string;
+  base_commit: string;
+  /** `broken`: the checkout is missing or damaged; runs fail until deleted. */
+  status: 'active' | 'broken';
+  broken_reason: string | null;
 }
 
 export interface AvailableImGroup {
