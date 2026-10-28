@@ -2386,16 +2386,33 @@ async function runQueryAttempt(
    * receipt that still lists queued input closes it as well.
    */
   const stopActiveTurn = (
-    activeQuery: Pick<Query, 'interrupt' | 'close'>,
+    activeQuery: Pick<Query, 'interrupt' | 'close'> & {
+      stopTask?: (taskId: string) => Promise<void>;
+    },
     reason: string,
     turnsQueuedInCli = ipcDeliveryTracker.laterTurnMessages.length,
   ): void => {
+    for (const taskId of processor.getActiveSdkTaskIds()) {
+      void Promise.resolve(activeQuery.stopTask?.(taskId)).catch(() => {});
+    }
     if (turnsQueuedInCli > 0) {
       log(
         `${reason}: closing the query, ${turnsQueuedInCli} later input(s) are queued in Claude Code`,
       );
       activeQuery.close();
       return;
+    }
+    if (
+      processor.getBlockingBackgroundProtocolCount() > 0 ||
+      processor.getPendingSdkTaskCount() > 0
+    ) {
+      const closeTimer = setTimeout(() => {
+        log(
+          `${reason}: closing the query after interrupt, background SDK task(s) did not settle within 3s`,
+        );
+        activeQuery.close();
+      }, 3_000);
+      closeTimer.unref?.();
     }
     activeQuery
       .interrupt()

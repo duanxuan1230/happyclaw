@@ -398,7 +398,7 @@ test.describe('a proactive workspace', () => {
       .locator('[data-hc-run-status-bar]')
       .getByRole('button', { name: '显示过程' })
       .click();
-    const dialog = page.getByRole('dialog', { name: '工作区回复模式' });
+    const dialog = page.getByRole('dialog', { name: '工作区设置' });
     await expect(dialog).toBeVisible();
     const levels = dialog.getByRole('group', { name: '过程可见性' });
     await expect(levels.getByRole('radio')).toHaveCount(3);

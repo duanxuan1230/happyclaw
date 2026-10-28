@@ -173,6 +173,20 @@ describe('filterProactiveStreamEvent', () => {
     )!;
     expect(start.toolInput).toBeUndefined();
     expect(start.toolName).toBe('AskUserQuestion');
+
+    const receipt = '{"result":"remembered","id":"wmi_1","title":"偏好"}';
+    const memResult = filterProactiveStreamEvent(
+      'activity',
+      event({
+        eventType: 'tool_result',
+        toolUseId: 't-mem',
+        toolName: 'mcp__happyclaw__workspace_memory_remember',
+        toolResult: receipt,
+        detail: receipt,
+      }),
+    )!;
+    expect(memResult.toolResult).toBe(receipt);
+    expect(memResult.detail).toBeUndefined();
   });
 
   it('strips how much a tool did with what it returned, and keeps that it failed', () => {

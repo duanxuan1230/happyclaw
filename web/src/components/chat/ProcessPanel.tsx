@@ -6,6 +6,7 @@ import type { ProcessVisibility } from '../../types';
 import { useRunElapsed } from '../../hooks/useRunElapsed';
 import { describeRunPhase, formatRunElapsed } from '../../lib/run-phase';
 import { scrubTaskStates } from '../../lib/process-visibility';
+import { MemoryReceipts } from './MemoryReceipts';
 import { ProcessSteps } from './ProcessRows';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { describeToolCall } from './ToolActivityCard';
@@ -159,6 +160,7 @@ export const ProcessPanel = memo(function ProcessPanel({
           {streaming.todos && streaming.todos.length > 0 && (
             <TodoProgressPanel todos={streaming.todos} />
           )}
+          <MemoryReceipts steps={streaming.steps ?? []} groupJid={groupJid} />
         </div>
       )}
     </div>

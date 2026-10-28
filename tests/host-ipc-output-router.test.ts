@@ -207,40 +207,63 @@ describe('host IPC primary output routing', () => {
     ).toBe('separate_provider');
   });
 
-  test('proactive mode forces progress and final requests onto independent message delivery', () => {
+  test('proactive mode stages progress on the active turn and keeps final on independent message delivery', () => {
     const activeTurnOutputs = new ActiveTurnOutputRegistry();
-    const projected = vi.fn(() => true);
+    const projectedProgress = vi.fn(() => true);
+    const projectedFinal = vi.fn(() => true);
     activeTurnOutputs.bind(
       channelTurnScope('workspace', 'conversation-agent'),
       'turn-1',
       {
-        onProgress: projected,
-        onFinalCandidate: projected,
+        onProgress: projectedProgress,
+        onFinalCandidate: projectedFinal,
       },
     );
 
-    for (const deliveryRole of ['progress', 'final'] as const) {
-      expect(
-        routeHostIpcOutput(
-          {
-            sourceGroup: 'workspace',
-            agentId: 'conversation-agent',
-            inputTurnId: 'turn-1',
-            text: `${deliveryRole} utterance`,
-            deliveryRole,
-            authorized: true,
-            scheduledTask: false,
-            interactionMode: 'proactive',
-          },
-          activeTurnOutputs,
-        ),
-      ).toMatchObject({
-        path: 'separate_provider',
-        staged: false,
-        deliveryRole,
-      });
-    }
-    expect(projected).not.toHaveBeenCalled();
+    expect(
+      routeHostIpcOutput(
+        {
+          sourceGroup: 'workspace',
+          agentId: 'conversation-agent',
+          inputTurnId: 'turn-1',
+          text: 'progress utterance',
+          deliveryRole: 'progress',
+          authorized: true,
+          scheduledTask: false,
+          interactionMode: 'proactive',
+        },
+        activeTurnOutputs,
+      ),
+    ).toMatchObject({
+      path: 'primary_projection',
+      delivered: true,
+      staged: true,
+      disposition: 'staged_progress',
+      deliveryRole: 'progress',
+    });
+    expect(projectedProgress).toHaveBeenCalledOnce();
+    expect(projectedProgress).toHaveBeenCalledWith('progress utterance');
+
+    expect(
+      routeHostIpcOutput(
+        {
+          sourceGroup: 'workspace',
+          agentId: 'conversation-agent',
+          inputTurnId: 'turn-1',
+          text: 'final utterance',
+          deliveryRole: 'final',
+          authorized: true,
+          scheduledTask: false,
+          interactionMode: 'proactive',
+        },
+        activeTurnOutputs,
+      ),
+    ).toMatchObject({
+      path: 'separate_provider',
+      staged: false,
+      deliveryRole: 'final',
+    });
+    expect(projectedFinal).not.toHaveBeenCalled();
   });
 
   test('records the exact Proactive final before entering provider delivery', () => {
