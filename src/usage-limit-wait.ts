@@ -99,22 +99,22 @@ export function reserveUsageLimitWaitFor(input: {
   });
 }
 
-const RESUME_TIME_FORMAT = new Intl.DateTimeFormat('en-CA', {
-  timeZone: TIMEZONE,
-  year: 'numeric',
-  month: 'numeric',
-  day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-});
+// Built on first use: container-runner imports this module, and reading the
+// configured time zone at import time would make every importer load config.
+let resumeTimeFormat: Intl.DateTimeFormat | undefined;
 
 function dateParts(date: Date): Record<string, string> {
+  resumeTimeFormat ??= new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
   return Object.fromEntries(
-    RESUME_TIME_FORMAT.formatToParts(date).map((part) => [
-      part.type,
-      part.value,
-    ]),
+    resumeTimeFormat.formatToParts(date).map((part) => [part.type, part.value]),
   );
 }
 
