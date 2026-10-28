@@ -117,6 +117,11 @@ import { resolveScheduledGroupDeliveryContract } from './reply-delivery.js';
 import { resolveRuntimeInteractionMode } from './workspace-interaction-runtime.js';
 import { explicitImDeliveryPhase } from './im-send-retry-policy.js';
 import { CHANNEL_PREFIXES } from './channel-prefixes.js';
+import {
+  decideTaskRunNotice,
+  formatTaskRecoveryNotice,
+} from './task-failure-notice.js';
+import type { TaskFailureNoticeState } from './runtime-state-store.js';
 
 export function shouldFinalizeScheduledRunOutput(
   output: Pick<
@@ -498,6 +503,50 @@ function scheduledTaskDisplayName(task: ScheduledTask): string {
   return normalized.length > 120
     ? `${normalized.slice(0, 117)}...`
     : normalized;
+}
+
+/**
+ * Announce the end of a failure streak where its failure notice went: the
+ * task's binding and opted-in channels, plus the run's chat when the failure
+ * itself was posted there.
+ */
+async function notifyTaskRecovery(
+  task: ScheduledTask,
+  streak: TaskFailureNoticeState,
+  deps: SchedulerDependencies,
+  target: {
+    chatJid: string;
+    ownerId: string | null | undefined;
+    workspaceFolder?: string;
+    postToChat?: boolean;
+  },
+): Promise<void> {
+  const text = formatTaskRecoveryNotice(scheduledTaskDisplayName(task), streak);
+  try {
+    if (target.postToChat) {
+      await deps.sendMessage(target.chatJid, `${deps.assistantName}: ${text}`, {
+        source: 'scheduled_task',
+      });
+    }
+    if (deps.storeResultAndNotify && target.ownerId) {
+      await deps.storeResultAndNotify(target.chatJid, text, {
+        ownerId: target.ownerId,
+        notifyChannels: task.notify_channels,
+        // A script failure was posted to its chat, not to the binding.
+        deliveryRouteJid: target.postToChat
+          ? undefined
+          : (task.delivery_route_jid ?? task.chat_jid),
+        sourceKind: 'sdk_final',
+        skipStore: target.postToChat,
+        workspaceFolder: target.workspaceFolder,
+      });
+    }
+  } catch (err) {
+    logger.error(
+      { taskId: task.id, err },
+      'Failed to announce scheduled task recovery',
+    );
+  }
 }
 
 export function formatScheduledTaskWorkspaceResult(input: {
@@ -1465,6 +1514,12 @@ async function runTaskInner(
     const taskSessionText = error
       ? `执行出错: ${error}`
       : cleanedResult?.trim() || null;
+    // A task failing the same way every run notifies once per streak.
+    const notice = decideTaskRunNotice({
+      taskId: task.id,
+      error,
+      manualRun: options?.manualRun,
+    });
 
     if (taskSessionText) {
       try {
@@ -1474,7 +1529,10 @@ async function runTaskInner(
           // routed to chat_jid/notify_channels by the host watcher.  Keep the
           // SDK final in the web task session for audit, but do not broadcast
           // it a second time.  Failures still need the scheduler fallback.
-          ownerId: error ? taskOwnerId || undefined : undefined,
+          ownerId:
+            notice.kind === 'notify_failure'
+              ? taskOwnerId || undefined
+              : undefined,
           notifyChannels: task.notify_channels,
           deliveryRouteJid: task.delivery_route_jid ?? task.chat_jid,
           sourceKind: 'sdk_final',
@@ -1488,6 +1546,13 @@ async function runTaskInner(
           'Failed to store/notify task result',
         );
       }
+    }
+    if (notice.kind === 'notify_recovery') {
+      await notifyTaskRecovery(task, notice.streak, deps, {
+        chatJid: effectiveJid,
+        ownerId: taskOwnerId,
+        workspaceFolder: workspace.folder || undefined,
+      });
     }
 
     // Isolated runs execute in a short-lived #task session. Preserve their
@@ -1786,8 +1851,17 @@ async function runScriptTaskInner(
       result = scriptResult.stdout.trim() || null;
     }
 
+    // A script failing the same way every run reports it once per streak.
+    const notice = scriptResult.aborted
+      ? ({ kind: 'none' } as const)
+      : decideTaskRunNotice({ taskId: task.id, error, manualRun });
+
     // Send result to user (skip if no output and no error)
-    if (!scriptResult.aborted && (error || result)) {
+    if (
+      !scriptResult.aborted &&
+      (error || result) &&
+      notice.kind !== 'suppress_failure'
+    ) {
       const text = error
         ? `[脚本] 执行失败: ${error}${result ? `\n输出:\n${result.slice(0, 500)}` : ''}`
         : `[脚本] ${result!.slice(0, 1000)}`;
@@ -1815,6 +1889,15 @@ async function runScriptTaskInner(
           }
         }
       }
+    }
+    if (notice.kind === 'notify_recovery') {
+      await notifyTaskRecovery(task, notice.streak, deps, {
+        chatJid: groupJid,
+        ownerId:
+          task.created_by || deps.registeredGroups()[groupJid]?.created_by,
+        workspaceFolder: task.group_folder,
+        postToChat: true,
+      });
     }
 
     logger.info(
