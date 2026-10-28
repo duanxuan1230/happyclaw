@@ -1,7 +1,10 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { useChatStore } from '../stores/chat';
-import { confirmDiscardWorktreeChanges } from '../lib/session-worktree';
+import {
+  confirmDiscardWorktreeChanges,
+  WORKTREE_IGNORED_FILES_NOTE,
+} from '../lib/session-worktree';
 import type { GroupInfo } from '../types';
 
 /**
@@ -22,7 +25,8 @@ export function workspaceRebuildMessage(
   const keptDirectory = group?.custom_cwd
     ? `自定义工作目录 ${group.custom_cwd} 中的文件不会被删除。`
     : '';
-  return `确认重建工作区「${name}」吗？这会永久删除全部聊天记录、上下文、所有子对话及其消息、${files}，以及该工作区的全部 Memory（含版本历史、遗忘记录和 HappyClaw 称呼偏好）；Home 还会重置首次唤醒状态。${keptDirectory}关联定时任务会停止并移入回收站，运行历史保留；持久化目录 (data/extra/) 保留。此操作不可撤销。`;
+  const ignoredFiles = host ? WORKTREE_IGNORED_FILES_NOTE : '';
+  return `确认重建工作区「${name}」吗？这会永久删除全部聊天记录、上下文、所有子对话及其消息、${files}，以及该工作区的全部 Memory（含版本历史、遗忘记录和 HappyClaw 称呼偏好）；Home 还会重置首次唤醒状态。${keptDirectory}${ignoredFiles}关联定时任务会停止并移入回收站，运行历史保留；持久化目录 (data/extra/) 保留。此操作不可撤销。`;
 }
 
 export function useClearWorkspace() {

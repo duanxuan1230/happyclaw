@@ -195,8 +195,13 @@ describe('session worktree lifecycle', () => {
       worktrees.removeSessionWorktree(record.agent_id),
     ).resolves.toEqual({
       removed: false,
-      dirtyFiles: 3,
-      branch: record.branch,
+      risk: {
+        agentId: record.agent_id,
+        branch: record.branch,
+        dirtyFiles: 3,
+        unreadable: false,
+        submodules: false,
+      },
     });
     expect(fs.existsSync(record.worktree_path)).toBe(true);
 

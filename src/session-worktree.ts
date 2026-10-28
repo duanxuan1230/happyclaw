@@ -22,6 +22,7 @@ import { getAgent } from './db.js';
 import {
   GitCommandError,
   locateGitRepo,
+  neutralFilterArgs,
   resolveHeadCommit,
   runGit,
 } from './git-review.js';
@@ -31,6 +32,7 @@ import {
   getSessionWorktree,
   insertSessionWorktree,
   listAllSessionWorktrees,
+  markSessionWorktreeActive,
   markSessionWorktreeBroken,
   type SessionWorktree,
 } from './session-worktree-store.js';
@@ -292,7 +294,8 @@ export async function createSessionWorktree(input: {
   await runGit(
     support.repoRoot,
     ['worktree', 'add', '-b', branch, worktreePath, support.baseCommit],
-    { timeoutMs: 120_000, maxBytes: 256 * 1024 },
+    // The user's own repository: its hooks run as they would for them.
+    { timeoutMs: 120_000, maxBytes: 256 * 1024, trustRepoConfig: true },
   );
   try {
     return insertSessionWorktree({
@@ -344,23 +347,44 @@ export type SessionWorkingDirectory =
 export function resolveSessionWorkingDirectory(
   agentId: string | null | undefined,
 ): SessionWorkingDirectory {
-  const worktree = getSessionWorktree(agentId);
-  if (!worktree) return { kind: 'none' };
-  const reason =
-    worktree.status === 'broken'
-      ? (worktree.broken_reason ?? 'worktree is marked broken')
-      : inspectSessionWorktree(worktree);
-  if (reason) {
-    if (worktree.status !== 'broken') {
-      markSessionWorktreeBroken(worktree.agent_id, reason);
-    }
-    return { kind: 'broken', worktree, reason };
+  const stored = getSessionWorktree(agentId);
+  if (!stored) return { kind: 'none' };
+  const worktree = refreshSessionWorktreeStatus(stored);
+  if (worktree.status === 'broken') {
+    return {
+      kind: 'broken',
+      worktree,
+      reason: worktree.broken_reason ?? 'worktree is marked broken',
+    };
   }
   return {
     kind: 'worktree',
     cwd: path.join(worktree.worktree_path, worktree.cwd_subpath),
     worktree,
   };
+}
+
+/**
+ * Check a recorded worktree on disk and store the outcome both ways: a
+ * missing or damaged checkout becomes broken, and one that is back (restored
+ * directory, recreated subdirectory) becomes active again.
+ */
+export function refreshSessionWorktreeStatus(
+  record: SessionWorktree,
+): SessionWorktree {
+  const reason = inspectSessionWorktree(record);
+  if (
+    reason &&
+    (record.status !== 'broken' || record.broken_reason !== reason)
+  ) {
+    markSessionWorktreeBroken(record.agent_id, reason);
+    return { ...record, status: 'broken', broken_reason: reason };
+  }
+  if (!reason && record.status === 'broken') {
+    markSessionWorktreeActive(record.agent_id);
+    return { ...record, status: 'active', broken_reason: null };
+  }
+  return record;
 }
 
 export function sessionWorktreeRunError(
@@ -377,7 +401,10 @@ export async function countWorktreeChanges(
   const result = await runGit(
     worktreePath,
     ['status', '--porcelain=v1', '-z', '--untracked-files=normal'],
-    { maxBytes: 2 * 1024 * 1024 },
+    {
+      maxBytes: 2 * 1024 * 1024,
+      config: await neutralFilterArgs(worktreePath),
+    },
   );
   // Renames carry their source as an extra NUL field; count entries only.
   let count = 0;
@@ -424,14 +451,118 @@ async function detachWorktreeDirectory(
   }
 }
 
-export type RemoveSessionWorktreeResult =
-  | { removed: true; branch: string }
-  | { removed: false; dirtyFiles: number; branch: string };
+/** What removing a session's worktree would lose. */
+export interface DirtyWorktree {
+  agentId: string;
+  branch: string;
+  /** Uncommitted changes, untracked files included. */
+  dirtyFiles: number;
+  /** Status could not be read (damaged checkout, git failure). */
+  unreadable: boolean;
+  /** Initialized submodules, whose local commits go with the worktree. */
+  submodules: boolean;
+}
+
+/** The repository's common git dir (`.git` of the main checkout). */
+function commonGitDir(repoRoot: string): string | null {
+  const dotGit = path.join(repoRoot, '.git');
+  try {
+    if (fs.statSync(dotGit).isDirectory()) return dotGit;
+    // repoRoot is itself a linked worktree: follow gitdir, then commondir.
+    const gitdir = /^gitdir:\s*(.+)$/m
+      .exec(fs.readFileSync(dotGit, 'utf8'))?.[1]
+      ?.trim();
+    if (!gitdir) return null;
+    const adminDir = path.resolve(repoRoot, gitdir);
+    const common = fs.readFileSync(path.join(adminDir, 'commondir'), 'utf8');
+    return path.resolve(adminDir, common.trim());
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Remove a session's worktree directory and record. The branch stays. With
- * uncommitted changes the worktree is kept and the change count returned,
- * unless `force` confirms discarding them.
+ * The worktree's administrative dir (`<common>/worktrees/<name>`), found from
+ * the repository side so a missing `.git` file does not hide it.
+ */
+function worktreeAdminDir(record: SessionWorktree): string | null {
+  const common = commonGitDir(record.repo_path);
+  if (!common) return null;
+  const expected = path.resolve(record.worktree_path, '.git');
+  const worktreesDir = path.join(common, 'worktrees');
+  let names: string[];
+  try {
+    names = fs.readdirSync(worktreesDir);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    try {
+      const gitdir = fs
+        .readFileSync(path.join(worktreesDir, name, 'gitdir'), 'utf8')
+        .trim();
+      if (path.resolve(gitdir) === expected) {
+        return path.join(worktreesDir, name);
+      }
+    } catch {
+      /* not a worktree entry */
+    }
+  }
+  return null;
+}
+
+function hasInitializedSubmodules(record: SessionWorktree): boolean {
+  const adminDir = worktreeAdminDir(record);
+  if (!adminDir) return false;
+  try {
+    return fs.readdirSync(path.join(adminDir, 'modules')).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What removing this worktree would lose, or null when nothing is at risk.
+ * A damaged checkout is still checked while its directory exists, and a
+ * status that cannot be read counts as at risk rather than clean.
+ */
+async function assessWorktreeRemoval(
+  record: SessionWorktree,
+): Promise<DirtyWorktree | null> {
+  const risk: DirtyWorktree = {
+    agentId: record.agent_id,
+    branch: record.branch,
+    dirtyFiles: 0,
+    unreadable: false,
+    submodules: hasInitializedSubmodules(record),
+  };
+  if (fs.existsSync(record.worktree_path)) {
+    // Without its .git file git would walk up into an enclosing repository
+    // (data/ lives in the HappyClaw checkout) and report that one.
+    if (!fs.existsSync(path.join(record.worktree_path, '.git'))) {
+      risk.unreadable = true;
+    } else {
+      try {
+        risk.dirtyFiles = await countWorktreeChanges(record.worktree_path);
+      } catch {
+        risk.unreadable = true;
+      }
+    }
+  }
+  return risk.dirtyFiles > 0 || risk.unreadable || risk.submodules
+    ? risk
+    : null;
+}
+
+export type RemoveSessionWorktreeResult =
+  | { removed: true; branch: string }
+  | { removed: false; risk: DirtyWorktree };
+
+/**
+ * Remove a session's worktree directory and record. The branch stays. When
+ * the removal could lose work (uncommitted changes, unreadable status,
+ * initialized submodules) the worktree is kept and the risk returned, unless
+ * `force` confirms it.
  */
 export async function removeSessionWorktree(
   agentId: string,
@@ -439,11 +570,9 @@ export async function removeSessionWorktree(
 ): Promise<RemoveSessionWorktreeResult | null> {
   const worktree = getSessionWorktree(agentId);
   if (!worktree) return null;
-  if (!options.force && inspectSessionWorktree(worktree) === null) {
-    const dirtyFiles = await countWorktreeChanges(worktree.worktree_path);
-    if (dirtyFiles > 0) {
-      return { removed: false, dirtyFiles, branch: worktree.branch };
-    }
+  if (!options.force) {
+    const risk = await assessWorktreeRemoval(worktree);
+    if (risk) return { removed: false, risk };
   }
   await detachWorktreeDirectory(worktree.repo_path, worktree.worktree_path);
   deleteSessionWorktreeRecord(agentId);
@@ -454,68 +583,53 @@ export async function removeSessionWorktree(
   return { removed: true, branch: worktree.branch };
 }
 
-export interface DirtyWorktree {
-  agentId: string;
-  branch: string;
-  dirtyFiles: number;
-}
-
-/** The 409 body of an operation refused because worktrees hold changes. */
+/** The 409 body of an operation refused because worktrees could lose work. */
 export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
   const files = dirty.reduce((sum, item) => sum + item.dirtyFiles, 0);
   const owner = dirty.length === 1 ? '会话' : `${dirty.length} 个会话`;
+  const reasons = [
+    ...(files > 0 ? [`${files} 个未提交的改动`] : []),
+    ...(dirty.some((item) => item.unreadable)
+      ? ['无法读取状态，可能仍有未提交的改动']
+      : []),
+    ...(dirty.some((item) => item.submodules)
+      ? ['已初始化的子模块，其中的本地提交会一并丢失']
+      : []),
+  ];
   return {
-    error: `${owner}的 worktree 有 ${files} 个未提交的改动，确认后才会移除（分支会保留）`,
+    error: `${owner}的 worktree 有${reasons.join('、')}，确认后才会移除（分支会保留）`,
     code: 'WORKTREE_DIRTY',
     dirty_worktrees: dirty.map((item) => ({
       session_id: item.agentId,
       branch: item.branch,
       changed_files: item.dirtyFiles,
+      unreadable: item.unreadable,
+      submodules: item.submodules,
     })),
   };
 }
 
-/**
- * Sessions of `records` whose worktrees hold uncommitted changes. Damaged
- * worktrees have nothing to lose and are skipped.
- */
+/** Sessions of `records` whose worktree removal could lose work. */
 export async function findDirtySessionWorktrees(
   records: SessionWorktree[],
 ): Promise<DirtyWorktree[]> {
   // Read-only status takes no index lock, so the checks run side by side.
-  const counts = await Promise.all(
-    records.map((record) =>
-      inspectSessionWorktree(record) === null
-        ? countWorktreeChanges(record.worktree_path)
-        : 0,
-    ),
-  );
-  return records.flatMap((record, index) =>
-    counts[index] > 0
-      ? [
-          {
-            agentId: record.agent_id,
-            branch: record.branch,
-            dirtyFiles: counts[index],
-          },
-        ]
-      : [],
-  );
+  const risks = await Promise.all(records.map(assessWorktreeRemoval));
+  return risks.filter((risk): risk is DirtyWorktree => risk !== null);
 }
 
 /**
- * Startup reconciliation: mark recorded worktrees whose directory is gone or
- * damaged as broken, so their sessions fail clearly instead of running
- * somewhere else.
+ * Startup reconciliation: worktrees whose directory is gone or damaged become
+ * broken, so their sessions fail clearly instead of running somewhere else;
+ * ones that are back become active.
  */
 export function reconcileSessionWorktrees(): { broken: number } {
   let broken = 0;
   for (const record of listAllSessionWorktrees()) {
-    if (record.status === 'broken') continue;
-    const reason = inspectSessionWorktree(record);
-    if (!reason) continue;
-    markSessionWorktreeBroken(record.agent_id, reason);
-    broken++;
+    const refreshed = refreshSessionWorktreeStatus(record);
+    if (refreshed.status === 'broken' && record.status !== 'broken') {
+      broken++;
+    }
   }
   if (broken > 0) {
     logger.warn({ broken }, 'Marked missing session worktrees as broken');
