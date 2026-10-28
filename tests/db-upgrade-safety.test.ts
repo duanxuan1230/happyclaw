@@ -209,7 +209,9 @@ describe('schema version head', () => {
     // by (schema-v84-memory-recall-index.test.ts); session_worktrees, the git
     // worktree a Runtime Session runs in (schema-v84-session-worktrees.test.ts);
     // every Agent's host Skill grant written out explicitly, without resetting
-    // sessions (schema-v84-agent-host-skills.test.ts).
+    // sessions (schema-v84-agent-host-skills.test.ts); usage_limit_waits,
+    // session_history_reinjections, task_failure_notices and
+    // usage_event_connections for the runtime (schema-v84-runtime-state.test.ts).
     expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
   });
 });
