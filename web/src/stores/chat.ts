@@ -21,6 +21,7 @@ import type {
   CreateWorkspaceOptions,
   InteractionMode,
   ProcessVisibility,
+  SessionWorktreeInfo,
   WorkspaceDeleteImpact,
 } from '../types';
 import {
@@ -1199,6 +1200,8 @@ interface ChatState {
     resultSummary?: string,
     kind?: AgentInfo['kind'],
     titleGenerating?: boolean,
+    /** Sent for a session that owns a worktree. */
+    worktree?: SessionWorktreeInfo,
   ) => void;
   clearStreaming: (
     chatJid: string,
@@ -5539,6 +5542,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     resultSummary?,
     kind?,
     titleGenerating?,
+    worktree?,
   ) => {
     set((s) => {
       const existing = s.agents[chatJid] || [];
@@ -5609,6 +5613,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           typeof titleGenerating === 'boolean'
             ? titleGenerating
             : previous?.title_generating,
+        ...(worktree ? { worktree } : {}),
       };
       const updated =
         idx >= 0

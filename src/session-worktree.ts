@@ -34,7 +34,7 @@ import {
   markSessionWorktreeBroken,
   type SessionWorktree,
 } from './session-worktree-store.js';
-import type { RegisteredGroup } from './types.js';
+import type { RegisteredGroup, SessionWorktreeInfo } from './types.js';
 import { isRealpathInside, realpathBestEffort } from './utils.js';
 
 export const WORKTREES_DIR = path.join(DATA_DIR, 'worktrees');
@@ -524,12 +524,9 @@ export function reconcileSessionWorktrees(): { broken: number } {
 }
 
 /** Public shape of a session's worktree in API responses. */
-export function toSessionWorktreePayload(record: SessionWorktree | undefined): {
-  branch: string;
-  base_commit: string;
-  status: SessionWorktree['status'];
-  broken_reason: string | null;
-} | null {
+export function toSessionWorktreePayload(
+  record: SessionWorktree | undefined,
+): SessionWorktreeInfo | null {
   if (!record) return null;
   return {
     branch: record.branch,
