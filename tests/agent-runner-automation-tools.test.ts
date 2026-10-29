@@ -60,6 +60,7 @@ function context(root: string): McpContext {
     isAdminHome: true,
     agentBuilderEnabled: false,
     ownerProfileEnabled: false,
+    currentInputTurnId: 'turn-1',
     workspaceIpc: root,
     workspaceGroup: root,
   };
@@ -69,7 +70,8 @@ function context(root: string): McpContext {
 async function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'automation-tools-'));
   roots.push(root);
-  const tools = createMcpTools(context(root));
+  const ctx = context(root);
+  const tools = createMcpTools(ctx);
   const server = runnerSdk.createSdkMcpServer({
     name: 'happyclaw',
     version: 'test',
@@ -80,7 +82,7 @@ async function setup() {
   const client = new Client({ name: 'test', version: '1' });
   await client.connect(clientSide);
   clients.push(client);
-  return { root, tools, client, tasksDir: path.join(root, 'tasks') };
+  return { root, ctx, tools, client, tasksDir: path.join(root, 'tasks') };
 }
 
 function requestFiles(tasksDir: string): string[] {
@@ -247,6 +249,7 @@ describe('automation agent tools', () => {
     expect(Number.isFinite(Date.parse(timestamp))).toBe(true);
     expect(body).toEqual({
       type: 'automation_create',
+      inputTurnId: 'turn-1',
       name: '晚间巡检',
       prompt: '检查 CI',
       schedule: { kind: 'cron', cronExpr: '0 21 * * *' },
@@ -368,15 +371,42 @@ describe('automation agent tools', () => {
         runs: [],
       }));
       const { requestId: _id, timestamp: _ts, ...body } = request;
-      expect(body).toEqual({ type: name, ...args });
+      expect(body).toEqual({ type: name, inputTurnId: 'turn-1', ...args });
       expect((await pending).isError).toBeFalsy();
     },
   );
 
+  test('each request names the input turn current when it is written', async () => {
+    const { ctx, client, tasksDir } = await setup();
+    const list = async () => {
+      const pending = client.callTool({
+        name: 'automation_list',
+        arguments: {},
+      });
+      const request = await answerNext(tasksDir, () => ({
+        success: true,
+        automations: [],
+      }));
+      await pending;
+      return request.inputTurnId;
+    };
+    expect(await list()).toBe('turn-1');
+    ctx.currentInputTurnId = 'turn-2';
+    expect(await list()).toBe('turn-2');
+    // No current turn: null, which the host refuses.
+    ctx.currentInputTurnId = null;
+    expect(await list()).toBeNull();
+    ctx.currentInputTurnId = '';
+    expect(await list()).toBeNull();
+  });
+
   test('a timed-out write tells the agent to check before retrying', async () => {
-    const tools = createAutomationTools(async () => {
-      throw new Error('IPC result timeout');
-    });
+    const tools = createAutomationTools(
+      async () => {
+        throw new Error('IPC result timeout');
+      },
+      () => 'turn-1',
+    );
     const run = (name: string, args: Record<string, unknown>) =>
       tools.find((tool) => tool.name === name)!.handler(args, {} as never);
 

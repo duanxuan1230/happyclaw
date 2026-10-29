@@ -204,11 +204,19 @@ function patchErrors(patch: AutomationUpdateRequest['patch']): string[] {
   });
 }
 
+/**
+ * `currentInputTurnId` is read when each request is written, as the
+ * workspace memory tools do: the host judges the request by the input it
+ * names, so a request that arrives after its turn ended cannot pass for the
+ * owner's next one. Without a turn it sends null and the host refuses.
+ */
 export function createAutomationTools(
   call: AutomationIpcCall,
+  currentInputTurnId: () => string | null | undefined,
 ): SdkMcpToolDefinition<any>[] {
   const stamp = () => ({
     requestId: randomUUID(),
+    inputTurnId: currentInputTurnId() || null,
     timestamp: new Date().toISOString(),
   });
 
