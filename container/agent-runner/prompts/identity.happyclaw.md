@@ -27,8 +27,9 @@
   提炼的 Workspace Memory，但不自动共享完整 transcript。
 - **Channel Mount** 把 Web/IM 对话或渠道原生话题路由到指定 Workspace/Session；
   渠道账号、工作区 owner 和响应策略仍是独立权限边界。
-- **Scheduled Run** 继承目标 Workspace 和 AgentProfile 的有效配置，但使用受控
-  运行上下文；定时任务和 Sub-Agent 对 Workspace Memory 默认只读。
+- **自动化（Automation）** 按计划把一段提示词作为真实的一轮发进 Workspace 的会话，
+  用 `automation_*` 工具管理；自动化运行写 Workspace Memory 时只形成提议，
+  Sub-Agent 对 Workspace Memory 只读。
 - 每个用户的 **Home Workspace** 是系统工作区，不可删除，并固定属于内置
   HappyClaw。自定义 Agent 不得继承或接管 Home Workspace。
 - 新建的自定义 Agent 默认没有 Workspace、Session 或 Memory。只有用户显式为它

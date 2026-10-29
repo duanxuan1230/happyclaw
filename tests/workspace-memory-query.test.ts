@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest';
 import { memoryRecallQuery } from '../container/agent-runner/src/workspace-memory-query.js';
 import { formatMessages } from '../src/message-prompt.js';
 import type { NewMessage } from '../src/types.js';
-import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
+import { buildAutomationRunContext } from '../container/agent-runner/src/automation.js';
 
 function message(
   id: string,
@@ -69,19 +69,29 @@ describe('what a turn recalls memory by', () => {
     expect(memoryRecallQuery(text)).toBe('第一条\n第二条');
   });
 
-  test("a scheduled run's prompt loses the Runner's preamble", () => {
-    // The preamble the Runner really writes, so rewording it fails here.
-    const harness = createRuntimeSourceHarness(
-      {},
-      new URL('../container/agent-runner/src/index.ts', import.meta.url),
-    );
-    harness.install('scheduledTaskPrefixLines', 'main');
-    const preamble = (
-      harness.globals.scheduledTaskPrefixLines as string[]
-    ).join('\n');
-    expect(memoryRecallQuery(`${preamble}\n\n汇总昨天的部署记录`)).toBe(
+  test("an automation turn recalls by its prompt, not the host's run context", () => {
+    // The block the host really appends, so rewording it fails here.
+    const suffix = buildAutomationRunContext({
+      automation: {
+        id: 'auto-1',
+        name: '部署汇总',
+        stopWhen: '用户说不用了',
+        silentWhenIdle: true,
+        schedule: { kind: 'cron', cronExpr: '0 9 * * *' },
+      },
+      run: { id: 'run-1', trigger: 'schedule' },
+      firedAt: '2026-10-30T01:00:00.000Z',
+      timezone: 'Asia/Shanghai',
+      preCheckOutput: 'new deploys: 3',
+    });
+    expect(memoryRecallQuery(`汇总昨天的部署记录${suffix}`)).toBe(
       '汇总昨天的部署记录',
     );
+    expect(
+      memoryRecallQuery(
+        formatMessages([message('m1', `汇总昨天的部署记录${suffix}`)]),
+      ),
+    ).toBe('汇总昨天的部署记录');
     expect(memoryRecallQuery('  plain text turn  ')).toBe('plain text turn');
   });
 

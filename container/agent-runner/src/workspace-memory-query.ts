@@ -16,9 +16,11 @@ const REFERENCED_BLOCK =
   /<referenced_messages>[\s\S]*?<\/referenced_messages>/g;
 const HOST_BLOCKS =
   /<(channel_context|workspace_memory_snapshot|workspace_memory_index)\b[^>]*>[\s\S]*?<\/\1>/g;
-/** The preamble the Runner puts before an isolated scheduled task's prompt. */
-const SCHEDULED_PREAMBLE_START = '[定时任务 - ';
-const SCHEDULED_PREAMBLE_LAST_LINE = '\n此外：';
+/**
+ * Heads the block the host appends after an automation's prompt
+ * (buildAutomationRunContext); from there on it is the host's text.
+ */
+const AUTOMATION_CONTEXT_START = '\n[自动化运行上下文]';
 
 function unescapeXml(value: string): string {
   return value
@@ -30,14 +32,9 @@ function unescapeXml(value: string): string {
     .replace(/&amp;/g, '&');
 }
 
-function withoutScheduledPreamble(text: string): string {
-  if (!text.startsWith(SCHEDULED_PREAMBLE_START)) return text;
-  const lastLine = text.indexOf(SCHEDULED_PREAMBLE_LAST_LINE);
-  const end = text.indexOf(
-    '\n\n',
-    lastLine >= 0 ? lastLine + SCHEDULED_PREAMBLE_LAST_LINE.length : 0,
-  );
-  return end >= 0 ? text.slice(end + 2) : text;
+function withoutAutomationContext(text: string): string {
+  const start = text.indexOf(AUTOMATION_CONTEXT_START);
+  return start >= 0 ? text.slice(0, start) : text;
 }
 
 export function memoryRecallQuery(turnText: string): string {
@@ -51,13 +48,15 @@ export function memoryRecallQuery(turnText: string): string {
       // the sender's own words.
       if (/\brelation="forwarded_material"/.test(attributes)) continue;
       if (/\bid="[^"]*:default-request"/.test(attributes)) continue;
-      const own = unescapeXml(body.replace(REFERENCED_BLOCK, '')).trim();
+      const own = withoutAutomationContext(
+        unescapeXml(body.replace(REFERENCED_BLOCK, '')),
+      ).trim();
       if (own) bodies.push(own);
     }
   }
   const text =
     start >= 0
       ? bodies.join('\n')
-      : withoutScheduledPreamble(turnText).replace(HOST_BLOCKS, '').trim();
+      : withoutAutomationContext(turnText).replace(HOST_BLOCKS, '').trim();
   return text.slice(0, MAX_MEMORY_RECALL_QUERY_CHARS);
 }

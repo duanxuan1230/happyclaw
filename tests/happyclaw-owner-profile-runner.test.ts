@@ -38,8 +38,6 @@ function context(root: string, patch: Partial<McpContext> = {}): McpContext {
     isAdminHome: false,
     agentBuilderEnabled: true,
     ownerProfileEnabled: true,
-    isScheduledTask: false,
-    currentTaskId: null,
     currentInputTurnId: 'owner-turn-a',
     currentSessionId: 'session-a',
     workspaceIpc: root,
@@ -350,13 +348,9 @@ describe('HappyClaw Owner Profile MCP isolation', () => {
     expect(names(context(root, { currentInputTurnId: null }))).toContain(
       'happyclaw_owner_profile',
     );
-    for (const denied of [
-      context(root, { ownerProfileEnabled: false }),
-      context(root, { isScheduledTask: true }),
-      context(root, { currentTaskId: 'task-1' }),
-    ]) {
-      expect(names(denied)).not.toContain('happyclaw_owner_profile');
-    }
+    expect(names(context(root, { ownerProfileEnabled: false }))).not.toContain(
+      'happyclaw_owner_profile',
+    );
   });
 
   test('first-wake acknowledgement is registered without side effects and correlated to one turn', async () => {
