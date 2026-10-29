@@ -644,6 +644,33 @@ function stageWorkspaceResetForGroup(folder: string): StagedWorkspaceReset {
   };
 }
 
+type WorkspaceQueue = NonNullable<ReturnType<typeof getWebDeps>>['queue'];
+
+/**
+ * Stop a workspace family's runners so nothing writes while what they leave
+ * behind is checked again, keeping their queued work (and the inputs a
+ * usage-limit wait parked) under the caller's mutation pause: a refused
+ * operation then leaves every queue as it was.
+ */
+async function stopFamilyKeepingWork(
+  queue: WorkspaceQueue,
+  jids: string[],
+): Promise<void> {
+  await Promise.all(
+    jids.map((j) =>
+      queue.stopGroup(j, { force: true, preserveQueuedWork: true }),
+    ),
+  );
+}
+
+/** A rebuild goes ahead: drop the work the stop kept, as a plain stop does. */
+async function discardFamilyWork(
+  queue: WorkspaceQueue,
+  jids: string[],
+): Promise<void> {
+  await Promise.all(jids.map((j) => queue.stopGroup(j, { force: true })));
+}
+
 class DirtyWorktreesError extends Error {
   constructor(readonly dirty: DirtyWorktree[]) {
     super('Session worktrees have uncommitted changes');
@@ -2044,12 +2071,10 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   let deleteCommitted = false;
   try {
     try {
-      // Do not preserve queued work for permanent deletion. stopGroup clears
-      // work that was already known; discardGroupsAfterMutation below clears
-      // anything newly parked while these asynchronous stops were in flight.
-      await Promise.all(
-        deleteStopJids.map((j) => deps.queue.stopGroup(j, { force: true })),
-      );
+      // Queued work is kept until the checks below pass: a refused delete
+      // must leave the workspace's queues and usage-limit waits intact. Once
+      // committed, discardGroupsAfterMutation below drops all of it.
+      await stopFamilyKeepingWork(deps.queue, deleteStopJids);
     } catch (err) {
       logger.error(
         { jid, stopJids: deleteStopJids, err },
@@ -2839,10 +2864,9 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       }
     }
 
-    // Stop every current Main/Session/Task/Spawn runner before moving files.
-    await Promise.all(
-      stopJids.map((j) => deps.queue.stopGroup(j, { force: true })),
-    );
+    // Stop every current Main/Session/Task/Spawn runner before moving files,
+    // keeping their queued work until the worktree check below passes.
+    await stopFamilyKeepingWork(deps.queue, stopJids);
     if (
       taskPause.activeRunIds.length > 0 &&
       deps.waitForTaskRunsToStop &&
@@ -2863,6 +2887,9 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       confirmedWorktrees,
     );
     if (dirty.length > 0) throw new DirtyWorktreesError(dirty);
+    // The rebuild goes ahead: work queued before it is dropped; work that
+    // arrives during it stays parked and runs against the fresh workspace.
+    await discardFamilyWork(deps.queue, stopJids);
 
     // Files are moved aside rather than deleted. The SQLite transaction below
     // either commits the whole rebuild or leaves the database untouched, in
