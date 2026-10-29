@@ -389,7 +389,11 @@ export interface AgentInfo {
     | 'feishu_thread'
     | 'auto_im'
     | 'channel_direct'
+    | 'automation'
     | null;
+  /** Sessions an automation opened (fresh / persistent runs). */
+  automation_id?: string | null;
+  automation_name?: string | null;
   thread_id?: string | null;
   root_message_id?: string | null;
   title_source?:

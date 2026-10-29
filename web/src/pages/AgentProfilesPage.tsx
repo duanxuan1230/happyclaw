@@ -1163,7 +1163,7 @@ export function AgentProfilesPage() {
                   modelConfigs={modelConfigs}
                   hostAvailable={isAdmin}
                   labelPrefix="智能体"
-                  modelConfigDescription="该智能体所属的所有工作区、会话和定时任务都会使用这里解析出的完整模型网关环境。未启用的配置不会参与系统自动选择，但仍可由智能体显式使用。"
+                  modelConfigDescription="该智能体所属的所有工作区、会话和自动化都会使用这里解析出的完整模型网关环境。未启用的配置不会参与系统自动选择，但仍可由智能体显式使用。"
                 />
                 <SettingsGroup>
                   {isAdmin && (

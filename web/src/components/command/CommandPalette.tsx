@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   CommandDialog,
   CommandEmpty,
@@ -17,6 +17,8 @@ import { useAuthStore } from '../../stores/auth';
 import { useBillingStore } from '../../stores/billing';
 import { useChatStore } from '../../stores/chat';
 import { useShellStore } from '../../stores/shell';
+import { useAutomationsStore } from '../../stores/automations';
+import { sessionJidOf } from '../../lib/session-jid';
 import { useTheme } from '../../hooks/useTheme';
 import { useNewConversation } from '../../hooks/useNewConversation';
 import { filterNavItems } from '../layout/nav-items';
@@ -39,12 +41,22 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const billingEnabled = useBillingStore((s) => s.billingEnabled);
   const groups = useChatStore((s) => s.groups);
   const agents = useChatStore((s) => s.agents);
   const currentGroup = useChatStore((s) => s.currentGroup);
+  // The open session, from the chat page's own URL (`?agent=`).
+  const currentSession = useMemo(() => {
+    if (!location.pathname.startsWith('/chat') || !currentGroup) return null;
+    const agentId = new URLSearchParams(location.search).get('agent');
+    return {
+      workspaceJid: currentGroup,
+      sessionJid: sessionJidOf(currentGroup, agentId),
+    };
+  }, [location.pathname, location.search, currentGroup]);
   const loadAgents = useChatStore((s) => s.loadAgents);
   const toggleSidebar = useShellStore((s) => s.toggleSidebar);
   const setCreateWorkspaceOpen = useShellStore((s) => s.setCreateWorkspaceOpen);
@@ -81,9 +93,11 @@ export function CommandPalette({
       canManageUsers: hasPermission('manage_users'),
       theme,
       colorScheme,
+      currentSession,
     });
   }, [
     agents,
+    currentSession,
     billingEnabled,
     colorScheme,
     groups,
@@ -146,6 +160,16 @@ export function CommandPalette({
         break;
       case 'createWorkspace':
         setCreateWorkspaceOpen(true);
+        break;
+      case 'createAutomation':
+        useAutomationsStore.getState().openCreateForm(
+          action.from
+            ? {
+                workspaceJid: action.from.workspaceJid,
+                targetSessionJid: action.from.sessionJid,
+              }
+            : {},
+        );
         break;
       case 'toggleSidebar':
         toggleSidebar();

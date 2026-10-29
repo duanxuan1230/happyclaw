@@ -113,7 +113,7 @@ const KIND_ICONS: Record<WorkspaceMemoryKind, typeof FileText> = {
 const SOURCE_TYPE_LABELS: Record<string, string> = {
   web_user: 'Web 用户',
   agent_runtime: 'Agent Runtime',
-  scheduled_task: '定时任务',
+  scheduled_task: '自动化',
   migration: '迁移',
 };
 
@@ -1374,7 +1374,7 @@ export function MemoryPage() {
                           query.trim()
                             ? '换一个关键词，或清除类别筛选后重试。'
                             : proposedView
-                              ? '群聊成员的对话或定时任务写入的记忆会先出现在这里，由你确认后才会生效。'
+                              ? '群聊成员的对话或自动化写入的记忆会先出现在这里，由你确认后才会生效。'
                               : canModify
                                 ? '创建第一条事实、决策、经验或待跟进事项。'
                                 : '你可以查看该工作区，但不能修改它。'

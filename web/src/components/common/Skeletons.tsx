@@ -1,7 +1,7 @@
 import { Skeleton } from '@/components/ui/skeleton';
 
 /**
- * TasksPage - vertical card list
+ * Vertical card list
  */
 export function SkeletonCardList({
   count = 4,

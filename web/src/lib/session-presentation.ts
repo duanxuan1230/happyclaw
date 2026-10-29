@@ -84,6 +84,42 @@ export function buildSessionMeta(session: AgentInfo): string {
   return [time, detail].filter(Boolean).join(' · ');
 }
 
+/** The sessions one automation opened, shown as a group in the tree. */
+export interface AutomationSessionGroup {
+  automationId: string;
+  /** The name the session list carries, for when the automation is gone. */
+  name: string;
+  sessions: AgentInfo[];
+}
+
+/**
+ * Sessions an automation opened, grouped per automation in the order of
+ * their newest session; the rest keep their order.
+ */
+export function partitionAutomationSessions(sessions: AgentInfo[]): {
+  groups: AutomationSessionGroup[];
+  others: AgentInfo[];
+} {
+  const groups = new Map<string, AutomationSessionGroup>();
+  const others: AgentInfo[] = [];
+  for (const session of sessions) {
+    const id = session.automation_id;
+    if (!id) {
+      others.push(session);
+      continue;
+    }
+    const group = groups.get(id);
+    if (group) group.sessions.push(session);
+    else
+      groups.set(id, {
+        automationId: id,
+        name: session.automation_name || session.name,
+        sessions: [session],
+      });
+  }
+  return { groups: [...groups.values()], others };
+}
+
 /**
  * Conversation sessions newest-first. A session whose runner is still warm
  * but has no active query is shown as idle, matching what the user can act on.

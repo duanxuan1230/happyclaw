@@ -59,9 +59,13 @@ import {
   SlidersHorizontal,
   Terminal,
   TerminalSquare,
+  Timer,
   Upload,
   X,
 } from 'lucide-react';
+import { SessionAutomationBadge } from '../automations/SessionAutomationBadge';
+import { useAutomationsStore } from '../../stores/automations';
+import { sessionJidOf } from '../../lib/session-jid';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
@@ -589,6 +593,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // uploads follow it.
   const activeWorktree = sessionTab ? (activeAgent?.worktree ?? null) : null;
   const worktreeSessionId = activeWorktree ? activeAgentTab : null;
+  // The session automations bind to: a conversation, or the main one.
+  const runtimeSessionJid = sessionJidOf(
+    groupJid,
+    sessionTab ? activeAgentTab : null,
+  );
+  const openCreateAutomation = useAutomationsStore((s) => s.openCreateForm);
   useEffect(() => {
     useFileStore.getState().setFileScopeSession(groupJid, worktreeSessionId);
   }, [groupJid, worktreeSessionId]);
@@ -764,7 +774,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     // 通过 new_message 立即添加消息到本地状态（消除轮询延迟导致的消息"丢失"）
     const unsub2 = wsManager.on('new_message', (data: any) => {
       if (data.chatJid === groupJid && data.message) {
-        handleWsNewMessage(groupJid, data.message, data.agentId, data.source);
+        handleWsNewMessage(groupJid, data.message, data.agentId);
       }
     });
     // WebSocket 消息校验失败时通知用户
@@ -1282,6 +1292,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         ]
       : [],
     [
+      ...(canModifyWorkspaceConfig
+        ? [
+            {
+              label: '从此会话创建自动化…',
+              icon: Timer,
+              onSelect: () =>
+                openCreateAutomation({
+                  workspaceJid: groupJid,
+                  targetSessionJid: runtimeSessionJid,
+                }),
+            },
+          ]
+        : []),
       ...(toggleTerminal
         ? [{ label: '终端', icon: TerminalSquare, onSelect: toggleTerminal }]
         : []),
@@ -1370,6 +1393,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               )}
             </nav>
             <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden md:flex">
+              <SessionAutomationBadge
+                sessionJid={runtimeSessionJid}
+                generatedBy={sessionTab ? activeAgent?.automation_id : null}
+              />
               {group.execution_mode && (
                 <Badge variant="outline">
                   {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
