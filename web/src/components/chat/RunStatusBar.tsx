@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import { Hourglass, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -15,8 +15,12 @@ import { useReplyRate } from '../../hooks/useReplyRate';
 import { useRunElapsed } from '../../hooks/useRunElapsed';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
 import { useAfterDelay } from '../../hooks/useTick';
-import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  latestProgress,
+  normalizeProcessVisibility,
+} from '../../lib/process-visibility';
 import { describeRunStatus, formatRunElapsed } from '../../lib/run-phase';
+import { stripInlineMarkdown } from '../../lib/thinking-text';
 import {
   formatResumeTime,
   useUsageLimitWaits,
@@ -42,7 +46,8 @@ const PILL =
  * is active, or while one only closes after its turn ended. A proactive
  * workspace shows no more than its process level already does: at `hidden`
  * only that it is busy, and after its reply nothing until it has been going
- * quietly for a while.
+ * quietly for a while. While it works, the latest progress the Agent sent the
+ * user follows the phase, at every level.
  */
 export const RunStatusBar = memo(function RunStatusBar({
   groupJid,
@@ -81,6 +86,13 @@ export const RunStatusBar = memo(function RunStatusBar({
       ),
   );
   const quiet = useChatStore((s) => proactiveTurnQuiet(s, runtimeJid));
+  const progressText = useChatStore((s) =>
+    proactive ? latestProgress(liveStreamOf(s, runtimeJid)?.steps) : null,
+  );
+  const progress = useMemo(
+    () => (progressText ? stripInlineMarkdown(progressText) : null),
+    [progressText],
+  );
   const stillGoing = useAfterDelay(running && quiet, QUIET_DELAY_MS);
   const elapsed = useRunElapsed(runtimeJid);
   const rate = useReplyRate(groupJid, agentId ?? undefined);
@@ -91,7 +103,11 @@ export const RunStatusBar = memo(function RunStatusBar({
     : busyOnly
       ? BUSY_TEXT
       : phase;
-  const announced = useThrottledValue(label, 3000);
+  const shownProgress = !offline && !quiet ? progress : null;
+  const announced = useThrottledValue(
+    shownProgress ? `${label}：${shownProgress}` : label,
+    3000,
+  );
   const usageWait = useUsageLimitWaits((s) => s.waits[runtimeJid]);
 
   // Between runs, an input waiting for a usage-limit reset says when it goes on.
@@ -134,9 +150,21 @@ export const RunStatusBar = memo(function RunStatusBar({
         )}
       >
         <Sparkles className="size-3.5 shrink-0" aria-hidden="true" />
-        <span data-hc-run-phase="" className="truncate">
+        <span
+          data-hc-run-phase=""
+          className={shownProgress ? 'shrink-0' : 'truncate'}
+        >
           {label}
         </span>
+        {shownProgress && (
+          <span
+            data-hc-run-progress=""
+            title={shownProgress}
+            className="min-w-0 truncate font-normal text-muted-foreground"
+          >
+            {shownProgress}
+          </span>
+        )}
       </span>
       <span role="status" aria-live="polite" className="sr-only">
         {announced}

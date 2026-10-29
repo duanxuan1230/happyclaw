@@ -387,7 +387,7 @@ import {
   PROACTIVE_TAIL_INTERRUPTION_NOTICE,
   buildInteractionTextOutboxPayload,
   isProactiveControlPlaneSuccess,
-  projectProgressStatusForWeb,
+  projectProgressForWeb,
   projectSdkStreamEventForWeb,
   publishesFrameworkAnswer,
   resolveFrozenIpcInteractionMode,
@@ -8389,28 +8389,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        const visibility = resolveProcessVisibility();
-        const commentaryEvent: StreamEvent = {
-          eventType: 'commentary',
-          agentScope: 'main',
-          text: text.slice(0, 4000),
-          turnId: inputTurnId,
-          inputTurnId,
-          sessionId: activeSessionId,
-        };
-        turnTraces.observe(inputTurnId, commentaryEvent);
-        if (interactionMode === 'assistant' || visibility === 'full') {
-          broadcastStreamEvent(chatJid, commentaryEvent);
-        }
-        const progressStatus = projectProgressStatusForWeb(
+        const progress = projectProgressForWeb(
           interactionMode,
-          visibility,
+          resolveProcessVisibility(),
           text,
-          { turnId: inputTurnId, sessionId: activeSessionId },
+          { inputTurnId, sessionId: activeSessionId },
         );
-        if (progressStatus) {
-          broadcastStreamEvent(chatJid, { ...progressStatus, inputTurnId });
-        }
+        turnTraces.observe(inputTurnId, progress.step);
+        for (const event of progress.web) broadcastStreamEvent(chatJid, event);
         return true;
       },
       onFinalCandidate: (text) => {
@@ -12920,6 +12906,17 @@ function startIpcWatcher(): void {
                   authorized,
                   scheduledTask: isTaskIpcMessage,
                   interactionMode: ipcInteractionMode,
+                  // The input's own reply route, the one a separate message
+                  // would take below: none means a Web turn.
+                  turnSource: resolveImRoute({
+                    inputTurnId: data.inputTurnId,
+                    ipcAgentId,
+                    isHome,
+                    chatJid: data.chatJid,
+                    sourceGroup,
+                  })
+                    ? 'im'
+                    : 'web',
                 },
                 activeTurnOutputs,
               );
@@ -17998,31 +17995,15 @@ async function processAgentConversation(
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        const visibility = resolveProcessVisibility();
-        const commentaryEvent: StreamEvent = {
-          eventType: 'commentary',
-          agentScope: 'main',
-          text: text.slice(0, 4000),
-          turnId: inputTurnId,
-          inputTurnId,
-          sessionId: currentAgentSessionId,
-        };
-        turnTraces.observe(inputTurnId, commentaryEvent);
-        if (interactionMode === 'assistant' || visibility === 'full') {
-          broadcastStreamEvent(chatJid, commentaryEvent, agentId);
-        }
-        const progressStatus = projectProgressStatusForWeb(
+        const progress = projectProgressForWeb(
           interactionMode,
-          visibility,
+          resolveProcessVisibility(),
           text,
-          { turnId: inputTurnId, sessionId: currentAgentSessionId },
+          { inputTurnId, sessionId: currentAgentSessionId },
         );
-        if (progressStatus) {
-          broadcastStreamEvent(
-            chatJid,
-            { ...progressStatus, inputTurnId },
-            agentId,
-          );
+        turnTraces.observe(inputTurnId, progress.step);
+        for (const event of progress.web) {
+          broadcastStreamEvent(chatJid, event, agentId);
         }
         return true;
       },

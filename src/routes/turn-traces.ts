@@ -79,7 +79,6 @@ turnTraceRoutes.get('/:jid/turn-traces/:turnId', authMiddleware, (c) => {
   const exposure = resolveTurnTraceExposure(executionGroup.folder, {
     agentKind,
   });
-  if (!exposure.visible) return c.json({ error: 'Trace not found' }, 404);
 
   // A trace is stored under the chat its messages live in. The client names
   // that chat, but a home group's history also merges its IM chats, so look
@@ -89,7 +88,11 @@ turnTraceRoutes.get('/:jid/turn-traces/:turnId', authMiddleware, (c) => {
     : [chatJid, ...resolveMessageQueryJids(chatJid, physicalGroup).slice(1)];
   for (const candidate of candidates) {
     const record = getTurnTrace(candidate, turnId);
-    if (record) return c.json(presentTurnTrace(record, exposure));
+    if (!record) continue;
+    // At `hidden`, a turn without progress statements shows nothing.
+    const presented = presentTurnTrace(record, exposure);
+    if (presented) return c.json(presented);
+    break;
   }
   return c.json({ error: 'Trace not found' }, 404);
 });

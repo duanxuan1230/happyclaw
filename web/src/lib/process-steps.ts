@@ -5,7 +5,7 @@
  * The shared reducer (`stream-steps`) owns the steps themselves.
  */
 import { describeToolCall } from '../components/chat/ToolActivityCard';
-import { SPEECH_TOOL_NAME } from './process-visibility';
+import { SPEECH_TOOL_NAME, isProgressStep } from './process-visibility';
 import { formatRunElapsed } from './run-phase';
 import {
   TIMELINE_ROWS,
@@ -281,12 +281,17 @@ export function formatSpanZh(ms: number | undefined): string {
 
 // ── what the card lists ─────────────────────────────────────────────────
 
-/** The steps the reader is meant to see: the commentary only when asked for. */
+/**
+ * The steps the reader is meant to see: the commentary only when asked for,
+ * the progress statements the Agent sent always.
+ */
 export function visibleSteps(
   steps: readonly StreamingStep[],
   commentary: boolean,
 ): StreamingStep[] {
-  return commentary ? [...steps] : steps.filter((step) => step.kind !== 'text');
+  return commentary
+    ? [...steps]
+    : steps.filter((step) => step.kind !== 'text' || isProgressStep(step));
 }
 
 /** The steps the timeline lists, and a finished run is summed up from. */
@@ -331,13 +336,18 @@ export function describeWorkCounts(
   steps: readonly StreamingStep[],
   dropped = 0,
 ): string {
-  const counts = summarizeSteps(summarizedSteps(steps));
+  const listed = summarizedSteps(steps);
+  const counts = summarizeSteps(listed);
   const tools = counts.tools + counts.tasks;
   const parts: string[] = [];
   if (tools > 0) parts.push(`${tools} 个工具`);
   if (counts.thinking > 0) parts.push(`${counts.thinking} 段思考`);
   if (parts.length === 0 && counts.commentary > 0) {
-    parts.push(`${counts.commentary} 条过程说明`);
+    const progress = listed.filter(isProgressStep).length;
+    if (progress > 0) parts.push(`${progress} 条进展`);
+    if (counts.commentary > progress) {
+      parts.push(`${counts.commentary - progress} 条过程说明`);
+    }
   }
   if (counts.failed > 0) parts.push(`${counts.failed} 个失败`);
   if (dropped > 0) parts.push(`另有较早 ${dropped} 步`);

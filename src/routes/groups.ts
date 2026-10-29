@@ -3042,7 +3042,8 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   const queryJids = resolveMessageQueryJids(jid, group);
 
   // A turn's stored thinking/trace follows the workspace's current contract
-  // (a proactive workspace set to `hidden` lists none).
+  // (a proactive workspace set to `hidden` lists only the turns whose progress
+  // statements it shows).
   const exposure = resolveTurnTraceExposure(group.folder);
 
   if (queryJids.length === 1) {

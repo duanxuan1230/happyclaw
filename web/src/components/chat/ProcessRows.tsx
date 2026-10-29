@@ -588,7 +588,9 @@ const TextRow = memo(function TextRow({
   return (
     <RowFrame
       icon={<RowIcon icon={MessageSquare} tone="quiet" />}
-      label={open ? '过程说明' : stripInlineMarkdown(text)}
+      label={
+        open ? (step.progress ? '进展' : '过程说明') : stripInlineMarkdown(text)
+      }
       grow
       open={open}
       onToggle={() => onToggle(step.id, !open)}

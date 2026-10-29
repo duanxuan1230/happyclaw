@@ -279,7 +279,12 @@ export class TurnStepRecorder {
       case 'commentary':
         if (isSubagentEvent(event) || !event.text) break;
         this.endThinkingBurst(now);
-        this.list = addCommentaryStep(this.list, now, event.text);
+        this.list = addCommentaryStep(
+          this.list,
+          now,
+          event.text,
+          !!event.progress,
+        );
         break;
       case 'thinking_delta':
         if (event.parentToolUseId) {
@@ -700,6 +705,16 @@ export interface StepsView {
    * mode) and the Workspace's *current* mode decides what is shown.
    */
   proactive?: boolean;
+  /**
+   * Only the progress statements the Agent sent the user (a proactive
+   * Workspace at `hidden`): nothing else of the process is shown.
+   */
+  progressOnly?: boolean;
+}
+
+/** A progress statement the Agent sent the user: every level shows it. */
+export function isProgressStep(step: StreamingStep): boolean {
+  return step.kind === 'text' && !!step.progress;
 }
 
 /**
@@ -714,6 +729,8 @@ export function viewSteps(
   const out: StreamingStep[] = [];
   for (const step of steps) {
     let shown = step;
+    const progress = isProgressStep(step);
+    if (view.progressOnly && !progress) continue;
     if (view.proactive) {
       if (shown.kind === 'text' && !shown.commentary) continue;
       if (shown.kind === 'tool' && isMessageDeliveryTool(shown.toolName)) {
@@ -745,7 +762,7 @@ export function viewSteps(
       }
     }
     if (!view.includeThinking) {
-      if (shown.kind === 'text') continue;
+      if (shown.kind === 'text' && !progress) continue;
       if (shown.kind === 'thinking') {
         const { text: _text, title: _title, ...rest } = shown;
         shown = rest;
@@ -914,6 +931,7 @@ function readStep(raw: unknown): StreamingStep | null {
   if (isFiniteNumber(row.durationMs)) step.durationMs = row.durationMs;
   if (isFiniteNumber(row.from)) step.from = row.from;
   if (row.commentary === true) step.commentary = true;
+  if (row.progress === true) step.progress = true;
   for (const key of [
     'text',
     'title',

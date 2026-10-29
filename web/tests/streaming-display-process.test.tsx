@@ -131,6 +131,7 @@ const mount = async (
     /** The input whose turn already ended while the run closes. */
     answered?: string;
     proactive?: boolean;
+    visibility?: 'hidden' | 'activity' | 'full';
   } = {},
 ) => {
   const shown = streaming ? { [JID]: streaming } : {};
@@ -155,7 +156,7 @@ const mount = async (
             folder: 'proactive',
             added_at: '2026-10-10T00:00:00.000Z',
             interaction_mode: 'proactive',
-            process_visibility: 'activity',
+            process_visibility: props.visibility ?? 'activity',
           } as never,
         }
       : {},
@@ -338,6 +339,59 @@ describe('StreamingDisplay, a run whose turn already ended', () => {
       proactive: true,
     });
     expect(container.querySelector('[data-hc-process-panel]')).not.toBeNull();
+  });
+});
+
+describe('StreamingDisplay, a proactive turn at the hidden level', () => {
+  const progress = {
+    id: 'note-p',
+    kind: 'text' as const,
+    at: 1_000_000,
+    endedAt: 1_000_000,
+    status: 'done' as const,
+    commentary: true,
+    progress: true,
+    text: '先跑一遍测试，稍等。',
+  };
+  const panel = () => container.querySelector('[data-hc-process-panel]');
+
+  it('shows nothing of a turn that sent no progress', async () => {
+    await mount(state({ inputTurnId: 'input-1' }), {
+      proactive: true,
+      visibility: 'hidden',
+    });
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('lists the progress the Agent sent, and nothing else of the process', async () => {
+    await mount(
+      state({ inputTurnId: 'input-1', steps: [...steps, progress] }),
+      {
+        proactive: true,
+        visibility: 'hidden',
+      },
+    );
+    expect(panel()).not.toBeNull();
+    expect(text()).toContain('先跑一遍测试，稍等。');
+    expect(text()).toContain('正在处理');
+    expect(text()).not.toContain('npm');
+    expect(text()).not.toContain('最近');
+  });
+
+  it('gives the progress way to the reply, like the panel at any level', async () => {
+    const reasoning = state({
+      inputTurnId: 'input-1',
+      partialText: '',
+      steps: [progress],
+      activeTools: [],
+      traceEvents: [],
+    });
+    await mount(reasoning, {
+      answered: 'input-1',
+      proactive: true,
+      visibility: 'hidden',
+    });
+    expect(container.innerHTML).toBe('');
   });
 });
 

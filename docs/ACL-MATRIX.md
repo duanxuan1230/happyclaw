@@ -143,17 +143,20 @@ Memory 随 Workspace 保留，不跨 Workspace 复制。
 
 主动模式工作区的 `process_visibility` 同时约束实时广播和已存轨迹：
 
-| 级别       | 实时 WebSocket 过程事件 | `turn-traces` 与 `has_trace`                              |
-| ---------- | ----------------------- | --------------------------------------------------------- |
-| `hidden`   | 仅运行生命周期          | 404，消息不带 `has_trace`                                 |
-| `activity` | 工具、任务、todo 等结构 | 可读，`thinking` 为空，`steps` 中的思考步骤没有文本与标题 |
-| `full`     | 再加推理摘要与过程说明  | 完整                                                      |
+| 级别       | 实时 WebSocket 过程事件     | `turn-traces` 与 `has_trace`                              |
+| ---------- | --------------------------- | --------------------------------------------------------- |
+| `hidden`   | 运行生命周期与进展          | 只有进展步骤；没有进展的回合 404，其消息不带 `has_trace`  |
+| `activity` | 再加工具、任务、todo 等结构 | 可读，`thinking` 为空，`steps` 中的思考步骤没有文本与标题 |
+| `full`     | 再加推理摘要与过程说明      | 完整                                                      |
 
 模型自己产出的文字（`text_delta`、工具结果文本、子 Agent 的提示词与回答）在任何级别
-都不会广播，也不会写入轨迹。唯一的例外是 `full` 级别的过程说明（`commentary`）：主
-Agent 在调用工具前写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给
-Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行
-（宿主逐个调用判断，不向前看，详见 `docs/API.md`）。
+都不会广播，也不会写入轨迹。例外有两个。一是进展：Web 回合里 Agent 用
+`send_message(delivery_role=progress)` 发给用户的话，作为带 `progress` 的
+`commentary` 在每个级别广播并写入轨迹（IM 回合的进展是一条独立消息，不经过这里）。
+二是 `full` 级别的过程说明（不带 `progress` 的 `commentary`）：主 Agent 在调用工具前
+写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给 Web、不写入轨迹；回合
+结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行（宿主逐个调用判断，
+不向前看，详见 `docs/API.md`）。
 工具结果事件上的 `toolIsError`（SDK 的 `is_error`，布尔）在任何级别都放行；
 `toolResultFacts`（工具做了什么的数字，如增删行数）只在 Assistant 模式下发，主动模式在
 任何级别都剥掉。
@@ -161,10 +164,11 @@ Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `
 过滤读取**当前**级别和**当前**模式，而不是回合运行时的：一个回合可能按 Assistant 契约
 记录（工作区当时还是 Assistant 模式，或渠道挂载的 `interaction_mode_override` 为
 `assistant` 的消息由 Assistant Runner 处理），之后在主动模式工作区里读取。所以主动模式
-工作区读取 `turn-traces` 时，无论回合怎么记录，`steps` 都不含过程说明（text 步骤）、发言
+工作区读取 `turn-traces` 时，无论回合怎么记录，`steps` 都不含进展以外的 text 步骤、发言
 工具 `send_message` 的步骤，tool/task 步骤也都没有 `resultPreview`（工具输出、子 Agent
-的回答、权限拒绝的原因）和 `resultFacts`，只留下调用的输入摘要和成败状态；`trace` 里
-“工具结果”“Task 启动”两类行没有 `detail`（工具输出、子 Agent 的提示词）。Assistant
+的回答、权限拒绝的原因；工作区记忆写入工具的回执除外）和 `resultFacts`，只留下调用的
+输入摘要和成败状态；`trace` 里“工具结果”“Task 启动”两类行没有 `detail`（工具输出、
+子 Agent 的提示词）。Assistant
 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
 列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
 都返回 404。

@@ -334,6 +334,22 @@ describe('describeWorkCounts', () => {
     expect(describeWorkCounts([])).toBe('');
   });
 
+  it('calls the progress the Agent sent progress', () => {
+    expect(
+      describeWorkCounts([
+        step({
+          id: 'p1',
+          kind: 'text',
+          commentary: true,
+          progress: true,
+          text: '在查',
+        }),
+        step({ id: 'n1', kind: 'text', commentary: true, text: '先看看' }),
+        tool('q', 'AskUserQuestion'),
+      ]),
+    ).toBe('1 条进展 · 1 条过程说明');
+  });
+
   it('says there were earlier steps it did not count', () => {
     expect(describeWorkCounts([tool('a', 'Bash')], 3)).toBe(
       '1 个工具 · 另有较早 3 步',
@@ -358,6 +374,21 @@ describe('what the card lists', () => {
   it('drops the commentary unless it is asked for', () => {
     expect(visibleSteps(steps, true)).toHaveLength(4);
     expect(visibleSteps(steps, false).map((s) => s.id)).toEqual(['a', 'b']);
+  });
+
+  it('keeps the progress the Agent sent either way', () => {
+    const progress = step({
+      id: 'p',
+      kind: 'text',
+      commentary: true,
+      progress: true,
+      text: '在查',
+    });
+    expect(visibleSteps([...steps, progress], false).map((s) => s.id)).toEqual([
+      'a',
+      'b',
+      'p',
+    ]);
   });
 
   it('has something to show when the timeline would list a step', () => {

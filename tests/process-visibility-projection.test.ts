@@ -6,8 +6,7 @@ import type {
 } from '../src/stream-event.types.js';
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 import {
-  projectProgressCommentaryForWeb,
-  projectProgressStatusForWeb,
+  projectProgressForWeb,
   projectSdkStreamEventForWeb,
   shouldBroadcastTaskAgentStatus,
 } from '../src/workspace-interaction-runtime.js';
@@ -280,82 +279,84 @@ describe('process visibility projection for the Web', () => {
 });
 
 describe('progress statements written by the Agent', () => {
-  // The Agent's send_message(delivery_role=progress) is announced to the Web as
-  // a status line. It is the model's own sentence, so it must go through the
-  // same gate as every other event instead of relying on the router never
-  // staging progress for a proactive workspace.
+  // The Agent's send_message(delivery_role=progress), staged on a Web turn,
+  // reaches the Web through projectProgressForWeb, the function both onProgress
+  // handlers call. It is the model's own sentence, so it still passes the gate
+  // every other event passes.
   const SENTENCE = '正在核对 /etc/secret-looking-path 下的配置';
   const progress = (
     mode: InteractionMode,
     visibility: ProcessVisibility,
     text = SENTENCE,
   ) =>
-    projectProgressStatusForWeb(mode, visibility, text, {
-      turnId: 'turn-1',
-      sessionId: 'session-1',
-    });
-
-  test('an assistant workspace announces it at every level, unchanged in meaning', () => {
-    for (const level of LEVELS) {
-      expect(progress('assistant', level)).toEqual({
-        eventType: 'status',
-        agentScope: 'system',
-        statusText: SENTENCE,
-        summary: SENTENCE,
-        isSynthetic: true,
-        displayLevel: 'primary',
-        turnId: 'turn-1',
-        sessionId: 'session-1',
-      });
-    }
-  });
-
-  test('a proactive workspace keeps the sentence out of the activity level too', () => {
-    // `activity` is the structure of the work and promises no model text; a
-    // sentence the model wrote is shown only where its reasoning is.
-    expect(progress('proactive', 'hidden')).toBeNull();
-    expect(progress('proactive', 'activity')).toBeNull();
-  });
-
-  test('a proactive workspace announces it once its reasoning is shown', () => {
-    expect(progress('proactive', 'full')?.statusText).toBe(SENTENCE);
-  });
-
-  test('the line and the summary are bounded like the other status lines', () => {
-    const long = '长'.repeat(900);
-    const event = progress('assistant', 'full', long)!;
-    expect(event.statusText).toHaveLength(160);
-    expect(event.summary).toHaveLength(500);
-  });
-
-  test('projects progress as a commentary step at full (and in assistant), withheld at activity and hidden', () => {
-    const commentary = (
-      mode: InteractionMode,
-      visibility: ProcessVisibility,
-      text = SENTENCE,
-    ) =>
-      projectProgressCommentaryForWeb(mode, visibility, text, {
-        turnId: 'turn-1',
-        inputTurnId: 'input-1',
-        sessionId: 'session-1',
-      });
-
-    expect(commentary('proactive', 'hidden')).toBeNull();
-    expect(commentary('proactive', 'activity')).toBeNull();
-    expect(commentary('proactive', 'full')).toEqual({
-      eventType: 'commentary',
-      agentScope: 'main',
-      text: SENTENCE,
-      turnId: 'turn-1',
+    projectProgressForWeb(mode, visibility, text, {
       inputTurnId: 'input-1',
       sessionId: 'session-1',
     });
+
+  test('an assistant workspace shows it as a step and as the status line, unchanged', () => {
     for (const level of LEVELS) {
-      expect(commentary('assistant', level)?.text).toBe(SENTENCE);
+      expect(progress('assistant', level).web).toEqual([
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: SENTENCE,
+          turnId: 'input-1',
+          inputTurnId: 'input-1',
+          sessionId: 'session-1',
+        },
+        {
+          eventType: 'status',
+          agentScope: 'system',
+          statusText: SENTENCE,
+          summary: SENTENCE,
+          isSynthetic: true,
+          displayLevel: 'primary',
+          turnId: 'input-1',
+          inputTurnId: 'input-1',
+          sessionId: 'session-1',
+        },
+      ]);
     }
-    expect(
-      commentary('proactive', 'full', '长'.repeat(5000))?.text,
-    ).toHaveLength(4000);
+  });
+
+  test('a proactive workspace shows it as a progress step at every level, and only that', () => {
+    for (const level of LEVELS) {
+      const { step, web } = progress('proactive', level);
+      expect(step).toEqual({
+        eventType: 'commentary',
+        agentScope: 'main',
+        text: SENTENCE,
+        turnId: 'input-1',
+        inputTurnId: 'input-1',
+        sessionId: 'session-1',
+        progress: true,
+      });
+      expect(web).toEqual([step]);
+    }
+  });
+
+  test('the step is what the trace records, at every level', () => {
+    for (const level of LEVELS) {
+      expect(progress('assistant', level).step.progress).toBeUndefined();
+      expect(progress('proactive', level).step.progress).toBe(true);
+    }
+  });
+
+  test('the step and the status line are bounded', () => {
+    const long = '长'.repeat(5000);
+    const assistant = progress('assistant', 'full', long);
+    expect(assistant.step.text).toHaveLength(4000);
+    expect(assistant.web[1].statusText).toHaveLength(160);
+    expect(assistant.web[1].summary).toHaveLength(500);
+    expect(progress('proactive', 'hidden', long).step.text).toHaveLength(4000);
+  });
+
+  test('narration is still shown only at full: the gate tells the two apart', () => {
+    const narration = event('commentary', { text: SENTENCE });
+    expect(proactive('hidden', narration)).toBeNull();
+    expect(proactive('activity', narration)).toBeNull();
+    expect(proactive('full', narration)).toBe(narration);
   });
 
   test('preserves workspace memory write receipts in tool_result while stripping detail', () => {
@@ -371,6 +372,54 @@ describe('progress statements written by the Agent', () => {
       const projected = proactive(level, result)!;
       expect(projected.toolResult).toBe(receipt);
       expect(projected.detail).toBeUndefined();
+    }
+  });
+
+  test('keeps a receipt that names only its call, when that call was a memory write', () => {
+    // The main Agent's tool_result carries the call id, not the tool name.
+    const receipt = '{"result":"proposed","id":"wmi_2","title":"项目约定"}';
+    for (const level of ['activity', 'full'] as const) {
+      const id = `t-mem-${level}`;
+      proactive(
+        level,
+        event('tool_use_start', {
+          toolUseId: id,
+          toolName: 'mcp__happyclaw__workspace_memory_remember',
+        }),
+      );
+      const projected = proactive(
+        level,
+        event('tool_result', { toolUseId: id, toolResult: receipt }),
+      )!;
+      expect(projected.toolResult).toBe(receipt);
+    }
+  });
+
+  test('withholds what any other tool returned, even shaped like a receipt', () => {
+    // A command can print anything; looking like a receipt is no reason to
+    // show the output of a tool at the activity level.
+    const forged = '{"result":"remembered","id":"wmi_x","title":"偷看"}';
+    for (const level of ['activity', 'full'] as const) {
+      const id = `t-bash-${level}`;
+      proactive(
+        level,
+        event('tool_use_start', { toolUseId: id, toolName: 'Bash' }),
+      );
+      const projected = proactive(
+        level,
+        event('tool_result', { toolUseId: id, toolResult: forged }),
+      )!;
+      expect(projected.toolResult).toBeUndefined();
+      // A result whose call was never seen starting is withheld too.
+      expect(
+        proactive(
+          level,
+          event('tool_result', {
+            toolUseId: `unseen-${level}`,
+            toolResult: forged,
+          }),
+        )!.toolResult,
+      ).toBeUndefined();
     }
   });
 });
