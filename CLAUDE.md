@@ -311,10 +311,14 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   不合并成只有单一回复目标的批次。
 - 文件和图片投递必须使用当前 Turn 的 `ChannelTurnContext`，不能从“最近一条群消息”
   猜测目标。
-- 主动模式下 Agent 用 `send_message(delivery_role=progress)` 发的进展：IM 来源的轮次作为
-  独立消息发出（IM 无法折叠）；Web 来源的轮次进入过程视图，在 `process_visibility` 的
-  所有级别都显示，最终回复送达后随过程折叠，并随回合存进 turn_traces（`hidden` 级别只存
-  进展）。工具调用前的旁白仍只在 `full` 显示。
+- 主动模式下 Agent 用 `send_message(delivery_role=progress)` 发的进展，按这一轮输入自己的
+  来源渠道路由：IM 来源作为独立消息发出（IM 无法折叠），没有可用路由时以
+  `native_route_unavailable` 拒绝，绝不转进 Web；Web 来源进入过程视图，在
+  `process_visibility` 的所有级别都显示（运行快照 `stream_snapshot.progress` 让新标签页和
+  重连也能看到），最终回复送达后随过程折叠，并随回合存进 turn_traces（`hidden` 级别只存
+  进展）。发过进展的 Web 轮次被停止、出错或因缺少 final 而终止时，宿主写一条收尾片段
+  （`interrupt_partial`）承载这些进展。没有 inputTurnId 的进展与 main 一致直接作为消息
+  发出。工具调用前的旁白仍只在 `full` 显示。
 
 ### 6.3 飞书会话语义
 
