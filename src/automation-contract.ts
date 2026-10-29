@@ -115,6 +115,15 @@ export interface AutomationRuntimeDeps {
   }): string | null;
   /** True if the session JID resolves to a live Main or Runtime Session. */
   sessionExists(sessionJid: string): boolean;
+  /**
+   * Every run session created for the automation (agents.automation_id),
+   * archived ones included, newest first. Retention and the delete dialog
+   * use it instead of run rows, which are trimmed.
+   */
+  listAutomationSessions(automationId: string): Array<{
+    sessionJid: string;
+    archived: boolean;
+  }>;
   /** Hide an old fresh-mode run session (status completed); keeps history. */
   archiveAutomationSession(sessionJid: string): Promise<void>;
   /** Delete a run session (delete dialog「删除会话」). */
