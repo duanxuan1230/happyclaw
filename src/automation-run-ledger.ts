@@ -12,6 +12,7 @@ import type {
   AutomationService,
 } from './automation-contract.js';
 import type { AutomationIpcType } from './automation.js';
+import type { ChannelTurnRunStatus } from './channel-reliability-store.js';
 import { logger } from './logger.js';
 import type { NewMessage } from './types.js';
 
@@ -354,6 +355,32 @@ export class AutomationTurnTracker {
       status: 'success',
       resultText: this.resultTexts.get(inputTurnId) ?? null,
     });
+  }
+
+  /**
+   * The turn had already reached `status` before this attempt: only a
+   * completed turn is a success.
+   */
+  settleFinishedTurn(inputTurnId: string, status: ChannelTurnRunStatus): void {
+    switch (status) {
+      case 'completed':
+        this.settleSuccess(inputTurnId);
+        return;
+      case 'cancelled':
+        this.settle(inputTurnId, { status: 'cancelled', reason: 'withdrawn' });
+        return;
+      case 'failed':
+        this.settle(inputTurnId, {
+          status: 'failed',
+          error: 'The turn had already failed',
+        });
+        return;
+      default:
+        this.settle(inputTurnId, {
+          status: 'interrupted',
+          error: 'The turn had already been interrupted',
+        });
+    }
   }
 
   /** The turn carried a run that has already settled. */

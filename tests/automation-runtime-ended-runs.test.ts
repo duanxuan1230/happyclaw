@@ -177,6 +177,75 @@ describe('an input whose run is no longer live is consumed, not executed', () =>
   });
 });
 
+describe('a prepared batch whose run ended meanwhile', () => {
+  function prepared(messages: NewMessage[], runtimeIds: string[]) {
+    const runtimes = new Map(
+      runtimeIds.map((id) => [
+        id,
+        {
+          cancel: vi.fn(() => true),
+          retry: vi.fn(() => true),
+          dispose: vi.fn(),
+        },
+      ]),
+    );
+    const turns = new ledger.AutomationTurnTracker();
+    turns.remember(messages[messages.length - 1].id, messages);
+    const queue = { enqueueMessageCheck: vi.fn() };
+    const commitBatch = vi.fn();
+    const globals: Record<string, unknown> = {
+      queue,
+      completeOutOfBandMessages: vi.fn(),
+      getUncertainChannelOutboxForTurn: () => undefined,
+      getFailedChannelOutboxForTurn: () => undefined,
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('settleInterruptedChannelTurn');
+    harness.install('withdrawEndedAutomationInputs');
+    const verdict = (
+      globals.withdrawEndedAutomationInputs as (...args: unknown[]) => unknown
+    )(LANE, messages, runtimes, turns, commitBatch);
+    return { verdict, runtimes, turns, queue, globals, commitBatch };
+  }
+
+  test('only ended inputs: every turn is cancelled and the batch is consumed', () => {
+    core(new Set());
+    const ended = storeInput('r-batch-all');
+    const run = prepared([ended], [ended.id]);
+    expect(run.verdict).toBe(true);
+    expect(run.commitBatch).toHaveBeenCalledTimes(1);
+    expect(run.runtimes.size).toBe(0);
+    expect(run.queue.enqueueMessageCheck).not.toHaveBeenCalled();
+  });
+
+  test('mixed: only the ended inputs are consumed; the rest is read again', () => {
+    core(new Set());
+    const user = storeInput(null);
+    const ended = storeInput('r-batch-mixed');
+    const userRuntime = 'user-runtime';
+    const run = prepared([user, ended], [userRuntime, ended.id]);
+    expect(run.verdict).toBe(true);
+    expect(run.commitBatch).not.toHaveBeenCalled();
+    expect(run.globals.completeOutOfBandMessages).toHaveBeenCalledWith(LANE, [
+      ended,
+    ]);
+    // The user turn goes back to retry and its runtime is released; the
+    // ended one is cancelled. Neither is left open for the finally block.
+    expect(run.runtimes.size).toBe(0);
+    expect(run.queue.enqueueMessageCheck).toHaveBeenCalledWith(LANE);
+    expect(run.turns.runOf(ended.id)).toBeNull();
+  });
+
+  test('nothing ended: the batch starts as prepared', () => {
+    core(new Set(['r-batch-live']));
+    const live = storeInput('r-batch-live');
+    const run = prepared([live], [live.id]);
+    expect(run.verdict).toBe(false);
+    expect(run.commitBatch).not.toHaveBeenCalled();
+    expect(run.runtimes.size).toBe(1);
+  });
+});
+
 describe('an input answered without the agent settles its run', () => {
   function pluginHarness(original: Record<string, unknown> | null) {
     const deliverPluginExpanderReply = vi.fn(async () => ({
@@ -237,18 +306,22 @@ describe('an input answered without the agent settles its run', () => {
   });
 
   test.each([
-    ['skip_terminal', { status: 'success', resultText: null }],
-    ['manual_reconciliation', { status: 'interrupted' }],
+    ['skip_terminal', 'completed', { status: 'success', resultText: null }],
+    ['skip_terminal', 'failed', { status: 'failed' }],
+    ['skip_terminal', 'interrupted', { status: 'interrupted' }],
+    ['skip_terminal', 'cancelled', { status: 'cancelled' }],
+    ['manual_reconciliation', 'interrupted', { status: 'interrupted' }],
   ] as const)(
-    'a channel turn that is %s settles the run of its input',
-    async (disposition, outcome) => {
-      const runId = `r-${disposition}`;
+    'a channel turn that is %s after %s settles the run of its input like that',
+    async (disposition, openedStatus, outcome) => {
+      const runId = `r-${disposition}-${openedStatus}`;
       const settled = core(new Set([runId]));
       const tracker = new ledger.AutomationTurnTracker();
       tracker.remember('input-d', [{ automation_run_id: runId }]);
       const globals: Record<string, unknown> = {
         channelTurnRuntime: {
           executionDisposition: disposition,
+          openedStatus,
           dispose: vi.fn(),
         },
         streamingAddress: { provider: 'feishu', externalChatId: 'oc_group' },
@@ -286,6 +359,7 @@ describe('cancelling and checking an automation input', () => {
     const registry = new AgentBuilderTurnRegistry();
     const queue = {
       interruptQuery: vi.fn(() => true),
+      closeStdin: vi.fn(),
       activeQueryExclusivelyCoversMessage: vi.fn(() => false),
     };
     const globals: Record<string, unknown> = {
@@ -344,25 +418,54 @@ describe('cancelling and checking an automation input', () => {
     expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
   });
 
-  test('an input in the batch being prepared stops the lane query', async () => {
-    core(new Set(['r-cold']));
-    const input = storeInput('r-cold');
-    const lane = laneHarness();
-    lane.registry.startBatch(FOLDER, [
-      {
+  test.each([
+    ['in the batch being prepared or executed', false],
+    ['piped behind the running query', true],
+  ])(
+    'an input %s steers the query away and closes the runner',
+    async (_label, piped) => {
+      const runId = `r-delivered-${piped}`;
+      core(new Set([runId]));
+      const input = storeInput(runId);
+      const lane = laneHarness();
+      const turn = {
         chatJid: LANE,
         messageId: input.id,
-        runtimeTurnId: input.id,
-        automationRunId: 'r-cold',
-      },
-    ]);
+        runtimeTurnId: piped ? 'delivery-2' : input.id,
+        automationRunId: runId,
+      };
+      if (piped) {
+        lane.registry.startBatch(FOLDER, [
+          {
+            chatJid: LANE,
+            messageId: 'user-turn',
+            runtimeTurnId: 'user-turn',
+          },
+        ]);
+        lane.registry.enqueueBatch(FOLDER, [turn]);
+      } else {
+        lane.registry.startBatch(FOLDER, [turn]);
+      }
+      await lane.cancel(LANE, input.id);
+      // Steer semantics for the other inputs; the runner exits, so its
+      // undelivered copy returns to the durable cursor and is dropped.
+      expect(lane.queue.interruptQuery).toHaveBeenCalledWith(LANE);
+      expect(lane.queue.closeStdin).toHaveBeenCalledWith(LANE);
+      expect(lane.globals.completeOutOfBandMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  test('an input nobody read yet is consumed without touching the runner', async () => {
+    core(new Set(['r-unread']));
+    const input = storeInput('r-unread');
+    const lane = laneHarness();
     await lane.cancel(LANE, input.id);
-    expect(lane.queue.interruptQuery).toHaveBeenCalledWith(
+    expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
+    expect(lane.queue.closeStdin).not.toHaveBeenCalled();
+    expect(lane.globals.completeOutOfBandMessage).toHaveBeenCalledWith(
       LANE,
-      undefined,
-      'stop',
+      expect.objectContaining({ id: input.id }),
     );
-    expect(lane.globals.completeOutOfBandMessage).not.toHaveBeenCalled();
   });
 
   test('pending is one row read against the committed cursor', () => {
