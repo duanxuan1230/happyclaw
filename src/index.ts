@@ -9381,7 +9381,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               inputStreamEvent,
               outputInputTurnId,
             )) {
-              turnTraces.observe(outputInputTurnId, note);
               broadcastStreamEvent(chatJid, note);
             }
             // The turn's process is kept for turn_traces whatever the Web is
@@ -18844,7 +18843,6 @@ async function processAgentConversation(
         inputStreamEvent,
         outputInputTurnId,
       )) {
-        turnTraces.observe(outputInputTurnId, note);
         broadcastStreamEvent(chatJid, note, agentId);
       }
       turnTraces.observe(outputInputTurnId, output.streamEvent);
