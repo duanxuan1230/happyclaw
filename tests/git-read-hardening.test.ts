@@ -317,3 +317,29 @@ describe('host git reads with a hostile repository config', () => {
     expect(ran()).toEqual([]);
   });
 });
+
+describe('host git reads with a hostile process environment', () => {
+  test('GIT_DIR, GIT_WORK_TREE and friends inherited by the host are ignored', async () => {
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: elsewhere });
+    const inherited = {
+      GIT_DIR: path.join(elsewhere, '.git'),
+      GIT_WORK_TREE: elsewhere,
+      GIT_INDEX_FILE: path.join(elsewhere, 'no-such-index'),
+      GIT_OBJECT_DIRECTORY: path.join(elsewhere, 'objects'),
+      GIT_CEILING_DIRECTORIES: root,
+    };
+    Object.assign(process.env, inherited);
+    try {
+      const status = await readGitStatus(repo);
+      expect(status.files.map((file) => file.path).sort()).toEqual([
+        'a.txt',
+        'new.txt',
+      ]);
+      await expect(countWorktreeChanges(repo)).resolves.toBe(2);
+    } finally {
+      for (const key of Object.keys(inherited)) delete process.env[key];
+    }
+  });
+});
