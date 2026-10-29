@@ -86,10 +86,13 @@ beforeEach(() => {
   store.deleteAutomations(store.listAutomations({}).map((a) => a.id));
 });
 
-function setup() {
+function setup(
+  overrides: Parameters<typeof harness.createFakeRuntime>[0] = {},
+) {
   const clock = new harness.FakeClock(Date.parse('2026-10-30T00:00:00Z'));
   const runtime = harness.createFakeRuntime({
     allowsHostCommands: (jid) => jid === HOST_WS,
+    ...overrides,
   });
   for (const jid of [WS, `${WS}#agent:topic`, HOST_WS, OTHER_WS])
     runtime.sessions.add(jid);
@@ -570,5 +573,114 @@ describe('runs', () => {
     });
     service.markRunsRead(alice, a.id);
     expect(service.get(alice, a.id).unreadRuns).toBe(0);
+  });
+});
+
+describe('session and route changes', () => {
+  test('changing the target session clears the delivery route', () => {
+    const { service } = setup();
+    const a = service.create(ownerTurn, {
+      workspaceJid: WS,
+      ...harness.draft({ sessionMode: 'bound' }),
+      targetSessionJid: `${WS}#agent:topic`,
+    });
+    expect(a.deliveryRouteJid).toBe('feishu:oc_x#thread:omt_1');
+    const renamed = service.update(alice, a.id, a.revision, { name: '新名' });
+    expect(renamed.deliveryRouteJid).toBe('feishu:oc_x#thread:omt_1');
+    const moved = service.update(alice, a.id, renamed.revision, {
+      targetSessionJid: WS,
+    });
+    expect(moved.deliveryRouteJid).toBeNull();
+    const fresh = service.create(ownerTurn, {
+      workspaceJid: WS,
+      ...harness.draft(),
+    });
+    expect(fresh.deliveryRouteJid).toBe('feishu:oc_x#thread:omt_1');
+    expect(
+      service.update(alice, fresh.id, fresh.revision, {
+        sessionMode: 'persistent',
+      }).deliveryRouteJid,
+    ).toBeNull();
+  });
+
+  test('the delete dialog uses every run session, not the trimmed run rows', async () => {
+    const { service, runtime } = setup();
+    const a = service.create(alice, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    // Sessions whose run rows were trimmed long ago.
+    for (const id of ['old1', 'old2']) {
+      const sessionJid = `${WS}#agent:${id}`;
+      runtime.sessions.add(sessionJid);
+      runtime.created.push({ sessionJid, title: id, automationId: a.id });
+    }
+    runtime.archived.push(`${WS}#agent:old1`);
+    await service.delete(alice, a.id, 'archive');
+    // Already archived sessions are left alone.
+    expect(runtime.archived).toEqual([`${WS}#agent:old1`, `${WS}#agent:old2`]);
+
+    const b = service.create(alice, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    const sessionJid = `${WS}#agent:old3`;
+    runtime.sessions.add(sessionJid);
+    runtime.created.push({ sessionJid, title: 'x', automationId: b.id });
+    runtime.archived.push(sessionJid);
+    await service.delete(alice, b.id, 'delete');
+    expect(runtime.deleted).toEqual([sessionJid]);
+  });
+
+  test('suspend and session deletion also withdraw queued inputs', async () => {
+    const { service, engine, runtime } = setup();
+    const topic = `${WS}#agent:topic`;
+    const queued = service.create(alice, {
+      workspaceJid: WS,
+      ...harness.draft({ sessionMode: 'bound', schedule: { kind: 'manual' } }),
+      targetSessionJid: topic,
+    });
+    const running = service.create(alice, {
+      workspaceJid: WS,
+      ...harness.draft({
+        name: 'r',
+        sessionMode: 'bound',
+        schedule: { kind: 'manual' },
+      }),
+      targetSessionJid: WS,
+    });
+    const q = await service.runNow(alice, queued.id);
+    const r = await service.runNow(alice, running.id);
+    await engine.idle();
+    service.runSink.onRunInputStarted(r.id);
+
+    service.onSessionDeleted(topic);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store.getAutomationRun(q.id)?.status).toBe('cancelled');
+    expect(runtime.cancelled.map((c) => c.inputMessageId)).toEqual([
+      store.getAutomationRun(q.id)!.inputMessageId,
+    ]);
+
+    service.suspendWorkspace(WS);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store.getAutomationRun(r.id)?.status).toBe('cancelled');
+    // The running turn is not interrupted; the runtime drops it by isRunLive.
+    expect(runtime.cancelled).toHaveLength(1);
+  });
+
+  test('a failing withdrawal is only logged', async () => {
+    const { service, engine } = setup({
+      cancelAutomationInput: async () => {
+        throw new Error('gone');
+      },
+    });
+    const a = service.create(alice, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    const run = await service.runNow(alice, a.id);
+    await engine.idle();
+    await service.cancelRun(alice, a.id, run.id);
+    expect(store.getAutomationRun(run.id)?.status).toBe('cancelled');
   });
 });

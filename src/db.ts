@@ -2691,9 +2691,15 @@ export function initDatabase(
     tableExists('scheduled_tasks')
   ) {
     db.transaction(() => {
-      const { converted, skipped } = migrateLegacyScheduledTasks({
+      const { converted, skipped, reassigned } = migrateLegacyScheduledTasks({
         timezone: TIMEZONE,
       });
+      for (const { taskId, from, to } of reassigned) {
+        logger.warn(
+          { taskId, from, to },
+          'Scheduled task creator is not the workspace owner; the automation goes to the owner',
+        );
+      }
       for (const { taskId, reason } of skipped) {
         logger.warn(
           { taskId, reason },

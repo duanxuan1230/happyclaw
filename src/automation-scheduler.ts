@@ -47,7 +47,6 @@ import {
   inAutomationTransaction,
   insertAutomationRun,
   listActiveAutomations,
-  listAutomationRunSessions,
   listDueAutomations,
   listEndedAutomationIds,
   listLiveAutomationRuns,
@@ -572,39 +571,27 @@ export class AutomationEngine implements AutomationScheduler {
       return;
     }
 
-    const sessionJid = await this.resolveSession(automation, run);
-    if (!sessionJid) return;
-    run = this.liveRun(runId);
-    run.sessionJid = sessionJid;
-    saveAutomationRun(run);
-    this.emitRun(automation, run);
-    if (automation.sessionMode === 'fresh')
-      this.archiveOldFreshSessions(automation);
-
-    const cwd = this.deps.resolveWorkdir(automation, sessionJid);
+    // The check decides whether the run happens at all, so it runs before
+    // any session is created, in the workspace directory.
     const firedAt = run.firedAt ?? run.createdAt;
     let preCheckOutput: string | null = null;
-    if (automation.preRunCheck && automation.execution === 'agent') {
+    const check = automation.preRunCheck;
+    if (check && automation.execution === 'agent') {
       const timeoutMs =
-        automation.preRunCheck.timeoutMs ??
-        AUTOMATION_LIMITS.preRunCheckDefaultTimeoutMs;
-      const controller = new AbortController();
-      this.commands.set(runId, controller);
-      let result;
-      try {
-        result = await runPreRunCheck({
+        check.timeoutMs ?? AUTOMATION_LIMITS.preRunCheckDefaultTimeoutMs;
+      const result = await this.withCommand(runId, (signal) =>
+        runPreRunCheck({
           automationId: automation.id,
           automationName: automation.name,
           runId,
-          command: automation.preRunCheck.command,
-          cwd,
+          command: check.command,
+          cwd: this.deps.resolveWorkdir(automation, null),
           timeoutMs,
           firedAt,
           lastFinishedAt: automation.lastFinishedAt,
-        });
-      } finally {
-        this.commands.delete(runId);
-      }
+          signal,
+        }),
+      );
       run = this.liveRun(runId);
       run.preCheck = result;
       saveAutomationRun(run);
@@ -621,8 +608,19 @@ export class AutomationEngine implements AutomationScheduler {
       preCheckOutput = result.stdout;
     }
 
+    const sessionJid = await this.resolveSession(automation, run);
+    if (!sessionJid) return;
+    run = this.liveRun(runId);
+    run.sessionJid = sessionJid;
+    saveAutomationRun(run);
+    this.emitRun(automation, run);
+
     if (automation.execution === 'script') {
-      await this.executeScript(automation, run, cwd);
+      await this.executeScript(
+        automation,
+        run,
+        this.deps.resolveWorkdir(automation, sessionJid),
+      );
       return;
     }
 
@@ -637,8 +635,16 @@ export class AutomationEngine implements AutomationScheduler {
       automation,
       run,
       sessionJid,
+      // Only bound runs answer on an IM route; fresh/persistent results
+      // reach IM as notices.
       deliveryRouteJid:
-        automation.sessionMode === 'bound' ? automation.deliveryRouteJid : null,
+        automation.sessionMode === 'bound'
+          ? this.deps.resolveDeliveryRoute({
+              automation,
+              sessionJid,
+              preferredRouteJid: automation.deliveryRouteJid,
+            })
+          : null,
       displayContent: automation.prompt,
       contextSuffix,
     });
@@ -653,6 +659,22 @@ export class AutomationEngine implements AutomationScheduler {
     current.inputMessageId = inputMessageId;
     saveAutomationRun(current);
     this.emitRun(automation, current);
+    if (automation.sessionMode === 'fresh')
+      await this.archiveOldFreshSessions(automation);
+  }
+
+  /** Run a command of `runId` that cancel, delete and stop() can kill. */
+  private async withCommand<T>(
+    runId: string,
+    command: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const controller = new AbortController();
+    this.commands.set(runId, controller);
+    try {
+      return await command(controller.signal);
+    } finally {
+      this.commands.delete(runId);
+    }
   }
 
   private async executeScript(
@@ -663,22 +685,17 @@ export class AutomationEngine implements AutomationScheduler {
     const run = { ...queued, status: 'running' as const };
     saveAutomationRun(run);
     this.emitRun(automation, run);
-    const controller = new AbortController();
-    this.commands.set(run.id, controller);
-    let result;
-    try {
-      result = await runAutomationScript({
+    const result = await this.withCommand(run.id, (signal) =>
+      runAutomationScript({
         automationId: automation.id,
         automationName: automation.name,
         runId: run.id,
         command: automation.scriptCommand ?? '',
         cwd,
         idleTimeoutMs: this.scriptIdleTimeoutMs(),
-        signal: controller.signal,
-      });
-    } finally {
-      this.commands.delete(run.id);
-    }
+        signal,
+      }),
+    );
     if (this.stopped || result.status === 'cancelled') return;
     const sessionJid = run.sessionJid!;
     const text =
@@ -740,20 +757,20 @@ export class AutomationEngine implements AutomationScheduler {
   }
 
   /** fresh mode keeps the newest sessions; older ones are archived. */
-  private archiveOldFreshSessions(automation: Automation): void {
-    // Each run adds one session, so only the first few past the limit can
-    // still be unarchived; older ones were archived by earlier runs.
-    const stale = listAutomationRunSessions(automation.id, {
-      offset: AUTOMATION_LIMITS.freshSessionsKept,
-      limit: 5,
-    });
-    for (const sessionJid of stale) {
-      void this.deps.archiveAutomationSession(sessionJid).catch((error) => {
+  private async archiveOldFreshSessions(automation: Automation): Promise<void> {
+    const stale = this.deps
+      .listAutomationSessions(automation.id)
+      .slice(AUTOMATION_LIMITS.freshSessionsKept)
+      .filter((session) => !session.archived);
+    for (const { sessionJid } of stale) {
+      try {
+        await this.deps.archiveAutomationSession(sessionJid);
+      } catch (error) {
         logger.warn(
           { err: error, automationId: automation.id },
           'Archiving an old automation session failed',
         );
-      });
+      }
     }
   }
 
@@ -764,10 +781,28 @@ export class AutomationEngine implements AutomationScheduler {
     this.commands.get(runId)?.abort();
   }
 
-  /** Kill any command of a live run and record it cancelled (born read). */
-  cancelRun(runId: string, error: string): void {
+  /**
+   * Cancel a live run: kill its command, record it cancelled (born read),
+   * then withdraw its input from the session queue. A run whose turn is
+   * already executing is only interrupted when `interrupt` is set; the
+   * runtime drops the input of a run that is no longer live either way.
+   */
+  async cancelRun(
+    runId: string,
+    error: string,
+    options: { interrupt?: boolean } = {},
+  ): Promise<void> {
+    const before = getAutomationRun(runId);
     this.abortCommand(runId);
-    this.finishRun(runId, 'cancelled', { error });
+    if (!this.finishRun(runId, 'cancelled', { error })) return;
+    const { inputMessageId, sessionJid } = before ?? {};
+    if (!inputMessageId || !sessionJid) return;
+    if (before?.status !== 'queued' && !options.interrupt) return;
+    try {
+      await this.deps.cancelAutomationInput({ sessionJid, inputMessageId });
+    } catch (err) {
+      logger.warn({ err, runId }, 'Withdrawing an automation input failed');
+    }
   }
 
   /**
@@ -832,11 +867,14 @@ export class AutomationEngine implements AutomationScheduler {
     automation: Automation,
     run: AutomationRun,
   ): Promise<void> {
-    const failureRoute = isImRoute(automation.deliveryRouteJid)
-      ? automation.deliveryRouteJid
-      : (run.sessionJid ??
-        automation.targetSessionJid ??
-        automation.workspaceJid);
+    const sessionJid = run.sessionJid ?? automation.targetSessionJid;
+    const resolved = this.deps.resolveDeliveryRoute({
+      automation,
+      sessionJid,
+      preferredRouteJid: automation.deliveryRouteJid,
+    });
+    const imRoute = isImRoute(resolved) ? resolved : null;
+    const failureRoute = imRoute ?? sessionJid ?? automation.workspaceJid;
     const send = (routeJid: string, text: string) =>
       this.deps.sendAutomationNotice({ automation, routeJid, text });
 
@@ -859,14 +897,10 @@ export class AutomationEngine implements AutomationScheduler {
     if (clearAutomationFailure(automation.id)) {
       await send(failureRoute, `自动化「${automation.name}」已恢复正常`);
     }
-    if (
-      automation.sessionMode !== 'bound' &&
-      !run.silenced &&
-      isImRoute(automation.deliveryRouteJid)
-    ) {
+    if (automation.sessionMode !== 'bound' && !run.silenced && imRoute) {
       const summary = summarize(run.resultText);
       await send(
-        automation.deliveryRouteJid,
+        imRoute,
         summary
           ? `自动化「${automation.name}」已完成：${summary}`
           : `自动化「${automation.name}」已完成，结果见会话`,
@@ -900,6 +934,10 @@ export class AutomationEngine implements AutomationScheduler {
       }
     },
     isRunSilenced: (runId) => getAutomationRun(runId)?.silenced ?? false,
+    isRunLive: (runId) => {
+      const run = getAutomationRun(runId);
+      return !!run && !isTerminalRunStatus(run.status);
+    },
   };
 
   // ─── Status changes shared with the service ──────────────────────────
