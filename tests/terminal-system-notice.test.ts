@@ -37,6 +37,10 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const db = await import('../src/db.js');
+const { ProactiveProgressCarry, TurnTraceTracker } =
+  await import('../src/turn-trace.js');
+const { proactiveClosingNote } =
+  await import('../src/workspace-interaction-runtime.js');
 const reliability = await import('../src/channel-reliability-store.js');
 const { ChannelTurnRuntime } = await import('../src/channel-turn-runtime.js');
 const { deliverChannelOutboxItem, DefinitiveChannelDeliveryError } =
@@ -155,9 +159,24 @@ function mainLane(input: {
     proactiveTailNoticesDelivered: new Set<string>(),
     projectCurrentScheduledGroupTerminal: vi.fn(async () => false),
     clearProcessingIndicatorForInput: vi.fn(async () => {}),
+    // A settled turn closes the progress a failed attempt left (none here).
+    turnTraces: new TurnTraceTracker({
+      mode: input.interactionMode ?? 'assistant',
+      getVisibility: () => 'full',
+      store: () => {},
+    }),
+    proactiveProgressCarry: new ProactiveProgressCarry(),
+    missedMessages: [{ id: inputTurnId }],
   });
-  runtime.harness.install('commitCursor', 'processGroupMessages');
-  runtime.harness.install('settleDeterministicFailure', 'processGroupMessages');
+  for (const name of [
+    'commitCursor',
+    'takeCarriedProgress',
+    'persistProactiveTurnTrace',
+    'keepProactiveProgress',
+    'settleDeterministicFailure',
+  ]) {
+    runtime.harness.install(name, 'processGroupMessages');
+  }
   return {
     ...runtime,
     chatJid,
@@ -310,6 +329,36 @@ describe('processGroupMessages deterministic failure settlement', () => {
       [],
       expect.objectContaining({ presentation: 'native' }),
     );
+  });
+
+  test('a proactive turn that a failed attempt left progress for closes with one note when no attempt follows', async () => {
+    const lane = mainLane({
+      imSend: async () => {},
+      replySourceImJid: null,
+      interactionMode: 'proactive',
+    });
+    const notes: string[] = [];
+    Object.assign(lane.globals, {
+      sendMessage: vi.fn(async (_jid: string, text: string) => {
+        notes.push(text);
+        return 'note-1';
+      }),
+      resolveIpcOutputWorkspaceJid: () => null,
+      getLastAgentMessageIdForTurn: () => undefined,
+      announceTurnTrace: vi.fn(),
+      activeSessionId: 'sdk-session',
+      proactiveClosingNote,
+      // The queue would retry, but this failure is settled for good.
+      queue: { willRetryAfterFailure: () => true },
+      admittedWarmMainInputs: new Map(),
+    });
+    lane.globals.proactiveProgressCarry.hold(lane.chatJid, lane.inputTurnId, [
+      { at: 1_000, text: '先看日志' },
+    ]);
+
+    await lane.settle('context-overflow', 'context_overflow', '上下文溢出');
+
+    expect(notes).toEqual([proactiveClosingNote('failed')]);
   });
 
   test('a delivered proactive tail notice is not followed by a second channel notice', async () => {

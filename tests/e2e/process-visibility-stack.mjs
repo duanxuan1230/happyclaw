@@ -1782,8 +1782,9 @@ async function proactiveStopKeepsProgress(ctx) {
 
 /**
  * A proactive Web turn that sent progress and then ended without its final:
- * the host refuses to settle it, and the progress still stays with the turn,
- * on a closing note that says the turn broke off.
+ * the host refuses to settle it. The refusal will be retried, so it writes no
+ * closing note: the progress waits for the attempt that ends the turn for good
+ * (tests/proactive-progress-web.test.ts drives the attempts that follow).
  */
 async function proactiveNoFinalKeepsProgress(ctx) {
   const label = 'no-final-progress';
@@ -1810,39 +1811,39 @@ async function proactiveNoFinalKeepsProgress(ctx) {
     conn.ws.send(
       JSON.stringify({ type: 'send_message', chatJid: jid, content: 'go' }),
     );
-    const noteOf = () =>
-      conn.events.find(
+    await waitUntil(
+      () => conn.events.some((e) => mine(e) && e.type === 'run_finished'),
+      120_000,
+      'the refused turn to finish its run',
+    );
+    await sleep(3000);
+    const notes = conn.events.filter(
+      (e) =>
+        mine(e) &&
+        e.type === 'new_message' &&
+        e.message?.source_kind === 'interrupt_partial',
+    );
+    check(
+      label,
+      'a refusal that will be retried writes no closing note',
+      conn.events.some(
         (e) =>
           mine(e) &&
-          e.type === 'new_message' &&
-          e.message?.source_kind === 'interrupt_partial',
-      )?.message;
-    await waitUntil(() => !!noteOf(), 120_000, 'the closing note');
-    // Let a retry, if any, finish with its final.
-    stub.state.skipFinal = false;
-    const note = noteOf();
+          e.event?.eventType === 'commentary' &&
+          e.event?.progress === true,
+      ) && notes.length === 0,
+      JSON.stringify(notes.map((e) => e.message?.content)),
+    );
+    const history = await http_('GET', `/api/groups/${enc(jid)}/messages`, {
+      cookie: ctx.cookie,
+    });
     check(
       label,
-      'a closing note says the turn broke off, and carries the trace',
-      note.content.startsWith('⚠️ 本轮在给出最终回复前中断') &&
-        note.finalization_reason === 'error' &&
-        note.has_trace === true,
-      JSON.stringify(note).slice(0, 300),
-    );
-    const trace = await http_(
-      'GET',
-      `/api/groups/${enc(jid)}/turn-traces/${enc(note.turn_id)}`,
-      { cookie: ctx.cookie },
-    );
-    check(
-      label,
-      'its trace holds the progress with the work',
-      trace.status === 200 &&
-        trace.json.steps.some(
-          (s) => s.progress === true && s.text === PROGRESS_TEXT,
-        ) &&
-        trace.json.steps.some((s) => s.kind === 'tool'),
-      `HTTP ${trace.status} ${JSON.stringify(trace.json)?.slice(0, 300)}`,
+      'and the history holds none either',
+      !(history.json.messages || []).some(
+        (m) => m.source_kind === 'interrupt_partial',
+      ),
+      JSON.stringify((history.json.messages || []).map((m) => m.source_kind)),
     );
     conn.ws.close();
   } finally {

@@ -243,9 +243,11 @@ Outbox 发出并写入消息；IM 回合的回复路由已不可用（输入被�
 宿主合成（Runner 事件上的 `progress` 标记会被去掉），在每个级别都广播，并作为 `progress`
 步骤写入 `turn_traces`，最终回复送达后由 Web 折叠进该回复的处理过程。重连快照
 `stream_snapshot.snapshot.progress` 按顺序带上本轮已发的进展（`{ at, text }`），中途加入的
-标签页据此在每个级别重建进展步骤。Web 回合发过进展却没有回复就结束（被停止、被引导转向、
-出错或因缺少 `final` 被拒绝结单）时，宿主写一条简短的结束说明（`interrupt_partial`）作为
-本轮回复，进展随本轮轨迹挂在它上面。
+标签页据此在每个级别重建进展步骤。Web 回合发过进展却没有回复就最终结束（被停止、被引导
+转向、出错终止，或因缺少 `final` 被拒绝结单且不再重试）时，宿主写一条简短的结束说明
+（`interrupt_partial`）作为本轮回复，进展随本轮轨迹挂在它上面。会重试的失败不写说明，
+进展留给下一次尝试：重试发出 `final` 就挂在 `final` 上，否则由最终那一条结束说明带上所有
+尝试的进展。
 
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`

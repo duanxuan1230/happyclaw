@@ -269,6 +269,13 @@ export class TurnStepRecorder {
     return this.list.steps.some(isProgressStep);
   }
 
+  /** The progress statements among the steps, in order. */
+  progressSteps(): Array<{ at: number; text: string }> {
+    return this.list.steps
+      .filter(isProgressStep)
+      .map((step) => ({ at: step.at, text: step.text ?? '' }));
+  }
+
   observe(event: StreamEvent, now: number): void {
     this.lastEventAt = now;
     if (this.options.proactive && this.observeSpeechTool(event, now)) {
