@@ -10,10 +10,12 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
+  Check,
   CheckCircle2,
   CircleDotDashed,
   FileText,
   History,
+  Hourglass,
   Lightbulb,
   Loader2,
   MessageSquareText,
@@ -22,6 +24,7 @@ import {
   Save,
   Search,
   Trash2,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, apiFetch } from '../api/client';
@@ -29,6 +32,7 @@ import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { cn } from '@/lib/utils';
 import { randomUuid } from '@/utils/random-uuid';
 import { createUnsavedNavigationGuard } from '@/utils/unsaved-navigation';
+import { confirmDialog } from '@/stores/confirm';
 import {
   ConfirmDialog,
   EmptyState,
@@ -61,9 +65,12 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   KIND_META,
   WORKSPACE_MEMORY_KINDS,
+  memoryConflictBody,
+  memoryDuplicateFrom,
   memoryItemPath,
   memoryItemsPath,
   memoryKindCounts,
+  memoryProposalAnswerPath,
   memoryVersionsPath,
   revisionConflictFrom,
   type RevisionConflict,
@@ -79,6 +86,8 @@ import {
 } from '@/features/workspace-memory/model';
 
 type KindFilter = 'all' | WorkspaceMemoryKind;
+/** Memory in effect, or proposals waiting for the owner's answer. */
+type StatusView = 'active' | 'proposed';
 
 interface Draft {
   kind: WorkspaceMemoryKind;
@@ -113,6 +122,14 @@ const CHANGE_TYPE_LABELS: Record<string, string> = {
   update: '更新',
   forget: '忘记',
 };
+
+function matchesQuery(item: WorkspaceMemoryItem, query: string): boolean {
+  const needle = query.trim().toLocaleLowerCase();
+  return (
+    !needle ||
+    `${item.title ?? ''}\n${item.content}`.toLocaleLowerCase().includes(needle)
+  );
+}
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error && typeof error === 'object' && 'message' in error) {
@@ -222,6 +239,7 @@ export function MemoryPage() {
     [location.hash, location.pathname, setSearchParams],
   );
   const requestedWorkspace = searchParams.get('workspace');
+  const requestedItem = searchParams.get('item');
   const legacyFolder = searchParams.get('folder');
   const isMobile = useMediaQuery('(max-width: 1023px)');
 
@@ -237,6 +255,12 @@ export function MemoryPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
+  const [statusView, setStatusView] = useState<StatusView>('active');
+  const [proposalCount, setProposalCount] = useState<{
+    count: number;
+    more: boolean;
+  } | null>(null);
+  const [answering, setAnswering] = useState<'confirm' | 'reject' | null>(null);
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [query, setQuery] = useState('');
   const queryRef = useRef('');
@@ -281,6 +305,11 @@ export function MemoryPage() {
   const createGenerationRef = useRef(0);
   const saveGenerationRef = useRef(0);
   const forgetGenerationRef = useRef(0);
+  const answerGenerationRef = useRef(0);
+  // One answer in flight at a time; a repeated answer to the same revision
+  // reuses its idempotency key, so the server replays instead of conflicting.
+  const answerInFlightRef = useRef(false);
+  const answerKeysRef = useRef(new Map<string, string>());
 
   const selectedWorkspace = useMemo(
     () =>
@@ -288,12 +317,25 @@ export function MemoryPage() {
     [selectedWorkspaceJid, workspaces],
   );
   const canModify = selectedWorkspace?.can_modify === true;
+  const proposedView = statusView === 'proposed';
+  // The proposals view holds the list the counter would count.
+  const proposals = proposedView
+    ? { count: items.length, more: nextCursor !== null }
+    : proposalCount;
 
   const visibleItems = useMemo(() => {
+    if (proposedView) {
+      // Proposals are few and never indexed for search: filter them here.
+      return items.filter(
+        (item) =>
+          (kindFilter === 'all' || item.kind === kindFilter) &&
+          matchesQuery(item, query),
+      );
+    }
     if (searchHits) return searchHits.map((hit) => hit.item);
     if (kindFilter === 'all') return items;
     return items.filter((item) => item.kind === kindFilter);
-  }, [items, kindFilter, searchHits]);
+  }, [items, kindFilter, proposedView, query, searchHits]);
   const counts = useMemo(() => memoryKindCounts(items), [items]);
   const dirty = useMemo(() => {
     if (!selectedItem) return false;
@@ -375,8 +417,11 @@ export function MemoryPage() {
       createGenerationRef.current += 1;
       saveGenerationRef.current += 1;
       forgetGenerationRef.current += 1;
+      answerGenerationRef.current += 1;
 
       setSelectedWorkspaceJid(workspaceJid);
+      setProposalCount(null);
+      setAnswering(null);
       setItems([]);
       setStoreRevision(null);
       setNextCursor(null);
@@ -480,7 +525,7 @@ export function MemoryPage() {
       append ? setLoadingMore(true) : setListLoading(true);
       try {
         const params = new URLSearchParams({
-          status: 'active',
+          status: statusView,
           limit: '100',
         });
         if (options?.cursor) params.set('cursor', options.cursor);
@@ -516,12 +561,38 @@ export function MemoryPage() {
         }
       }
     },
-    [isCurrentWorkspace, selectedWorkspaceJid],
+    [isCurrentWorkspace, selectedWorkspaceJid, statusView],
   );
 
   useEffect(() => {
     if (selectedWorkspaceJid) void loadItems();
   }, [selectedWorkspaceJid, loadItems]);
+
+  const loadProposalCount = useCallback(async () => {
+    const workspaceJid = activeWorkspaceRef.current;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!workspaceJid) return;
+    try {
+      const params = new URLSearchParams({
+        status: 'proposed',
+        limit: '100',
+      });
+      const data = await api.get<WorkspaceMemoryCollection>(
+        `${memoryItemsPath(workspaceJid)}?${params}`,
+      );
+      if (!isCurrentWorkspace(workspaceJid, workspaceEpoch)) return;
+      setProposalCount({
+        count: data.items.length,
+        more: data.nextCursor !== null,
+      });
+    } catch {
+      // The counter is a hint; the list itself reports load failures.
+    }
+  }, [isCurrentWorkspace]);
+
+  useEffect(() => {
+    if (selectedWorkspaceJid && !proposedView) void loadProposalCount();
+  }, [selectedWorkspaceJid, loadProposalCount, proposedView]);
 
   const loadSearch = useCallback(
     async (options?: { query?: string; kind?: KindFilter }) => {
@@ -579,7 +650,7 @@ export function MemoryPage() {
 
   useEffect(() => {
     const trimmed = query.trim();
-    if (!trimmed || !selectedWorkspaceJid) {
+    if (!trimmed || !selectedWorkspaceJid || proposedView) {
       searchGenerationRef.current += 1;
       setSearchHits(null);
       setSearching(false);
@@ -594,16 +665,28 @@ export function MemoryPage() {
       // changed, so it cannot briefly repaint results for the previous query.
       searchGenerationRef.current += 1;
     };
-  }, [kindFilter, loadSearch, query, selectedWorkspaceJid]);
+  }, [kindFilter, loadSearch, query, selectedWorkspaceJid, proposedView]);
 
   const refreshMemoryView = useCallback(async () => {
     const refreshes: Promise<void>[] = [loadItems()];
-    if (queryRef.current.trim()) refreshes.push(loadSearch());
+    if (!proposedView) {
+      refreshes.push(loadProposalCount());
+      if (queryRef.current.trim()) refreshes.push(loadSearch());
+    }
     await Promise.all(refreshes);
-  }, [loadItems, loadSearch]);
+  }, [loadItems, loadProposalCount, loadSearch, proposedView]);
+
+  const clearSelection = useCallback(() => {
+    syncSelectedItem(null);
+    setVersions([]);
+    setShowDetail(false);
+  }, [syncSelectedItem]);
 
   const loadDetail = useCallback(
-    async (itemId: string, options?: { discardDraft?: boolean }) => {
+    async (
+      itemId: string,
+      options?: { discardDraft?: boolean; followStatus?: boolean },
+    ) => {
       const workspaceJid = selectedWorkspaceJid;
       const workspaceEpoch = workspaceEpochRef.current;
       if (!workspaceJid || !isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
@@ -619,6 +702,8 @@ export function MemoryPage() {
       const versionsGeneration = ++versionsGenerationRef.current;
       saveGenerationRef.current += 1;
       forgetGenerationRef.current += 1;
+      answerGenerationRef.current += 1;
+      setAnswering(null);
       detailTargetRef.current = itemId;
       setSelectedId(itemId);
       setSelectedItem(null);
@@ -649,6 +734,14 @@ export function MemoryPage() {
           return;
         }
         syncSelectedItem(itemData.item);
+        // Opened from a link: show the list that holds the item.
+        if (
+          options?.followStatus &&
+          (itemData.item.status === 'active' ||
+            itemData.item.status === 'proposed')
+        ) {
+          setStatusView(itemData.item.status);
+        }
         setVersions(versionData.versions);
         setVersionNextCursor(versionData.nextCursor);
         setStoreRevision(
@@ -734,6 +827,136 @@ export function MemoryPage() {
     selectedWorkspaceJid,
     versionNextCursor,
   ]);
+
+  // A link to one item (a chat's memory receipt) opens it once.
+  const openedItemRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      !requestedItem ||
+      openedItemRef.current === requestedItem ||
+      !selectedWorkspaceJid ||
+      (requestedWorkspace && requestedWorkspace !== selectedWorkspaceJid)
+    ) {
+      return;
+    }
+    openedItemRef.current = requestedItem;
+    const next = new URLSearchParams(searchParams);
+    next.delete('item');
+    setAllowedSearchParams(next, { replace: true });
+    void loadDetail(requestedItem, { discardDraft: true, followStatus: true });
+  }, [
+    loadDetail,
+    requestedItem,
+    requestedWorkspace,
+    searchParams,
+    selectedWorkspaceJid,
+    setAllowedSearchParams,
+  ]);
+
+  const changeStatusView = async (next: StatusView) => {
+    if (next === statusView) return;
+    if (
+      dirty &&
+      !(await confirmDialog({
+        title: '放弃未保存的修改？',
+        message: '切换列表会丢失当前记忆的未保存修改。',
+        confirmText: '放弃修改',
+        variant: 'danger',
+      }))
+    ) {
+      return;
+    }
+    clearSelection();
+    setSearchHits(null);
+    setItems([]);
+    setNextCursor(null);
+    setStatusView(next);
+  };
+
+  const handleAnswer = async (answer: 'confirm' | 'reject') => {
+    if (
+      answerInFlightRef.current ||
+      !selectedWorkspaceJid ||
+      selectedItem?.status !== 'proposed'
+    ) {
+      return;
+    }
+    answerInFlightRef.current = true;
+    const workspaceJid = selectedWorkspaceJid;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const item = selectedItem;
+    if (
+      answer === 'reject' &&
+      !(await confirmDialog({
+        title: '拒绝这条待确认记忆？',
+        message:
+          '拒绝后它不会成为工作区记忆，也不会被未来 Session 召回；修订记录会保留。',
+        confirmText: '拒绝',
+        variant: 'danger',
+      }))
+    ) {
+      answerInFlightRef.current = false;
+      return;
+    }
+    const answerKey = `${item.id}:${item.revision}:${answer}`;
+    const idempotencyKey = answerKeysRef.current.get(answerKey) ?? randomUuid();
+    answerKeysRef.current.set(answerKey, idempotencyKey);
+    const requestGeneration = ++answerGenerationRef.current;
+    const isCurrent = () =>
+      isCurrentWorkspace(workspaceJid, workspaceEpoch) &&
+      answerGenerationRef.current === requestGeneration &&
+      detailTargetRef.current === item.id;
+    setAnswering(answer);
+    setConflict(null);
+    try {
+      const result = await api.post<WorkspaceMemoryItemResult>(
+        memoryProposalAnswerPath(workspaceJid, item.id, answer),
+        {
+          expectedRevision: item.revision,
+          idempotencyKey,
+          provenance: { observedAt: new Date().toISOString() },
+        },
+      );
+      if (!isCurrent()) return;
+      setStoreRevision(result.storeRevision);
+      if (answer === 'confirm') {
+        toast.success('已确认，这条记忆会参与之后的召回');
+        syncSelectedItem(result.item);
+      } else {
+        toast.success('已拒绝这条待确认记忆');
+        clearSelection();
+      }
+      await refreshMemoryView();
+      if (answer === 'confirm' && isCurrent()) {
+        await loadDetail(item.id, { discardDraft: true });
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      const nextConflict = revisionConflictFrom(error);
+      const duplicate = memoryDuplicateFrom(error);
+      if (nextConflict) {
+        setConflict(nextConflict);
+      } else if (duplicate) {
+        toast.error(
+          `已有同一规范键的记忆「${duplicate.title || duplicate.id}」，请先修改它或拒绝这条`,
+        );
+      } else if (memoryConflictBody(error, 'not_proposed')) {
+        toast.error('这条记忆已不在待确认状态，请刷新后查看');
+      } else {
+        toast.error(
+          getErrorMessage(
+            error,
+            answer === 'confirm' ? '确认记忆失败' : '拒绝记忆失败',
+          ),
+        );
+      }
+    } finally {
+      answerInFlightRef.current = false;
+      if (answerGenerationRef.current === requestGeneration) {
+        setAnswering(null);
+      }
+    }
+  };
 
   const handleWorkspaceChange = (workspaceJid: string) => {
     if (
@@ -838,7 +1061,12 @@ export function MemoryPage() {
       ) {
         return;
       }
-      toast.success(`已保存 revision ${result.item.revision}`);
+      // The owner's edit makes a proposal active memory (memory-store).
+      toast.success(
+        selectedItem.status === 'proposed'
+          ? '已保存并确认，这条记忆会参与之后的召回'
+          : `已保存 revision ${result.item.revision}`,
+      );
       setStoreRevision(result.storeRevision);
       syncSelectedItem(result.item);
       await refreshMemoryView();
@@ -902,9 +1130,7 @@ export function MemoryPage() {
       }
       setForgetOpen(false);
       toast.success('已忘记这条工作区记忆');
-      syncSelectedItem(null);
-      setVersions([]);
-      setShowDetail(false);
+      clearSelection();
       await refreshMemoryView();
     } catch (error) {
       if (
@@ -1085,16 +1311,36 @@ export function MemoryPage() {
           <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
             {(!isMobile || !showDetail) && (
               <section aria-label="记忆列表" className="min-w-0 space-y-2">
-                <div className="flex items-baseline justify-between gap-2 px-1">
-                  <h2 className="text-title-sm text-foreground">
-                    {kindFilter === 'all'
-                      ? '全部工作区记忆'
-                      : KIND_META[kindFilter].label}
+                <div className="flex items-center justify-between gap-2 px-1">
+                  <h2 className="sr-only">
+                    {proposedView
+                      ? '待确认的记忆'
+                      : kindFilter === 'all'
+                        ? '全部工作区记忆'
+                        : KIND_META[kindFilter].label}
                   </h2>
+                  <SegmentedControl
+                    label="按状态筛选"
+                    size="sm"
+                    value={statusView}
+                    options={[
+                      { value: 'active' as StatusView, label: '已生效' },
+                      {
+                        value: 'proposed' as StatusView,
+                        label: proposals?.count
+                          ? `待确认 ${proposals.count}${proposals.more ? '+' : ''}`
+                          : '待确认',
+                        icon: Hourglass,
+                      },
+                    ]}
+                    onChange={(next) => void changeStatusView(next)}
+                  />
                   <span className="text-caption text-muted-foreground tabular-nums">
-                    {searchHits
-                      ? `${searchHits.length} 条搜索结果`
-                      : `${visibleItems.length} 条活跃记忆`}
+                    {proposedView
+                      ? `${visibleItems.length} 条待确认`
+                      : searchHits
+                        ? `${searchHits.length} 条搜索结果`
+                        : `${visibleItems.length} 条活跃记忆`}
                   </span>
                 </div>
 
@@ -1116,18 +1362,22 @@ export function MemoryPage() {
                       </div>
                     ) : (
                       <EmptyState
-                        icon={BookOpen}
+                        icon={proposedView ? Hourglass : BookOpen}
                         title={
                           query.trim()
                             ? '没有匹配的记忆'
-                            : '这个工作区还没有记忆'
+                            : proposedView
+                              ? '没有待确认的记忆'
+                              : '这个工作区还没有记忆'
                         }
                         description={
                           query.trim()
                             ? '换一个关键词，或清除类别筛选后重试。'
-                            : canModify
-                              ? '创建第一条事实、决策、经验或待跟进事项。'
-                              : '你可以查看该工作区，但不能修改它。'
+                            : proposedView
+                              ? '群聊成员的对话或定时任务写入的记忆会先出现在这里，由你确认后才会生效。'
+                              : canModify
+                                ? '创建第一条事实、决策、经验或待跟进事项。'
+                                : '你可以查看该工作区，但不能修改它。'
                         }
                       />
                     )}
@@ -1146,7 +1396,7 @@ export function MemoryPage() {
                   </ListGroup>
                 )}
 
-                {!searchHits && nextCursor && (
+                {!searchHits && !proposedView && nextCursor && (
                   <Button
                     variant="ghost"
                     className="w-full"
@@ -1182,22 +1432,65 @@ export function MemoryPage() {
                         <Badge variant="outline" className="tabular-nums">
                           Revision {shownItem.revision}
                         </Badge>
+                        {shownItem.status === 'proposed' && (
+                          <Badge variant="warning">
+                            <Hourglass />
+                            待确认
+                          </Badge>
+                        )}
                         {dirty && (
                           <span className="text-caption text-warning">
                             有未保存修改
                           </span>
                         )}
                         {canModify && (
-                          <div className="ml-auto flex items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-muted-foreground hover:text-destructive"
-                              onClick={() => setForgetOpen(true)}
-                            >
-                              <Trash2 />
-                              忘记
-                            </Button>
+                          <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+                            {shownItem.status === 'proposed' ? (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  onClick={() => void handleAnswer('reject')}
+                                  disabled={answering !== null}
+                                >
+                                  {answering === 'reject' ? (
+                                    <Loader2 className="animate-spin" />
+                                  ) : (
+                                    <X />
+                                  )}
+                                  拒绝
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => void handleAnswer('confirm')}
+                                  disabled={
+                                    answering !== null || dirty || saving
+                                  }
+                                  title={
+                                    dirty ? '请先保存修改，再确认' : undefined
+                                  }
+                                >
+                                  {answering === 'confirm' ? (
+                                    <Loader2 className="animate-spin" />
+                                  ) : (
+                                    <Check />
+                                  )}
+                                  确认
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-muted-foreground hover:text-destructive"
+                                onClick={() => setForgetOpen(true)}
+                              >
+                                <Trash2 />
+                                忘记
+                              </Button>
+                            )}
                             <Button
                               size="sm"
                               onClick={() => void handleSave()}
@@ -1210,7 +1503,9 @@ export function MemoryPage() {
                               ) : (
                                 <Save />
                               )}
-                              保存 revision
+                              {shownItem.status === 'proposed'
+                                ? '保存并确认'
+                                : '保存 revision'}
                             </Button>
                           </div>
                         )}

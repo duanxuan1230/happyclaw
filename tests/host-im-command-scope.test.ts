@@ -332,6 +332,8 @@ function runtimeControlLane(groups: Record<string, any>) {
     executeSessionReset,
     executeFreshWindowReset,
     captureWorkspaceSnapshot: async () => ({}),
+    resolveWorkspaceProjectRoot: (group: { folder: string }) =>
+      `/groups/${group.folder}`,
     formatFreshWindowHandoff: () => 'handoff',
     FRESH_WINDOW_SUCCESS_REPLY: 'FRESH_OK',
     FRESH_WINDOW_FAILURE_REPLY: 'FRESH_FAILED',
@@ -350,6 +352,7 @@ function runtimeControlLane(groups: Record<string, any>) {
     clearTrackedProcessingIndicators: vi.fn(async () => {}),
     getStreamingSession: () => undefined,
     cancelRetryWaitChannelTurnsForInputs: vi.fn(() => 0),
+    endUsageLimitWait: vi.fn(),
     ...directChatLearning(groups),
   };
   const harness = createRuntimeSourceHarness(globals);
@@ -452,9 +455,11 @@ describe('Feishu runtime /clear and /fresh (P1-3, P1-4)', () => {
     await expect(
       l.breakRun({ sourceJid: unknownDm, senderImId: OWNER }),
     ).resolves.toBe('Current task stopped.');
+    // An explicit stop, not a steer.
     expect(l.globals.queue.interruptQuery).toHaveBeenCalledWith(
       'web:ws#agent:session-dm',
       'run-active',
+      'stop',
     );
   });
 
@@ -599,6 +604,7 @@ describe('a recalled Feishu message is withdrawn (prod P2-4)', () => {
     expect(l.queue.interruptQuery).toHaveBeenCalledWith(
       'web:ws#agent:s1',
       'run-1',
+      'stop',
     );
     // The run is told it was a recall stop (it settles the input and leaves
     // no card), the card is closed without a "已停止" note, and the input is

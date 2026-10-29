@@ -123,6 +123,38 @@ export type QueryFinishReason =
   | 'runner_exit'
   | 'stopped';
 
+/**
+ * Why a query is interrupted: `stop` (`/break`, a stop button, a recall) or
+ * `steer` (`/steer`, 「发送」). Both interrupt the turn; after a stop the
+ * runner also closes the query if a sub-agent outlasts the interrupt.
+ */
+export type InterruptReason = 'stop' | 'steer';
+
+/**
+ * Companion of `_interrupt` for an explicit stop, written just before it as
+ * `{"queryId":"<the _interrupt content>","reason":"stop"}`. `_interrupt`
+ * itself keeps its content so runners that predate the reason still read it;
+ * a runner treats an interrupt without this file as a steer. The runner's
+ * `turn-interrupt.ts` reads it under the same name.
+ */
+const INTERRUPT_REASON_SENTINEL = '_interrupt_reason';
+
+/**
+ * Write an IPC sentinel whole: the runner's directory watch fires as soon as
+ * a file is created, so it must never see one half written.
+ */
+function publishSentinel(dir: string, name: string, content: string): void {
+  const file = path.join(dir, name);
+  const temp = `${file}.tmp`;
+  try {
+    fs.writeFileSync(temp, content);
+    fs.renameSync(temp, file);
+  } catch (err) {
+    fs.rmSync(temp, { force: true });
+    throw err;
+  }
+}
+
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 const RETRY_JITTER_RATIO = 0.2;
@@ -172,6 +204,8 @@ interface GroupState {
   announcedQueryId: string | null;
   /** Query that requested an interrupt before its IPC directory existed. */
   pendingInterruptQueryId: string | null;
+  /** Why that deferred interrupt was requested; a stop outranks a steer. */
+  pendingInterruptReason: InterruptReason;
   /** Host callback when a deferred cold-boot interrupt cannot be published. */
   deferredInterruptFailure?: (queryId: string) => void;
   pendingMessages: boolean;
@@ -221,6 +255,19 @@ interface GroupState {
    * delivery for the same chat. They remain replayable until the contiguous
    * prefix is durably committed. */
   acknowledgedIpcDeliveryIds: Set<string>;
+  /** When the runner's last query went idle; null while a query runs. */
+  idleSince?: number | null;
+  /** The last idle came from a truncation/auto continuation, which may still
+   * be finishing inside the runner. Never reclaimed then. */
+  idleFromContinuation?: boolean;
+  /**
+   * The runner was asked to exit and takes no further query: `reclaim` freed
+   * its idle container slot for waiting work, `after_query` closes it once
+   * the query in flight ends.
+   */
+  closing?: 'reclaim' | 'after_query' | null;
+  /** Runs with the runner's JID after its teardown, before the next drain. */
+  afterRunnerExit?: ((runnerJid: string) => void) | null;
 }
 
 type ActiveGroupState = GroupState & { groupFolder: string };
@@ -242,13 +289,20 @@ export class GroupQueue {
   private mutationBaseKeyAliases = new Map<string, string>();
   private nextMutationPauseTokenId = 1;
   private mutationPreserveStopJids = new Set<string>();
-  private mutationStoppedFolders = new Set<string>();
-  // 记录最近一次 stopGroup 的时间戳（毫秒）。runForGroup finally 块会用它来
-  // 决定是否跳过自动 drainGroup —— stopGroup 中清空 pendingMessages 之后，
-  // hasIpcInjectedMessages 重新置 pendingMessages=true，会让用户的 'stop' 之后
-  // 容器立即又被拉起来。同时让主消息循环在 OOM 计数前看一眼这个标志，避免
-  // 把 user-stopped (SIGKILL → 137) 误判为真实 OOM 触发会话重置。
-  private recentlyStoppedFolders = new Map<string, number>();
+  /** Lanes (serialization keys) whose latest stop kept their work. */
+  private mutationStoppedLanes = new Set<string>();
+  /**
+   * Exact lanes held by holdLane(), with how many holders each has. Unlike a
+   * mutation pause this holds one lane, never its workspace family.
+   */
+  private heldLanes = new Map<string, number>();
+  // 记录每个 lane（序列化 key）最近一次 stopGroup 的时间戳（毫秒）。runForGroup
+  // finally 块会用它来决定是否跳过自动 drainGroup —— stopGroup 中清空
+  // pendingMessages 之后，hasIpcInjectedMessages 重新置 pendingMessages=true，
+  // 会让用户的 'stop' 之后容器立即又被拉起来。同时让主消息循环在 OOM 计数前
+  // 看一眼这个标志，避免把 user-stopped (SIGKILL → 137) 误判为真实 OOM 触发
+  // 会话重置。按 lane 记录：停一个会话不影响同一工作区的其他 lane。
+  private recentlyStoppedLanes = new Map<string, number>();
   private static RECENTLY_STOPPED_WINDOW_MS = 30_000;
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
@@ -282,7 +336,7 @@ export class GroupQueue {
       ) => void)
     | null = null;
   private userConcurrentLimitFn:
-    | ((groupJid: string) => { allowed: boolean })
+    | ((groupJid: string) => { allowed: boolean; userId?: string | null })
     | null = null;
   private onUnconsumedAgentIpcFn:
     | ((groupJid: string, agentId: string) => void)
@@ -290,6 +344,15 @@ export class GroupQueue {
   private onUnacknowledgedIpcDeliveriesFn:
     | ((groupJid: string, receipts: IpcDeliveryReceipt[]) => void)
     | null = null;
+  /** Host cleanup for a lane whose work an ordinary stop discards. */
+  private onLaneDiscardedFn: ((groupJid: string) => void) | null = null;
+  /** Host veto for reclaiming an idle runner: work it still owes a lane. */
+  private idleReclaimBlockerFn: ((groupJid: string) => boolean) | null = null;
+  /** Serialization keys whose stops wait for the current query to end. */
+  private queryEndStopDeferrals = new Map<
+    string,
+    { count: number; onRunnerExit: (runnerJid: string) => void }
+  >();
   private onAbandonedIpcDeliveriesFn:
     | ((groupJid: string, receipts: IpcDeliveryReceipt[]) => void)
     | null = null;
@@ -315,6 +378,7 @@ export class GroupQueue {
         queryStartedAt: null,
         announcedQueryId: null,
         pendingInterruptQueryId: null,
+        pendingInterruptReason: 'steer',
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -369,6 +433,7 @@ export class GroupQueue {
   }
 
   private isMutationPaused(groupJid: string): boolean {
+    if (this.heldLanes.has(groupJid)) return true;
     const key = this.getMutationPauseKey(groupJid);
     const paused =
       (this.mutationPauseCounts.get(key) ?? 0) > 0 ||
@@ -499,6 +564,111 @@ export class GroupQueue {
     return token;
   }
 
+  /**
+   * Hold one lane (a Runtime Session being deleted) without pausing its
+   * workspace: the lane's queued and newly arriving work waits instead of
+   * starting a runner, and stopGroup(..., { preserveQueuedWork: true }) keeps
+   * it, while the main session and the other sessions keep running.
+   */
+  holdLane(groupJid: string): void {
+    this.heldLanes.set(groupJid, (this.heldLanes.get(groupJid) ?? 0) + 1);
+  }
+
+  /**
+   * Release one hold. With none left the lane is as it was: deliveries its
+   * stopped runner had not acknowledged are replayed and its work runs.
+   */
+  releaseLane(groupJid: string): void {
+    if (!this.releaseLaneHold(groupJid)) return;
+    const state = this.groups.get(groupJid);
+    if (state && !state.active) {
+      this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+    }
+    if (state && (state.pendingMessages || state.pendingTasks.length > 0)) {
+      this.waitingGroups.add(groupJid);
+    }
+    this.drainWaiting();
+  }
+
+  /**
+   * A held lane's session is gone: drop its work and run its discard hook
+   * (ending a usage-limit wait, cancelling parked input), as a plain stop
+   * does. The lane stays held while another holder has it.
+   */
+  discardHeldLane(groupJid: string): void {
+    if (!this.heldLanes.has(groupJid)) return;
+    try {
+      this.discardLaneWork(groupJid, this.getGroup(groupJid));
+    } finally {
+      this.releaseLaneHold(groupJid);
+    }
+    this.drainWaiting();
+  }
+
+  /** Drop one hold; true when it was the last. */
+  private releaseLaneHold(groupJid: string): boolean {
+    const holders = this.heldLanes.get(groupJid);
+    if (!holders) return false;
+    if (holders > 1) {
+      this.heldLanes.set(groupJid, holders - 1);
+      return false;
+    }
+    this.heldLanes.delete(groupJid);
+    this.mutationPreserveStopJids.delete(groupJid);
+    // The stop's markers outlive the hold only while a workspace mutation
+    // also holds the lane; otherwise its next runner starts afresh.
+    if (!this.mutationPauseCounts.has(this.getMutationPauseKey(groupJid))) {
+      this.clearStopMarkers(groupJid);
+    }
+    return true;
+  }
+
+  private clearStopMarkers(groupJid: string): void {
+    const lane = this.getSerializationKey(groupJid);
+    this.mutationStoppedLanes.delete(lane);
+    this.recentlyStoppedLanes.delete(lane);
+  }
+
+  /**
+   * After a stop that kept the lane's work: remove the files of IPC
+   * deliveries the runner had not acknowledged but keep their receipts, so
+   * the outcome decides — replayed when the lane is released, committed as
+   * abandoned when its work is discarded. Falls back to replaying now when
+   * the files cannot be removed.
+   */
+  private parkUnacknowledgedIpcDeliveries(
+    groupJid: string,
+    state: GroupState,
+  ): void {
+    if (!state.pendingIpcDeliveries || state.pendingIpcDeliveries.size === 0)
+      return;
+    const ids = new Set(state.pendingIpcDeliveries.keys());
+    if (!this.discardDeliveryIpcFiles(state, ids)) {
+      this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+    }
+  }
+
+  /** Drop a lane's queued work and run its discard hook, as stopGroup does. */
+  private discardLaneWork(groupJid: string, state: GroupState): void {
+    state.pendingMessages = false;
+    this.discardPendingTasks(state, groupJid);
+    this.clearRetryTimer(state);
+    this.waitingGroups.delete(groupJid);
+    try {
+      this.abandonUnacknowledgedIpcDeliveries(groupJid, state);
+    } catch (err) {
+      logger.error(
+        { groupJid, err },
+        'Failed to abandon IPC deliveries of a discarded lane',
+      );
+    }
+    try {
+      this.onLaneDiscardedFn?.(groupJid);
+    } catch (err) {
+      logger.error({ groupJid, err }, 'onLaneDiscarded callback failed');
+    }
+  }
+
   /** Release one mutation pause and drain work whose final pause was removed. */
   resumeGroupsAfterMutation(token: MutationPauseToken): void {
     const keys = this.mutationPauseTokens.get(token.id);
@@ -533,9 +703,14 @@ export class GroupQueue {
     // stop classification during forced quiesce). Clear them before draining
     // the replacement runner; otherwise its normal exit within 30s would be
     // mistaken for the old mutation stop and skip IPC recovery/auto-drain.
-    for (const key of releasedKeys) {
-      if (!this.mutationStoppedFolders.delete(key)) continue;
-      this.recentlyStoppedFolders.delete(key);
+    for (const [jid, state] of this.groups) {
+      if (!releasedKeys.has(this.getMutationPauseKey(jid))) continue;
+      if (this.heldLanes.has(jid)) continue;
+      const lane = this.getSerializationKey(jid);
+      if (this.mutationStoppedLanes.delete(lane)) {
+        this.recentlyStoppedLanes.delete(lane);
+      }
+      if (!state.active) this.recoverUnacknowledgedIpcDeliveries(jid, state);
     }
 
     for (const [jid, state] of this.groups) {
@@ -584,16 +759,13 @@ export class GroupQueue {
           'discardGroupsAfterMutation found an active runner; caller should stop the family first',
         );
       }
-      state.pendingMessages = false;
-      this.discardPendingTasks(state, jid);
-      this.clearRetryTimer(state);
-      this.waitingGroups.delete(jid);
+      this.discardLaneWork(jid, state);
       this.mutationPreserveStopJids.delete(jid);
-    }
-
-    for (const key of releasedKeys) {
-      if (this.mutationStoppedFolders.delete(key)) {
-        this.recentlyStoppedFolders.delete(key);
+      if (releasedKeys.has(this.getMutationPauseKey(jid))) {
+        const lane = this.getSerializationKey(jid);
+        if (this.mutationStoppedLanes.delete(lane)) {
+          this.recentlyStoppedLanes.delete(lane);
+        }
       }
     }
     // Terminal tombstones and base aliases intentionally survive final token
@@ -805,9 +977,27 @@ export class GroupQueue {
   }
 
   setUserConcurrentLimitChecker(
-    fn: (groupJid: string) => { allowed: boolean },
+    fn: (groupJid: string) => { allowed: boolean; userId?: string | null },
   ): void {
     this.userConcurrentLimitFn = fn;
+  }
+
+  /**
+   * Work an idle runner still owes its lane that GroupQueue cannot see:
+   * durable queued input, running background agents. Such a runner is never
+   * reclaimed for another lane's container slot.
+   */
+  setIdleRunnerReclaimBlocker(fn: (groupJid: string) => boolean): void {
+    this.idleReclaimBlockerFn = fn;
+  }
+
+  /**
+   * An ordinary stop (Stop button, /clear, /fresh, deleting a workspace or
+   * Session) discards the lane's work, including work the host keeps outside
+   * GroupQueue such as an input waiting for a usage-limit reset.
+   */
+  setOnLaneDiscarded(fn: (groupJid: string) => void): void {
+    this.onLaneDiscardedFn = fn;
   }
 
   /**
@@ -898,30 +1088,34 @@ export class GroupQueue {
   }
 
   /**
-   * Whether stopGroup was issued for this folder in the recent window.
+   * Whether stopGroup was issued for this lane (its serialization key, so
+   * the JIDs sharing one runner count as one lane) in the recent window.
    * Used by:
    *   1. runForGroup finally — skip pendingMessages re-arm + drainGroup
    *   2. main loop OOM handler — don't count user-stopped 137 as OOM
    *   3. anything else that needs to suppress auto-restart shortly after a stop
    */
-  isRecentlyStopped(folder: string): boolean {
-    const ts = this.recentlyStoppedFolders.get(folder);
+  isRecentlyStopped(groupJid: string): boolean {
+    const lane = this.getSerializationKey(groupJid);
+    const ts = this.recentlyStoppedLanes.get(lane);
     if (!ts) return false;
     if (Date.now() - ts > GroupQueue.RECENTLY_STOPPED_WINDOW_MS) {
-      this.recentlyStoppedFolders.delete(folder);
+      this.recentlyStoppedLanes.delete(lane);
       return false;
     }
     return true;
   }
 
   /**
-   * Describe the latest explicit stop for the active folder. Ordinary user or
-   * lifecycle stops discard the interrupted input; capability mutations park
-   * it so the replacement runtime can replay under the committed policy.
+   * Describe the latest explicit stop of this lane. Ordinary user or
+   * lifecycle stops discard the interrupted input; capability mutations and
+   * held lanes park it so the replacement runtime can replay it.
    */
-  getRecentStopDisposition(folder: string): 'none' | 'discard' | 'preserve' {
-    if (!this.isRecentlyStopped(folder)) return 'none';
-    return this.mutationStoppedFolders.has(folder) ? 'preserve' : 'discard';
+  getRecentStopDisposition(groupJid: string): 'none' | 'discard' | 'preserve' {
+    if (!this.isRecentlyStopped(groupJid)) return 'none';
+    return this.mutationStoppedLanes.has(this.getSerializationKey(groupJid))
+      ? 'preserve'
+      : 'discard';
   }
 
   private isHostMode(groupJid: string): boolean {
@@ -940,6 +1134,202 @@ export class GroupQueue {
       if (this.getSerializationKey(jid) === key) return jid;
     }
     return null;
+  }
+
+  private getUserId(groupJid: string): string | null {
+    return this.userConcurrentLimitFn?.(groupJid)?.userId ?? null;
+  }
+
+  /**
+   * Container slots bound execution, not warm runners. When work waits for a
+   * slot and the container pool is full, close the runner that has been idle
+   * the longest (an early idle timeout) so the waiting work can start once it
+   * exits. Host runners are never reclaimed: Host mode has no global process
+   * pool (CLAUDE.md §4). Returns true when a runner was asked to close.
+   */
+  private reclaimIdleContainerRunner(waitingGroupJid?: string): boolean {
+    if (this.shuttingDown) return false;
+    const globalAtLimit =
+      this.activeContainerCount >= getSystemSettings().maxConcurrentContainers;
+    const blockedJid =
+      waitingGroupJid ??
+      [...this.waitingGroups].find(
+        (jid) => !this.isHostMode(jid) && !this.hasCapacityFor(jid),
+      );
+    const userLimitCheck =
+      blockedJid && !this.isHostMode(blockedJid) && this.userConcurrentLimitFn
+        ? this.userConcurrentLimitFn(blockedJid)
+        : undefined;
+    const userAtLimit = userLimitCheck ? !userLimitCheck.allowed : false;
+    if (!globalAtLimit && !userAtLimit) {
+      return false;
+    }
+    const waitingUserId = userAtLimit ? (userLimitCheck?.userId ?? null) : null;
+    // getUserId runs the whole per-user limit check, which walks every
+    // workspace; resolve each lane once, not in every loop and comparison.
+    const sameUser = new Map<string, boolean>();
+    const ownedByWaitingUser = (jid: string): boolean => {
+      let same = sameUser.get(jid);
+      if (same === undefined) {
+        same = this.getUserId(jid) === waitingUserId;
+        sameUser.set(jid, same);
+      }
+      return same;
+    };
+    // A runner or lane that competes for the slot the waiting work needs.
+    const competes = (jid: string): boolean =>
+      globalAtLimit || !waitingUserId || ownedByWaitingUser(jid);
+    let closing = 0;
+    const idle: Array<{ jid: string; state: GroupState }> = [];
+    for (const [jid, state] of this.groups) {
+      if (state.active && state.closing === 'reclaim' && competes(jid)) {
+        closing++;
+      }
+      if (this.isIdleContainerRunner(jid, state)) idle.push({ jid, state });
+    }
+    if (idle.length === 0) return false;
+    // Only lanes with no runner of their own need a new slot, and each runner
+    // already closing frees one.
+    const runnerKeys = new Set<string>();
+    for (const [jid, state] of this.groups) {
+      if (state.active) runnerKeys.add(this.getSerializationKey(jid));
+    }
+    let demand = 0;
+    for (const jid of this.waitingGroups) {
+      const state = this.groups.get(jid);
+      if (
+        state &&
+        (state.pendingMessages || state.pendingTasks.length > 0) &&
+        !runnerKeys.has(this.getSerializationKey(jid)) &&
+        !this.isHostMode(jid) &&
+        !this.isMutationPaused(jid) &&
+        competes(jid)
+      ) {
+        demand++;
+      }
+    }
+    if (closing >= demand) return false;
+    // Longest idle first; the costlier checks run only until one passes.
+    idle.sort((a, b) => {
+      if (waitingUserId) {
+        const aSameUser = ownedByWaitingUser(a.jid) ? 0 : 1;
+        const bSameUser = ownedByWaitingUser(b.jid) ? 0 : 1;
+        if (aSameUser !== bSameUser) return aSameUser - bSameUser;
+      }
+      return (a.state.idleSince ?? 0) - (b.state.idleSince ?? 0);
+    });
+    const victim = idle.find(
+      ({ jid, state }) =>
+        competes(jid) && this.owesNoWorkOutsideQueue(jid, state),
+    );
+    if (!victim) return false;
+    victim.state.closing = 'reclaim';
+    logger.info(
+      {
+        groupJid: victim.jid,
+        idleMs: Date.now() - (victim.state.idleSince ?? Date.now()),
+        waitingCount: demand,
+      },
+      'Closing the longest-idle container runner to free a slot for waiting work',
+    );
+    this.closeStdin(victim.jid);
+    return true;
+  }
+
+  /** An idle warm container runner whose GroupQueue state owes nothing. */
+  private isIdleContainerRunner(jid: string, state: GroupState): boolean {
+    return (
+      state.active &&
+      state.runnerRuntime === 'container' &&
+      // Scheduled-task runners close themselves when their run ends.
+      (!state.activeRunnerIsTask || jid.includes('#agent:')) &&
+      !state.queryInFlight &&
+      state.idleSince != null &&
+      !state.idleFromContinuation &&
+      !state.closing &&
+      !state.stopRequested &&
+      !state.restarting &&
+      !state.drainSentinelWritten &&
+      !state.pendingMessages &&
+      state.pendingTasks.length === 0 &&
+      !state.hasIpcInjectedMessages &&
+      state.ipcOwedSinceAt === null &&
+      state.pendingIpcDeliveries.size === 0 &&
+      !!state.groupFolder &&
+      !this.isMutationPaused(jid)
+    );
+  }
+
+  /** No IPC input left on disk and nothing the host reports for the lane. */
+  private owesNoWorkOutsideQueue(jid: string, state: GroupState): boolean {
+    if (
+      this.hasRemainingIpcMessages(
+        state.groupFolder!,
+        state.agentId,
+        state.taskRunId,
+      )
+    ) {
+      return false;
+    }
+    try {
+      return !(this.idleReclaimBlockerFn?.(jid) ?? false);
+    } catch (err) {
+      logger.warn({ groupJid: jid, err }, 'Idle reclaim blocker failed');
+      return false;
+    }
+  }
+
+  /**
+   * Run `fn` while stops aimed at the runner serving `runtimeJid` wait for
+   * its current query to end: that runner finishes and delivers the turn,
+   * then closes instead of serving another query, and `onRunnerExit` runs
+   * after its teardown and before the lane drains again. Used when a runner's
+   * own tool call commits a change that would otherwise stop it mid-turn.
+   */
+  async deferStopsToQueryEnd<T>(
+    runtimeJid: string,
+    onRunnerExit: (runnerJid: string) => void,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const key = this.getSerializationKey(runtimeJid);
+    const current = this.queryEndStopDeferrals.get(key);
+    this.queryEndStopDeferrals.set(key, {
+      count: (current?.count ?? 0) + 1,
+      onRunnerExit,
+    });
+    try {
+      return await fn();
+    } finally {
+      const entry = this.queryEndStopDeferrals.get(key);
+      if (entry && entry.count > 1) entry.count -= 1;
+      else this.queryEndStopDeferrals.delete(key);
+    }
+  }
+
+  /** Close `runnerJid` after its current query; idle runners close now. */
+  private closeAfterQuery(
+    runnerJid: string,
+    onRunnerExit: (runnerJid: string) => void,
+  ): void {
+    const state = this.getGroup(runnerJid);
+    state.closing = 'after_query';
+    // Repeated deferrals in one turn all want the same clean-up once.
+    state.afterRunnerExit ??= onRunnerExit;
+    if (!state.queryInFlight) this.closeStdin(runnerJid);
+  }
+
+  /** Reset per-runner close bookkeeping and run the after-exit callbacks. */
+  private settleRunnerExit(groupJid: string, state: GroupState): void {
+    const callback = state.afterRunnerExit;
+    state.afterRunnerExit = null;
+    state.closing = null;
+    state.idleSince = null;
+    state.idleFromContinuation = false;
+    try {
+      callback?.(groupJid);
+    } catch (err) {
+      logger.error({ groupJid, err }, 'After-runner-exit callback failed');
+    }
   }
 
   private hasCapacityFor(groupJid: string): boolean {
@@ -1195,6 +1585,9 @@ export class GroupQueue {
     state.announcedQueryId = null;
     state.pendingInterruptQueryId = null;
     state.currentQueryCoveredMessageIds = new Set();
+    state.idleSince = Date.now();
+    state.idleFromContinuation = options?.preserveIpcDebt === true;
+    if (state.closing === 'after_query') this.closeStdin(groupJid);
     if (!completedQueryId) return;
     // Publish the terminal event before the legacy idle callback. The callback
     // may synchronously reserve/announce the next queued query; ordering the
@@ -1205,6 +1598,8 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, err }, 'onQueryIdle callback failed');
     }
+    // Work already waiting for a container slot can take this one now.
+    if (this.waitingGroups.size > 0) this.reclaimIdleContainerRunner();
   }
 
   getActiveQueryId(groupJid: string): string | null {
@@ -1256,8 +1651,11 @@ export class GroupQueue {
    * durable queued follow-up while it is being prepared for IPC injection. */
   reserveNextQuery(groupJid: string): string | null {
     const state = this.resolveActiveState(groupJid);
-    if (!state?.active || state.queryInFlight) return null;
+    if (!state?.active || state.queryInFlight || state.closing) {
+      return null;
+    }
     state.queryInFlight = true;
+    state.idleSince = null;
     state.queryId = randomUUID();
     state.queryStartedAt = Date.now();
     state.announcedQueryId = null;
@@ -1441,6 +1839,7 @@ export class GroupQueue {
     if (this.isMutationPaused(groupJid)) return false;
     const state = this.resolveActiveState(groupJid);
     if (!state) return false;
+    if (state.closing) return false;
     // Task-runner exclusion mirrors sendMessage(). Conversation agents
     // (`#agent:` virtual JIDs) DO accept IPC messages — exempt them.
     if (state.activeRunnerIsTask && !groupJid.includes('#agent:')) {
@@ -1525,6 +1924,7 @@ export class GroupQueue {
         },
         'At concurrency limit, message queued',
       );
+      this.reclaimIdleContainerRunner(groupJid);
       return;
     }
 
@@ -1615,6 +2015,7 @@ export class GroupQueue {
         },
         'At concurrency limit, task queued',
       );
+      this.reclaimIdleContainerRunner(groupJid);
       return true;
     }
 
@@ -1668,7 +2069,13 @@ export class GroupQueue {
       // as soon as registration creates a stable path; a later query can never
       // inherit it because every query boundary clears the pending identity.
       state.pendingInterruptQueryId = null;
-      if (!this.interruptQuery(groupJid, pendingInterruptQueryId)) {
+      if (
+        !this.interruptQuery(
+          groupJid,
+          pendingInterruptQueryId,
+          state.pendingInterruptReason,
+        )
+      ) {
         state.deferredInterruptFailure?.(pendingInterruptQueryId);
         logger.warn(
           { groupJid, pendingInterruptQueryId },
@@ -1745,6 +2152,9 @@ export class GroupQueue {
     if (this.isMutationPaused(groupJid)) return 'no_active';
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
+    // A runner on its way out must not take a new turn; the caller's cold
+    // start runs once it has exited.
+    if (state.closing) return 'no_active';
 
     // Container credentials are immutable process environment. Never inject a
     // turn from Bot B into a warm runner that started with Bot A (or with no
@@ -1924,6 +2334,7 @@ export class GroupQueue {
       }
       if (!state.queryInFlight || !state.queryId) {
         state.queryInFlight = true;
+        state.idleSince = null;
         state.queryId = queryRunId;
         state.queryStartedAt = Date.now();
         state.announcedQueryId = null;
@@ -2018,7 +2429,12 @@ export class GroupQueue {
       : agentId
         ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
         : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
-    for (const name of ['_drain', '_close', '_interrupt']) {
+    for (const name of [
+      '_drain',
+      '_close',
+      '_interrupt',
+      INTERRUPT_REASON_SENTINEL,
+    ]) {
       try {
         fs.unlinkSync(path.join(inputDir, name));
       } catch {
@@ -2048,7 +2464,7 @@ export class GroupQueue {
     // 应该在这里重新点亮 pendingMessages，否则 stopGroup 之后的 drainGroup 路径
     // 会拉起一个新 runner。
     if (
-      this.isRecentlyStopped(state.groupFolder) &&
+      this.isRecentlyStopped(groupJid) &&
       !this.mutationPreserveStopJids.has(groupJid)
     ) {
       return;
@@ -2326,8 +2742,14 @@ export class GroupQueue {
    *
    * Writes a _interrupt sentinel that agent-runner detects and calls
    * query.interrupt(). The container stays alive and accepts new messages.
+   * An explicit `stop` also writes the reason; without it the runner treats
+   * the interrupt as a steer.
    */
-  interruptQuery(groupJid: string, expectedQueryId?: string): boolean {
+  interruptQuery(
+    groupJid: string,
+    expectedQueryId?: string,
+    reason: InterruptReason = 'steer',
+  ): boolean {
     // During cold boot the exact JID is active before registerProcess supplies
     // groupFolder. Prefer it so a provider companion cannot miss the brief
     // pre-IPC interrupt window; registered sibling JIDs still resolve through
@@ -2346,7 +2768,11 @@ export class GroupQueue {
 
     if (!state.groupFolder) {
       if (!state.queryId) return false;
+      const stopPending =
+        state.pendingInterruptQueryId === state.queryId &&
+        state.pendingInterruptReason === 'stop';
       state.pendingInterruptQueryId = state.queryId;
+      state.pendingInterruptReason = stopPending ? 'stop' : reason;
       logger.info(
         { groupJid, queryId: state.queryId },
         'Deferred query interrupt until runner registration',
@@ -2366,8 +2792,18 @@ export class GroupQueue {
       // Bind the sentinel to this exact host query. The runner may start after
       // a long cold-image delay, while an old file can survive a host crash;
       // query identity—not mtime—distinguishes those cases safely.
-      fs.writeFileSync(path.join(inputDir, '_interrupt'), state.queryId ?? '');
-      logger.info({ groupJid, inputDir }, 'Interrupt sentinel written');
+      const queryId = state.queryId ?? '';
+      if (reason === 'stop') {
+        // Before `_interrupt`: the runner reads the reason once it sees it.
+        // A steer leaves a stop not yet consumed for this query in place.
+        publishSentinel(
+          inputDir,
+          INTERRUPT_REASON_SENTINEL,
+          JSON.stringify({ queryId, reason }),
+        );
+      }
+      publishSentinel(inputDir, '_interrupt', queryId);
+      logger.info({ groupJid, inputDir, reason }, 'Interrupt sentinel written');
       return true;
     } catch (err) {
       logger.warn(
@@ -2376,6 +2812,13 @@ export class GroupQueue {
       );
       return false;
     }
+  }
+
+  private markStopped(groupJid: string, preserveQueuedWork: boolean): void {
+    const lane = this.getSerializationKey(groupJid);
+    if (preserveQueuedWork) this.mutationStoppedLanes.add(lane);
+    else this.mutationStoppedLanes.delete(lane);
+    this.recentlyStoppedLanes.set(lane, Date.now());
   }
 
   /**
@@ -2394,26 +2837,39 @@ export class GroupQueue {
         'preserveQueuedWork requires an active mutation pause token',
       );
     }
+    // A runner whose own tool call is committing this mutation finishes and
+    // delivers its turn first; it closes afterwards (deferStopsToQueryEnd).
+    const deferral = preserveQueuedWork
+      ? this.queryEndStopDeferrals.get(this.getSerializationKey(groupJid))
+      : undefined;
+    const deferredRunner = deferral ? this.findActiveRunnerFor(groupJid) : null;
+    if (deferral && deferredRunner) {
+      this.closeAfterQuery(deferredRunner, deferral.onRunnerExit);
+      logger.info(
+        { groupJid, runnerJid: deferredRunner },
+        'Mutation stop deferred until the runner finishes its current query',
+      );
+      return;
+    }
     const requestedState = this.getGroup(groupJid);
     requestedState.stopRequested = true;
     if (!preserveQueuedWork) {
       requestedState.pendingMessages = false;
       this.discardPendingTasks(requestedState, groupJid);
       this.clearRetryTimer(requestedState);
+      try {
+        this.onLaneDiscardedFn?.(groupJid);
+      } catch (err) {
+        logger.error({ groupJid, err }, 'onLaneDiscarded callback failed');
+      }
     } else if (!this.parkTaskForMutation(requestedState, groupJid)) {
       requestedState.pendingMessages = true;
       this.waitingGroups.add(groupJid);
     }
     // 标记 stop 时间：runForGroup finally + index.ts OOM 计数 + 主消息循环
     // 都用这个时间窗判断 user-stopped vs 真 OOM / IPC-injected drain。
-    if (requestedState.groupFolder) {
-      if (preserveQueuedWork) {
-        this.mutationStoppedFolders.add(requestedState.groupFolder);
-      } else {
-        this.mutationStoppedFolders.delete(requestedState.groupFolder);
-      }
-      this.recentlyStoppedFolders.set(requestedState.groupFolder, Date.now());
-    }
+    if (requestedState.groupFolder)
+      this.markStopped(groupJid, preserveQueuedWork);
     const activeRunner = this.findActiveRunnerFor(groupJid);
     const targetJid = activeRunner || groupJid;
     const state = this.getGroup(targetJid);
@@ -2431,14 +2887,7 @@ export class GroupQueue {
     if (preserveQueuedWork) {
       this.mutationPreserveStopJids.add(targetJid);
     }
-    if (state.groupFolder) {
-      if (preserveQueuedWork) {
-        this.mutationStoppedFolders.add(state.groupFolder);
-      } else {
-        this.mutationStoppedFolders.delete(state.groupFolder);
-      }
-      this.recentlyStoppedFolders.set(state.groupFolder, Date.now());
-    }
+    if (state.groupFolder) this.markStopped(targetJid, preserveQueuedWork);
     if (!preserveQueuedWork) {
       this.waitingGroups.delete(groupJid);
       this.waitingGroups.delete(targetJid);
@@ -2630,7 +3079,7 @@ export class GroupQueue {
     // the old discard marker before processGroupMessages starts; mutation
     // markers are removed by resumeGroupsAfterMutation before reaching here.
     if (state.stopRequested) {
-      this.recentlyStoppedFolders.delete(this.getSerializationKey(groupJid));
+      this.recentlyStoppedLanes.delete(this.getSerializationKey(groupJid));
     }
     state.stopRequested = false;
     const isHostMode = this.isHostMode(groupJid);
@@ -2714,7 +3163,7 @@ export class GroupQueue {
       const exitFolder = state.groupFolder;
       const isStopRequested =
         state.stopRequested ||
-        (exitFolder ? this.isRecentlyStopped(exitFolder) : false);
+        (exitFolder ? this.isRecentlyStopped(groupJid) : false);
       if (state.groupFolder) {
         try {
           this.cleanupIpcSentinels(
@@ -2725,7 +3174,14 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        if (
+          this.mutationPreserveStopJids.has(groupJid) &&
+          this.isMutationPaused(groupJid)
+        ) {
+          this.parkUnacknowledgedIpcDeliveries(groupJid, state);
+        } else {
+          this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        }
         this.recoverUnconsumedIpc(groupJid, state, 'agent exit');
       }
       // If messages were IPC-injected during this run, always mark pending
@@ -2796,6 +3252,7 @@ export class GroupQueue {
       } else {
         this.activeContainerCount--;
       }
+      this.settleRunnerExit(groupJid, state);
       try {
         this.onRunnerStateChangeFn?.(groupJid, 'idle');
       } catch (err) {
@@ -2924,7 +3381,14 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        if (
+          this.mutationPreserveStopJids.has(groupJid) &&
+          this.isMutationPaused(groupJid)
+        ) {
+          this.parkUnacknowledgedIpcDeliveries(groupJid, state);
+        } else {
+          this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        }
         this.recoverUnconsumedIpc(groupJid, state, 'task exit');
       }
       const unfinishedQueryId = state.queryId;
@@ -2970,6 +3434,7 @@ export class GroupQueue {
       } else {
         this.activeContainerCount--;
       }
+      this.settleRunnerExit(groupJid, state);
       try {
         this.onRunnerStateChangeFn?.(groupJid, 'idle');
       } catch (err) {
@@ -2986,6 +3451,9 @@ export class GroupQueue {
         } catch (err) {
           logger.error({ groupJid, err }, 'drainGroup failed');
         }
+      } else if (this.isMutationPaused(groupJid)) {
+        // The slot a paused lane's runner just gave up serves the others.
+        this.drainWaiting();
       }
       this.resolveRunnerTeardownWaiters(state);
     }
@@ -3091,6 +3559,8 @@ export class GroupQueue {
       if (state.pendingMessages || state.pendingTasks.length > 0) {
         this.waitingGroups.add(groupJid);
       }
+      // The slot a paused lane's runner just gave up serves the others.
+      this.drainWaiting();
       return;
     }
     const activeRunner = this.findActiveRunnerFor(groupJid);
@@ -3223,6 +3693,7 @@ export class GroupQueue {
       }
       // If neither pending, skip this group
     }
+    if (this.waitingGroups.size > 0) this.reclaimIdleContainerRunner();
   }
 
   getStatus(): {

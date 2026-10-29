@@ -119,13 +119,9 @@ describe('GroupQueue mutation pause', () => {
     expect(dropped).toBe(0);
 
     queue.resumeGroupsAfterMutation(token);
-    expect(
-      (
-        queue as unknown as {
-          recentlyStoppedFolders: Map<string, number>;
-        }
-      ).recentlyStoppedFolders.has(FOLDER),
-    ).toBe(false);
+    // The mutation's stop markers go with its pause (both JIDs share a lane).
+    expect(queue.isRecentlyStopped(WEB_JID)).toBe(false);
+    expect(queue.isRecentlyStopped(IM_JID)).toBe(false);
     await tick();
     await tick();
 

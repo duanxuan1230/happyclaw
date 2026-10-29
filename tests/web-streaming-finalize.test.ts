@@ -55,6 +55,8 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
 const { useChatStore, MAX_STEPS_CACHE_CHARS } =
   await import('../web/src/stores/chat');
 const { hasVisibleWork } = await import('../web/src/lib/process-visibility');
+const { memoryReceipts } =
+  await import('../web/src/features/workspace-memory/receipts');
 const initialState = useChatStore.getState();
 
 const JID = 'web:finalize';
@@ -1631,13 +1633,246 @@ describe("a proactive turn's reply", () => {
     expect(state.messages[JID][0].has_trace).toBe(true);
   });
 
-  it('holds nothing at the hidden level, where nothing is kept', () => {
+  it('holds nothing at the hidden level for a turn that sent no progress', () => {
     proactive('hidden');
     useChatStore.getState().handleRunStarted(JID, 'run-a');
     reason();
     speak('utterance-1');
     expect(useChatStore.getState().activeRuns[JID]?.answered).toBe('input-1');
     expect(useChatStore.getState().traceAwaited[JID]).toBeUndefined();
+  });
+
+  /** A progress statement the Agent sent, as the host announces it. */
+  function progress(text: string, turn = turn1) {
+    emit(
+      {
+        eventType: 'commentary',
+        agentScope: 'main',
+        text,
+        progress: true,
+        ...turn,
+      },
+      'run-a',
+    );
+  }
+  const liveTexts = () =>
+    (useChatStore.getState().streaming[JID]?.steps ?? [])
+      .filter((step) => step.kind === 'text')
+      .map((step) => `${step.progress ? 'progress' : 'note'}:${step.text}`);
+
+  it('shows the progress the Agent sent at every level, and folds it away with the reply', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      // The narration before a tool call is not progress: `full` only.
+      emit(
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: '我先列目录',
+          ...turn1,
+        },
+        'run-a',
+      );
+      tool('tool-1');
+      expect(liveTexts(), level).toEqual(
+        level === 'full'
+          ? ['progress:先看一下仓库', 'note:我先列目录']
+          : ['progress:先看一下仓库'],
+      );
+
+      speak('utterance-1');
+      const state = useChatStore.getState();
+      // The panel gives way to the reply; its row holds the place of the
+      // process the progress folds into, at every level.
+      expect(state.streaming[JID]?.steps ?? [], level).toEqual([]);
+      expect(state.traceAwaited[JID], level).toBe('utterance-1');
+      state.handleMessageTrace(JID, 'utterance-1');
+      expect(useChatStore.getState().messages[JID][0].has_trace, level).toBe(
+        true,
+      );
+    }
+  });
+
+  it('keeps the progress when the level is lowered mid-turn', async () => {
+    for (const lowered of ['activity', 'hidden'] as const) {
+      reset();
+      proactive('full');
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      emit(
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: '我先列目录',
+          ...turn1,
+        },
+        'run-a',
+      );
+      tool('tool-1');
+      await useChatStore.getState().updateProcessVisibility(JID, lowered);
+      expect(liveTexts(), lowered).toEqual(['progress:先看一下仓库']);
+      const live = useChatStore.getState().streaming[JID];
+      expect(live?.inputTurnId, lowered).toBe('input-1');
+      if (lowered === 'hidden') {
+        expect(
+          live?.steps?.every((step) => step.progress),
+          lowered,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the progress through a reconnect at every level', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      useChatStore.getState().handleStreamSnapshot(
+        JID,
+        {
+          partialText: '',
+          activeTools: [],
+          recentEvents: [],
+          systemStatus: null,
+          turnId: 'p-1',
+          progress: [{ at: 1_000, text: '先看一下仓库' }],
+        },
+        undefined,
+        'run-a',
+      );
+      expect(liveTexts(), level).toEqual(['progress:先看一下仓库']);
+    }
+  });
+
+  it('rebuilds the progress in a tab that joins the turn, in order, at every level', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      useChatStore.getState().handleStreamSnapshot(
+        JID,
+        {
+          partialText: '',
+          activeTools: [
+            { toolName: 'Bash', toolUseId: 'b1', startTime: 5_000 },
+          ],
+          recentEvents: [],
+          systemStatus: null,
+          turnId: 'p-1',
+          progress: [
+            { at: 1_000, text: '先看一下仓库' },
+            { at: 9_000, text: '找到了，正在改' },
+          ],
+        },
+        undefined,
+        'run-a',
+      );
+      const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+      expect(liveTexts(), level).toEqual([
+        'progress:先看一下仓库',
+        'progress:找到了，正在改',
+      ]);
+      // Between the two, the tool the snapshot was running, where it shows.
+      const order = steps.map((step) =>
+        step.kind === 'text' ? step.text : step.kind,
+      );
+      expect(order, level).toEqual(
+        level === 'hidden'
+          ? ['先看一下仓库', '找到了，正在改']
+          : ['先看一下仓库', 'tool', '找到了，正在改'],
+      );
+    }
+  });
+
+  it('reads the trace flags again once the level is lowered to hidden', async () => {
+    proactive('full');
+    useChatStore.setState({
+      messages: {
+        [JID]: [
+          finalMessage('with-progress', '答', {
+            source_kind: 'sdk_send_message',
+            turn_id: 'input-a',
+            has_trace: true,
+          }),
+          finalMessage('without-progress', '答', {
+            source_kind: 'sdk_send_message',
+            turn_id: 'input-b',
+            has_trace: true,
+          }),
+        ],
+      },
+    });
+    apiGetMock.mockImplementation(async (url: string) =>
+      url.includes('/messages?')
+        ? {
+            messages: [
+              finalMessage('with-progress', '答', {
+                turn_id: 'input-a',
+                has_trace: true,
+              }),
+              finalMessage('without-progress', '答', { turn_id: 'input-b' }),
+            ],
+          }
+        : undefined,
+    );
+    try {
+      await useChatStore.getState().updateProcessVisibility(JID, 'hidden');
+      await vi.waitFor(() =>
+        expect(
+          useChatStore
+            .getState()
+            .messages[JID].filter((m) => m.has_trace)
+            .map((m) => m.id),
+        ).toEqual(['with-progress']),
+      );
+      expect(apiGetMock).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `/api/groups/${encodeURIComponent(JID)}/messages?limit=`,
+        ),
+      );
+    } finally {
+      apiGetMock.mockReset();
+    }
+  });
+
+  it('keeps the receipt of a memory write and no other tool output, at activity', () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    const forged = '{"result":"remembered","id":"wmi_x","title":"偷看"}';
+    const receipt = '{"result":"remembered","id":"wmi_1","title":"用户偏好"}';
+    const call = (id: string, toolName: string, result: string) => {
+      emit(
+        { eventType: 'tool_use_start', toolName, toolUseId: id, ...turn1 },
+        'run-a',
+      );
+      // The main Agent's tool_result names its call, not its tool.
+      emit(
+        {
+          eventType: 'tool_result',
+          toolUseId: id,
+          toolResult: result,
+          ...turn1,
+        },
+        'run-a',
+      );
+      emit({ eventType: 'tool_use_end', toolUseId: id, ...turn1 }, 'run-a');
+    };
+    call('bash-1', 'Bash', forged);
+    call('mem-1', 'mcp__happyclaw__workspace_memory_remember', receipt);
+    const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+    const step = (id: string) => steps.find((s) => s.toolUseId === id);
+    expect(step('bash-1')?.resultPreview).toBeUndefined();
+    expect(step('mem-1')?.resultPreview).toBe(receipt);
+    expect(memoryReceipts(steps)).toEqual([
+      { id: 'wmi_1', title: '用户偏好', proposed: false },
+    ]);
   });
 
   it('lets the hold go a moment after a run whose turn kept nothing', async () => {
@@ -1666,5 +1901,34 @@ describe("a proactive turn's reply", () => {
     const state = useChatStore.getState();
     expect(state.streaming[JID]?.partialText).toBe('答案');
     expect(state.activeRuns[JID]?.answered).toBeUndefined();
+  });
+
+  it('does not create a virtual sdkTask tab or duplicate task step for local_bash', () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'bash-bg',
+        toolInputSummary: 'npm run dev',
+        ...turn1,
+      },
+      'run-a',
+    );
+    emit(
+      {
+        eventType: 'task_start',
+        taskId: 'bash-bg',
+        toolUseId: 'bash-bg',
+        taskType: 'local_bash',
+        taskDescription: 'Run dev server',
+        ...turn1,
+      },
+      'run-a',
+    );
+    const state = useChatStore.getState();
+    expect(state.sdkTasks['bash-bg']).toBeUndefined();
+    expect(state.streaming[JID]?.steps?.map((s) => s.kind)).toEqual(['tool']);
   });
 });

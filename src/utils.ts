@@ -77,6 +77,12 @@ export function stripVirtualJidSuffix(jid: string): string {
   return jid;
 }
 
+/** The Runtime Session of a `{workspaceJid}#agent:{id}` route JID, else null. */
+export function agentIdOfJid(jid: string): string | null {
+  const agentSep = jid.indexOf('#agent:');
+  return agentSep >= 0 ? jid.slice(agentSep + '#agent:'.length) || null : null;
+}
+
 /**
  * Escape a value for safe inclusion in a CSV cell. Covers two concerns:
  *  1. CSV/formula injection — spreadsheet apps execute a cell whose text starts
@@ -103,7 +109,7 @@ export function escapeCsvField(value: unknown): string {
  * resolve THAT, then re-append the not-yet-existing tail — so a not-yet-created
  * leaf under a symlinked parent is still resolved correctly.
  */
-function realpathBestEffort(p: string): string {
+export function realpathBestEffort(p: string): string {
   let checkPath = path.resolve(p);
   const tail: string[] = [];
   while (checkPath !== path.dirname(checkPath)) {

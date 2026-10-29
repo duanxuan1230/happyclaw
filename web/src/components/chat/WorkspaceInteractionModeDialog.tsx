@@ -12,11 +12,19 @@ import {
 import { Button } from '@/components/ui/button';
 import { Callout } from '@/components/capabilities/capability-ui';
 import type { InteractionMode, ProcessVisibility } from '../../types';
+import { useAgentProfilesStore } from '../../stores/agent-profiles';
+import {
+  useWorkspaceAgentId,
+  WorkspaceAgentField,
+} from '../agents/WorkspaceAgentField';
+import { getErrorMessage } from '../settings/types';
 import { InteractionModeSelector } from './InteractionModeSelector';
 import { ProcessVisibilitySelector } from './ProcessVisibilitySelector';
 
 interface WorkspaceInteractionModeDialogProps {
   open: boolean;
+  /** The Workspace whose Agent can be changed here. */
+  groupJid?: string;
   workspaceName: string;
   currentMode: InteractionMode;
   currentVisibility: ProcessVisibility;
@@ -27,6 +35,7 @@ interface WorkspaceInteractionModeDialogProps {
 
 export function WorkspaceInteractionModeDialog({
   open,
+  groupJid,
   workspaceName,
   currentMode,
   currentVisibility,
@@ -36,30 +45,48 @@ export function WorkspaceInteractionModeDialog({
 }: WorkspaceInteractionModeDialogProps) {
   const [draftMode, setDraftMode] = useState(currentMode);
   const [draftVisibility, setDraftVisibility] = useState(currentVisibility);
+  // Only a Web Workspace belongs to an Agent.
+  const workspaceJid = groupJid?.startsWith('web:') ? groupJid : undefined;
+  const currentAgentId = useWorkspaceAgentId(workspaceJid);
+  const [draftAgentId, setDraftAgentId] = useState(currentAgentId);
+  const setWorkspaceAgentProfile = useAgentProfilesStore(
+    (state) => state.setWorkspaceAgentProfile,
+  );
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
       setDraftMode(currentMode);
       setDraftVisibility(currentVisibility);
+      setDraftAgentId(currentAgentId);
     }
-  }, [currentMode, currentVisibility, open]);
+  }, [currentAgentId, currentMode, currentVisibility, open]);
 
   // Only a proactive workspace has a process to show or hide: an Assistant
   // workspace always shows its whole process on the Web.
   const visibilityApplies = draftMode === 'proactive';
 
   const handleSave = async () => {
+    const agentChanged =
+      !!workspaceJid && !!draftAgentId && draftAgentId !== currentAgentId;
     const modeChanged = draftMode !== currentMode;
     const visibilityChanged =
       visibilityApplies && draftVisibility !== currentVisibility;
-    if (!modeChanged && !visibilityChanged) {
+    if (!agentChanged && !modeChanged && !visibilityChanged) {
       onClose();
       return;
     }
 
     setSaving(true);
     try {
+      if (agentChanged) {
+        try {
+          await setWorkspaceAgentProfile(workspaceJid, draftAgentId);
+        } catch (err) {
+          toast.error(`更换智能体失败：${getErrorMessage(err, '请重试')}`);
+          return;
+        }
+      }
       if (modeChanged) {
         const saved = await onSave(draftMode);
         if (!saved) {
@@ -77,7 +104,9 @@ export function WorkspaceInteractionModeDialog({
       toast.success(
         modeChanged
           ? `已切换为${draftMode === 'proactive' ? '主动模式' : 'Assistant 模式'}`
-          : '过程可见性已更新',
+          : visibilityChanged
+            ? '过程可见性已更新'
+            : '已更换工作区智能体',
       );
       onClose();
     } finally {
@@ -94,18 +123,27 @@ export function WorkspaceInteractionModeDialog({
     >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>工作区回复模式</DialogTitle>
+          <DialogTitle>工作区设置</DialogTitle>
           <DialogDescription>
-            设置“{workspaceName}”由谁控制对用户发消息的时机和数量。
+            设置“{workspaceName}
+            ”的所属智能体，以及由谁控制对用户发消息的时机和数量。
           </DialogDescription>
         </DialogHeader>
+
+        {workspaceJid && (
+          <WorkspaceAgentField
+            groupJid={workspaceJid}
+            value={draftAgentId}
+            onChange={setDraftAgentId}
+            disabled={saving}
+          />
+        )}
 
         <InteractionModeSelector
           value={draftMode}
           onChange={setDraftMode}
           name="workspace-interaction-mode"
           disabled={saving}
-          hideLegend
           description="同一模式会应用到该工作区的 Web、飞书和所有已绑定渠道；渠道只负责选择流式卡片、普通消息或消息气泡等具体呈现。"
         />
 

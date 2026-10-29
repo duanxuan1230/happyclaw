@@ -58,18 +58,24 @@ function harness(activeRunnerJid: string) {
     cardJid: string,
     operator: string,
   ) => { ok: boolean; message: string };
-  return { handle, abort };
+  return { handle, abort, interruptQuery };
 }
 
 const ENDED = { ok: false, message: '当前回复已经结束，无需中断。' };
 
 describe('Feishu stop button', () => {
   test('stops a topic Session of the workspace the group is bound to', () => {
-    const { handle, abort } = harness('web:proj#agent:a1');
+    const { handle, abort, interruptQuery } = harness('web:proj#agent:a1');
     expect(
       handle('feishu:oc_topics#thread:omt_1#root:om_1#agent:a1', 'ou_owner'),
     ).toMatchObject({ ok: true });
     expect(abort).toHaveBeenCalledWith('已停止');
+    // The stop button is an explicit stop, not a steer.
+    expect(interruptQuery).toHaveBeenCalledWith(
+      'web:proj#agent:a1',
+      undefined,
+      'stop',
+    );
   });
 
   test('stops the bound Main Session answering inside a thread', () => {

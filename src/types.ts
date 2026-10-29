@@ -362,17 +362,6 @@ export interface AgentProfilePrompts {
   prompt_mode: AgentProfilePromptMode;
 }
 
-export interface AgentProfilePromptVersion extends AgentProfilePrompts {
-  id: string;
-  agent_profile_id: string;
-  version: number;
-  name: string;
-  identity_hash: string;
-  change_source: 'create' | 'update' | 'restore' | 'migration';
-  restored_from_version: number | null;
-  created_at: string;
-}
-
 /** Durable Workspace↔AgentProfile binding and its interaction contract. */
 export interface WorkspaceAgentProfileBinding {
   group_folder: string;
@@ -398,9 +387,9 @@ export interface AgentProfileRuntimePolicy {
     mode: 'inherit' | 'custom' | 'disabled';
     ids: string[];
     /**
-     * Native host ~/.claude/skills selection. Missing is a legacy sentinel:
-     * follow the effective context source (host_claude => inherit, otherwise
-     * disabled). New profiles persist this field explicitly.
+     * Native host ~/.claude/skills selection. Every active profile stores it
+     * since schema v84; a row without it falls back to the effective context
+     * source (host_claude => inherit, otherwise disabled) with a warning.
      */
     host?: {
       mode: 'inherit' | 'custom' | 'disabled';
@@ -905,6 +894,32 @@ export interface SubAgent {
   last_active_at?: string | null;
 }
 
+/** A session's own git worktree as the API and `agent_status` show it. */
+export interface SessionWorktreeInfo {
+  branch: string;
+  base_commit: string;
+  status: 'active' | 'broken';
+  broken_reason: string | null;
+  /** Creation response only: what `.worktreeinclude` could not copy. */
+  include_incomplete?: WorktreeIncludeIncomplete | null;
+}
+
+/**
+ * `.worktreeinclude` matched more than its caps let through. Nothing was
+ * copied when the include file is over 64 KB or the matched list over 256 KB;
+ * otherwise the 100-file or size caps stopped the copy.
+ */
+export interface WorktreeIncludeIncomplete {
+  reason:
+    | 'include_file_too_large'
+    | 'list_truncated'
+    | 'file_limit'
+    | 'size_limit';
+  copied_files: number;
+  /** Up to five matched paths that were not copied (file and size caps). */
+  skipped_files: string[];
+}
+
 export interface ImContextBinding {
   source_jid: string;
   context_type: 'thread';
@@ -935,6 +950,14 @@ export type RunFinishReason =
   | 'stopped';
 
 // WebSocket message types
+/** One Session waiting for a usage-limit reset, in a reconnect snapshot. */
+export interface UsageLimitWaitSnapshot {
+  chatJid: string;
+  agentId?: string;
+  resumeAt: string;
+  waitCount: number;
+}
+
 export type WsMessageOut =
   | {
       /**
@@ -1009,6 +1032,8 @@ export type WsMessageOut =
       prompt: string;
       resultSummary?: string;
       titleGenerating?: boolean;
+      /** Present for a session that owns a git worktree. */
+      worktree?: SessionWorktreeInfo;
     }
   | {
       type: 'runner_state';
@@ -1039,6 +1064,18 @@ export type WsMessageOut =
        * an idle composer and sends the same message twice.
        */
       queuedChatJids: string[];
+      /** Sessions whose input waits for a usage-limit reset. */
+      usageLimitWaits?: UsageLimitWaitSnapshot[];
+    }
+  | {
+      type: 'usage_limit_wait';
+      /** Normalized workspace JID, routed like follow_up_update. */
+      chatJid: string;
+      agentId?: string;
+      /** ISO time the parked input resumes; null clears the wait. */
+      resumeAt: string | null;
+      /** 1-based count of consecutive waits for this input (max 3). */
+      waitCount?: number;
     }
   | {
       type: 'follow_up_update';
@@ -1161,6 +1198,12 @@ export type WsMessageOut =
         phaseStartedAt?: number;
         /** A tool returned and the model has produced nothing since. */
         awaitingModel?: boolean;
+        /**
+         * The progress statements the Agent sent in this proactive Web turn,
+         * in order, with when each was sent (epoch ms): a tab that joins the
+         * turn rebuilds them as steps at every process visibility.
+         */
+        progress?: Array<{ at: number; text: string }>;
         activeHook?: { hookName: string; hookEvent: string } | null;
         turnId?: string;
       };

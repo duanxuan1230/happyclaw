@@ -1219,17 +1219,24 @@ export function cancelStaleRetryWaitChannelTurns(input: {
   updatedBefore: string;
   reason: string;
   now?: Date | string;
+  /** Inputs known to run again later (a usage-limit wait); never closed. */
+  keepCorrelationIds?: readonly string[];
 }): number {
   const now = isoNow(input.now);
+  const keep = [...new Set(input.keepCorrelationIds ?? [])];
+  const keepClause =
+    keep.length > 0
+      ? ` AND correlation_id NOT IN (${keep.map(() => '?').join(',')})`
+      : '';
   return requireDatabase()
     .prepare(
       `UPDATE turn_runs
        SET status = 'cancelled', completed_at = ?, updated_at = ?, error = ?,
            lease_owner = NULL, lease_expires_at = NULL,
            revision = revision + 1
-       WHERE status = 'retry_wait' AND updated_at < ?`,
+       WHERE status = 'retry_wait' AND updated_at < ?${keepClause}`,
     )
-    .run(now, now, input.reason, input.updatedBefore).changes;
+    .run(now, now, input.reason, input.updatedBefore, ...keep).changes;
 }
 
 /**

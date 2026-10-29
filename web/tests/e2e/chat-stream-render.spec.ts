@@ -390,6 +390,49 @@ test.describe('a proactive workspace', () => {
     await expectNoSidewaysOverflow(page);
   });
 
+  const PROGRESS = '收到，我先跑一遍侧栏的测试，再看滚动帧率，大概要一两分钟。';
+
+  for (const visibility of ['hidden', 'activity', 'full'] as const) {
+    test(`${visibility}: the progress the Agent sent, in the panel and the status bar`, async ({
+      page,
+    }) => {
+      await open(
+        page,
+        `scenario=proactive&visibility=${visibility}&progress=1`,
+      );
+      const panel = page.locator('[data-hc-process-panel]');
+      const steps = panel.getByRole('list', { name: '处理步骤' });
+      await expect(steps.getByText(PROGRESS)).toBeVisible();
+      const bar = page.locator('[data-hc-run-status-bar]');
+      await expect(bar.locator('[data-hc-run-progress]')).toHaveText(PROGRESS);
+      await expect(bar.locator('[data-hc-run-phase]')).toHaveText(
+        visibility === 'hidden' ? '处理中' : '运行命令',
+      );
+      if (visibility === 'hidden') {
+        // Nothing else of the process: no tool, no plan, no phase of the work.
+        const toggle = panel.getByRole('button', { name: /处理过程/ });
+        await expect(toggle).toContainText('正在处理');
+        await expect(toggle).not.toContainText(/运行命令|子 Agent|最近/);
+        const text = await panel.innerText();
+        for (const word of [
+          'Bash',
+          'Grep',
+          'vitest',
+          '检查移动端滚动性能',
+          '计划',
+        ]) {
+          expect(text).not.toContain(word);
+        }
+      }
+      // The reasoning title is `full`'s to show.
+      await expectNoModelText(
+        page,
+        visibility === 'full' ? ['确认订阅范围'] : [],
+      );
+      await expectNoSidewaysOverflow(page);
+    });
+  }
+
   test('"显示过程" opens the reply-mode settings with the visibility levels', async ({
     page,
   }) => {
@@ -398,7 +441,7 @@ test.describe('a proactive workspace', () => {
       .locator('[data-hc-run-status-bar]')
       .getByRole('button', { name: '显示过程' })
       .click();
-    const dialog = page.getByRole('dialog', { name: '工作区回复模式' });
+    const dialog = page.getByRole('dialog', { name: '工作区设置' });
     await expect(dialog).toBeVisible();
     const levels = dialog.getByRole('group', { name: '过程可见性' });
     await expect(levels.getByRole('radio')).toHaveCount(3);
@@ -777,14 +820,12 @@ test.describe('the reasoning and trace the server kept', () => {
     await expect(page.getByText('说点什么')).toHaveCount(0);
   });
 
-  for (const [visibility, row] of [
-    ['hidden', false],
-    ['activity', true],
-    ['full', true],
-  ] as const) {
-    test(`a proactive reply at the ${visibility} level offers ${
-      row ? 'its process' : 'nothing'
-    }`, async ({ page }) => {
+  // At hidden the server flags only a turn that sent progress, so a flagged
+  // reply offers its process at every level.
+  for (const visibility of ['hidden', 'activity', 'full'] as const) {
+    test(`a proactive reply at the ${visibility} level offers its process`, async ({
+      page,
+    }) => {
       await route(page, (r) => r.fulfill({ json: TURN_WITH_STEPS }));
       await open(
         page,
@@ -792,7 +833,7 @@ test.describe('the reasoning and trace the server kept', () => {
       );
       await expect(page.getByText('改成窄 selector 即可。')).toBeVisible();
       await expect(page.getByRole('button', { name: '处理过程' })).toHaveCount(
-        row ? 1 : 0,
+        1,
       );
       // The older rows are the classic layout's.
       await expect(page.getByRole('button', { name: '思考过程' })).toHaveCount(
@@ -804,17 +845,59 @@ test.describe('the reasoning and trace the server kept', () => {
     });
   }
 
+  for (const layout of ['timeline', 'classic'] as const) {
+    test(`a proactive reply at the hidden level opens to the progress alone (${layout})`, async ({
+      page,
+    }) => {
+      const progress = '先看订阅层级，稍后给结论。';
+      await route(page, (r) =>
+        r.fulfill({
+          json: {
+            ...TURN,
+            thinking: '',
+            thinking_duration_ms: null,
+            trace: [],
+            steps: [
+              {
+                id: 'note-p',
+                kind: 'text',
+                at: 1_000_000,
+                endedAt: 1_000_000,
+                status: 'done',
+                commentary: true,
+                progress: true,
+                text: progress,
+              },
+            ],
+          },
+        }),
+      );
+      await open(
+        page,
+        `scenario=lazy-trace&layout=${layout}&mode=proactive&visibility=hidden`,
+      );
+      const row = page.getByRole('button', { name: '处理过程' });
+      await expect(row).toHaveCount(1);
+      await expect(page.getByRole('button', { name: '执行详情' })).toHaveCount(
+        0,
+      );
+      await expect(page.getByText(progress)).toHaveCount(0);
+      await row.click();
+      const card = page.locator('[data-hc-process-card]');
+      await expect(card.getByText(progress)).toBeVisible();
+      await expect(card.locator('[data-hc-work-counts]')).toHaveText(
+        '1 条进展',
+      );
+      await expect(page.getByText('useChatStore in web/src')).toHaveCount(0);
+    });
+  }
+
   for (const [visibility, reasoning, trace] of [
-    ['hidden', false, false],
     ['activity', false, true],
     ['full', true, true],
   ] as const) {
     test(`a proactive reply in the classic layout at the ${visibility} level offers ${
-      !trace
-        ? 'nothing'
-        : reasoning
-          ? 'the trace and the reasoning'
-          : 'the trace only'
+      reasoning ? 'the trace and the reasoning' : 'the trace only'
     }`, async ({ page }) => {
       await route(page, (r) => r.fulfill({ json: TURN }));
       await open(

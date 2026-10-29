@@ -262,6 +262,73 @@ describe('a proactive workspace', () => {
   });
 });
 
+describe('the progress the Agent sent, in a proactive workspace', () => {
+  const progress = (id: string, text: string, at: number) => ({
+    id,
+    kind: 'text' as const,
+    at,
+    endedAt: at,
+    status: 'done' as const,
+    commentary: true,
+    progress: true,
+    text,
+  });
+  const shown = () =>
+    bar()?.querySelector('[data-hc-run-progress]')?.textContent ?? undefined;
+
+  it.each(['hidden', 'activity', 'full'] as const)(
+    'follows the phase with the latest one at %s',
+    async (level) => {
+      proactive(level);
+      await mount({
+        steps: [
+          progress('p1', '先看一下仓库', 1),
+          {
+            id: 'n1',
+            kind: 'text',
+            at: 2,
+            endedAt: 2,
+            status: 'done',
+            commentary: true,
+            text: '我先列一下目录',
+          },
+        ],
+      });
+      expect(phase()).toBe(level === 'hidden' ? '处理中' : '思考中');
+      // Narration is not progress: the bar keeps the progress.
+      expect(shown()).toBe('先看一下仓库');
+      await set({
+        steps: [
+          progress('p1', '先看一下仓库', 1),
+          progress('p2', '找到了 **两处** 调用，正在改', 3),
+        ],
+      });
+      expect(shown()).toBe('找到了 两处 调用，正在改');
+    },
+  );
+
+  it('is gone once the turn has replied', async () => {
+    proactive('hidden');
+    await mount({ inputTurnId: 'input-1', steps: [progress('p1', '在查', 1)] });
+    expect(shown()).toBe('在查');
+    await act(async () => {
+      useChatStore.setState((s) => ({
+        activeRuns: {
+          [JID]: { ...s.activeRuns[JID], answered: 'input-1' },
+        },
+      }));
+    });
+    await wait(3100);
+    expect(phase()).toBe('处理中');
+    expect(shown()).toBeUndefined();
+  });
+
+  it('is never shown in an Assistant workspace', async () => {
+    await mount({ partialText: '答', steps: [progress('p1', '在查', 1)] });
+    expect(shown()).toBeUndefined();
+  });
+});
+
 describe('the speed beside the timer, while the reply streams', () => {
   it('shows the estimated speed after the timer', async () => {
     await mount();

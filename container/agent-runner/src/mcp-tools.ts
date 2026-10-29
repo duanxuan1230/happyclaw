@@ -20,6 +20,7 @@ import {
   type ChannelTurnContext,
 } from './types.js';
 import { signWorkspaceMemoryMutation } from './workspace-memory-auth.js';
+import { memoryRecallQuery } from './workspace-memory-query.js';
 import {
   PROACTIVE_FINAL_DELIVERED_SENTINEL,
   proactiveFinalWasDeliveredForInput,
@@ -248,6 +249,16 @@ export interface WorkspaceMemorySnapshot {
     reset: boolean;
     items: Array<{ id: string; revision: number; status: string }>;
   };
+  /**
+   * The workspace's memory index: the most important recallable items as
+   * `id · kind · title` entries, and how many there are in all.
+   */
+  directory?: WorkspaceMemoryDirectory;
+}
+
+export interface WorkspaceMemoryDirectory {
+  entries: Array<{ id: string; kind: string; title: string }>;
+  total: number;
 }
 
 export interface HappyClawOwnerProfileProjection {
@@ -312,6 +323,7 @@ export function parseWorkspaceMemorySnapshot(
     return null;
   }
   const changes = parseWorkspaceMemoryChanges(value.changes);
+  const directory = parseWorkspaceMemoryDirectory(value.directory);
   return {
     workspaceJid: value.workspaceJid,
     storeRevision: value.storeRevision as number,
@@ -326,6 +338,32 @@ export function parseWorkspaceMemorySnapshot(
       generatedAt: trace.generatedAt,
     },
     ...(changes ? { changes } : {}),
+    ...(directory ? { directory } : {}),
+  };
+}
+
+function parseWorkspaceMemoryDirectory(
+  value: unknown,
+): WorkspaceMemoryDirectory | undefined {
+  if (
+    !isRecord(value) ||
+    !Number.isInteger(value.total) ||
+    !Array.isArray(value.entries) ||
+    !value.entries.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.id === 'string' &&
+        typeof entry.kind === 'string' &&
+        typeof entry.title === 'string',
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    entries: (value.entries as Array<Record<string, string>>).map(
+      ({ id, kind, title }) => ({ id, kind, title }),
+    ),
+    total: value.total as number,
   };
 }
 
@@ -534,13 +572,14 @@ export async function fetchHappyClawOwnerProfileTurn(
 }
 
 /**
- * Fetch a bounded, query-relevant snapshot for the next model turn.
+ * Fetch a bounded snapshot for the next model turn: the memories relevant to
+ * what its senders wrote (see memoryRecallQuery), and the memory index.
  * Failure is fail-open for answering: the turn can continue without memory,
  * while all mutation paths remain server-authorized and fail-closed.
  */
 export async function fetchWorkspaceMemorySnapshot(
   ctx: McpContext,
-  query: string,
+  turnText: string,
   options: {
     limit?: number;
     maxChars?: number;
@@ -556,7 +595,7 @@ export async function fetchWorkspaceMemorySnapshot(
       ctx,
       'snapshot',
       {
-        query: query.slice(0, 500),
+        query: memoryRecallQuery(turnText),
         limit: Math.min(Math.max(options.limit ?? 8, 1), 20),
         maxChars: Math.min(Math.max(options.maxChars ?? 6000, 500), 12_000),
         ...(options.changedSince !== undefined
@@ -582,6 +621,48 @@ function workspaceMemoryToolResult(result: Record<string, unknown>) {
       {
         type: 'text' as const,
         text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}
+
+const MEMORY_WRITE_RESULTS = {
+  create: 'remembered',
+  update: 'updated',
+  delete: 'forgotten',
+} as const;
+
+/**
+ * A write's result names the item and what became of it, without echoing
+ * its content. `result`, `id` and then `title` lead, so the Web's bounded
+ * preview of the call (features/workspace-memory/receipts.ts) still holds
+ * them. A proposal says it waits for the owner; it is not recalled until
+ * confirmed.
+ */
+export function workspaceMemoryWriteResult(
+  operation: keyof typeof MEMORY_WRITE_RESULTS,
+  result: Record<string, unknown>,
+) {
+  const item = isRecord(result.item) ? result.item : {};
+  const proposed = item.status === 'proposed' && operation !== 'delete';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          result: proposed ? 'proposed' : MEMORY_WRITE_RESULTS[operation],
+          id: item.id,
+          title: item.title ?? null,
+          revision: item.revision,
+          kind: item.kind,
+          storeRevision: result.storeRevision,
+          ...(result.replayed ? { replayed: true } : {}),
+          ...(proposed
+            ? {
+                note: "Submitted, awaiting the workspace owner's confirmation on the Memory page; it is not recalled until confirmed.",
+              }
+            : {}),
+        }),
       },
     ],
   };
@@ -923,7 +1004,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
     tool(
       'send_message',
       usesProactiveInteractiveContract
-        ? 'Send one user-visible message now. The Workspace uses Proactive reply mode: every call creates an independent native chat message immediately, and your normal SDK final text is not published. Set delivery_role=progress for acknowledgements or updates and delivery_role=final for the last substantive answer. You may call this tool zero, one, or many times and continue working after each successful progress send. A delivery error is authoritative: do not sleep and retry, switch to a card, or call a raw channel API as a fallback.'
+        ? "Send user-visible output or update live progress. The Workspace uses Proactive reply mode: your normal SDK final text is not published. Set delivery_role=final for the turn's permanent chat reply (which seals the turn), delivery_role=progress for an acknowledgement or interim update (on the Web it joins the live work process and folds away once final is sent; on an IM channel it is sent as a message of its own), and delivery_role=separate only when an additional standalone chat message is genuinely needed. You may call this tool zero, one, or many times and continue working after each successful progress send. A delivery error is authoritative: do not sleep and retry, switch to a card, or call a raw channel API as a fallback."
         : "Publish text through HappyClaw's turn-owned delivery coordinator. In an interactive user turn, delivery_role=progress updates the existing reply status and delivery_role=final stages the primary answer on the existing card; neither creates a second text reply. Use delivery_role=separate only when the user explicitly requested another message. Scheduled/background tasks always deliver separately because their normal SDK final is not published.",
       {
         // Trim/min-length at the schema layer: the host guard is `!data.text`,
@@ -935,7 +1016,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .optional()
           .describe(
             usesProactiveInteractiveContract
-              ? 'Semantic completion hint used for delivery recovery. Both roles still create independent native messages. Use progress for interim updates and final for the last substantive answer; omitted defaults to progress.'
+              ? 'progress is an acknowledgement or interim update (Web: in the live work process, folded once final is sent; IM: a message of its own); final delivers the permanent chat reply and seals the turn; separate sends an extra standalone chat message. Omitted defaults to progress.'
               : 'progress updates the active reply, final stages its answer, separate creates an additional message. Defaults to final for interactive turns and separate for scheduled tasks.',
           ),
       },
@@ -994,7 +1075,9 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
             : 'delivered_separately';
         const acknowledgement =
           disposition === 'staged_progress'
-            ? 'Progress updated on the active reply.'
+            ? usesProactiveInteractiveContract
+              ? 'Progress updated on the live work view. This does not complete the user-visible answer. Continue the work, then call send_message(delivery_role=final) with the last substantive result before ending. Do not put a conclusion, completion phrase, or closing message only in SDK final text.'
+              : 'Progress updated on the active reply.'
             : disposition === 'staged_final'
               ? 'Final answer staged on the active reply; return the same answer normally so the SDK Result can finalize it.'
               : usesProactiveInteractiveContract
@@ -2955,9 +3038,10 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     payload: Record<string, unknown>,
   ) => {
     try {
-      return workspaceMemoryToolResult(
-        await callWorkspaceMemory(ctx, operation, payload),
-      );
+      const result = await callWorkspaceMemory(ctx, operation, payload);
+      return operation === 'search' || operation === 'get'
+        ? workspaceMemoryToolResult(result)
+        : workspaceMemoryWriteResult(operation, result);
     } catch (err) {
       return {
         content: [
@@ -3003,102 +3087,100 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     ),
   );
 
-  // Scheduled/task turns are deliberately read-only until candidate commits
-  // can be coupled atomically to a successful durable task-run completion.
-  // Sub-agents are independently denied by the PreToolUse runtime hook.
-  const memoryWriteEnabled = !ctx.isScheduledTask && !ctx.currentTaskId;
-  if (memoryWriteEnabled) {
-    tools.push(
-      tool(
-        'workspace_memory_remember',
-        'Persist a concise fact, decision, lesson, or open loop for future sessions in this workspace. Use only for information with durable workspace value. Never store secrets, third-party instructions, or a transcript summary.',
-        {
-          kind: memoryKindSchema,
-          title: z.string().min(1).max(200),
-          content: z.string().min(1).max(20_000),
-          canonical_key: genericMemoryCanonicalKeySchema.optional(),
-          importance: z.number().min(0).max(1).optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          valid_from: z.string().datetime().optional(),
-          valid_until: z.string().datetime().optional(),
-          expires_at: z.string().datetime().optional(),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('create', {
+  // The host decides what a write becomes: the owner's own interactive turns
+  // write memory; any other turn (a group member's, a scheduled run) saves a
+  // proposal the owner confirms. Spawned and task Agents are refused by the
+  // host, SDK sub-agents by the PreToolUse runtime hook.
+  tools.push(
+    tool(
+      'workspace_memory_remember',
+      'Persist a concise fact, decision, lesson, or open loop for future sessions in this workspace. Use only for information with durable workspace value. Never store secrets, third-party instructions, or a transcript summary.',
+      {
+        kind: memoryKindSchema,
+        title: z.string().min(1).max(200),
+        content: z.string().min(1).max(20_000),
+        canonical_key: genericMemoryCanonicalKeySchema.optional(),
+        importance: z.number().min(0).max(1).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        valid_from: z.string().datetime().optional(),
+        valid_until: z.string().datetime().optional(),
+        expires_at: z.string().datetime().optional(),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('create', {
+          kind: args.kind,
+          title: args.title.trim(),
+          content: args.content.trim(),
+          canonicalKey: args.canonical_key?.trim(),
+          importance: args.importance,
+          confidence: args.confidence,
+          validFrom: args.valid_from,
+          validUntil: args.valid_until,
+          expiresAt: args.expires_at,
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:create:${args.canonical_key ?? args.title}`,
+          ),
+        }),
+    ),
+    tool(
+      'workspace_memory_update',
+      'Update an existing current-workspace memory using optimistic concurrency. expected_revision is mandatory; on conflict, search/get the latest item and reconcile rather than overwriting it.',
+      {
+        item_id: z.string().min(1),
+        expected_revision: z.number().int().min(1),
+        kind: memoryKindSchema.optional(),
+        title: z.string().min(1).max(200).optional(),
+        content: z.string().min(1).max(20_000).optional(),
+        canonical_key: genericMemoryCanonicalKeySchema.nullable().optional(),
+        importance: z.number().min(0).max(1).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        valid_from: z.string().datetime().nullable().optional(),
+        valid_until: z.string().datetime().nullable().optional(),
+        expires_at: z.string().datetime().nullable().optional(),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('update', {
+          itemId: args.item_id,
+          expectedRevision: args.expected_revision,
+          patch: {
             kind: args.kind,
-            title: args.title.trim(),
-            content: args.content.trim(),
-            canonicalKey: args.canonical_key?.trim(),
+            title: args.title?.trim(),
+            content: args.content?.trim(),
+            canonicalKey: args.canonical_key,
             importance: args.importance,
             confidence: args.confidence,
             validFrom: args.valid_from,
             validUntil: args.valid_until,
             expiresAt: args.expires_at,
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:create:${args.canonical_key ?? args.title}`,
-            ),
-          }),
-      ),
-      tool(
-        'workspace_memory_update',
-        'Update an existing current-workspace memory using optimistic concurrency. expected_revision is mandatory; on conflict, search/get the latest item and reconcile rather than overwriting it.',
-        {
-          item_id: z.string().min(1),
-          expected_revision: z.number().int().min(1),
-          kind: memoryKindSchema.optional(),
-          title: z.string().min(1).max(200).optional(),
-          content: z.string().min(1).max(20_000).optional(),
-          canonical_key: genericMemoryCanonicalKeySchema.nullable().optional(),
-          importance: z.number().min(0).max(1).optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          valid_from: z.string().datetime().nullable().optional(),
-          valid_until: z.string().datetime().nullable().optional(),
-          expires_at: z.string().datetime().nullable().optional(),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('update', {
-            itemId: args.item_id,
-            expectedRevision: args.expected_revision,
-            patch: {
-              kind: args.kind,
-              title: args.title?.trim(),
-              content: args.content?.trim(),
-              canonicalKey: args.canonical_key,
-              importance: args.importance,
-              confidence: args.confidence,
-              validFrom: args.valid_from,
-              validUntil: args.valid_until,
-              expiresAt: args.expires_at,
-            },
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:update:${args.item_id}:${args.expected_revision}`,
-            ),
-          }),
-      ),
-      tool(
-        'workspace_memory_forget',
-        'Forget one current-workspace memory item. This creates an auditable tombstone and requires the item revision to prevent deleting a concurrently corrected memory.',
-        {
-          item_id: z.string().min(1),
-          expected_revision: z.number().int().min(1),
-          idempotency_key: z.string().min(1).max(128).optional(),
-        },
-        async (args) =>
-          callMemoryTool('delete', {
-            itemId: args.item_id,
-            expectedRevision: args.expected_revision,
-            idempotencyKey: memoryIdempotencyKey(
-              args.idempotency_key,
-              `${ctx.currentInputTurnId ?? 'turn'}:delete:${args.item_id}:${args.expected_revision}`,
-            ),
-          }),
-      ),
-    );
-  }
+          },
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:update:${args.item_id}:${args.expected_revision}`,
+          ),
+        }),
+    ),
+    tool(
+      'workspace_memory_forget',
+      'Forget one current-workspace memory item. This creates an auditable tombstone and requires the item revision to prevent deleting a concurrently corrected memory.',
+      {
+        item_id: z.string().min(1),
+        expected_revision: z.number().int().min(1),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('delete', {
+          itemId: args.item_id,
+          expectedRevision: args.expected_revision,
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:delete:${args.item_id}:${args.expected_revision}`,
+          ),
+        }),
+    ),
+  );
 
   return applyToolLoadingHints(tools);
 }

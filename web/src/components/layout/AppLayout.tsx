@@ -21,6 +21,7 @@ import { useShellStore } from '../../stores/shell';
 import { useNewConversation } from '../../hooks/useNewConversation';
 import { CommandPaletteHost } from '../command/CommandPaletteHost';
 import { useGlobalStreamSubscriptions } from '../../hooks/useStreamSubscriptions';
+import { useUsageLimitWaitSubscription } from '../../stores/usage-limit-waits';
 
 export function AppLayout() {
   const location = useLocation();
@@ -117,6 +118,8 @@ export function AppLayout() {
   // Stream deltas and reconnect snapshots for every workspace, so switching
   // away mid-reply and back never leaves a gap in the streamed text.
   useGlobalStreamSubscriptions();
+  // Usage-limit waits, so a Session shows when its parked input goes on.
+  useUsageLimitWaitSubscription();
 
   // Message deletion is a durable server mutation. Apply it globally so a
   // second tab/device cannot retain a deleted main or Runtime Session bubble.
@@ -185,6 +188,7 @@ export function AppLayout() {
             data.resultSummary,
             data.kind,
             data.titleGenerating,
+            data.worktree,
           );
       }
     });

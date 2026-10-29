@@ -12,7 +12,9 @@ import {
 } from '@/components/ui/dialog';
 import { SettingsGroup } from '@/components/settings/SettingsLayout';
 import { confirmDialog } from '@/stores/confirm';
+import { cn } from '@/lib/utils';
 import {
+  AGENT_PROMPT_MAX_CHARS,
   AGENT_PROMPT_SECTIONS,
   DEFAULT_AGENT_PROMPTS,
   composeAgentPrompt,
@@ -133,6 +135,7 @@ export function AgentPromptEditor({
             <TabsList variant="line" aria-label="智能体提示词分段">
               {AGENT_PROMPT_SECTIONS.map((section) => {
                 const length = value[section.field].length;
+                const over = length > AGENT_PROMPT_MAX_CHARS;
                 return (
                   <TabsTrigger
                     key={section.key}
@@ -141,7 +144,14 @@ export function AgentPromptEditor({
                   >
                     {section.title}
                     {length > 0 && (
-                      <span className="text-micro text-faint-foreground tabular-nums max-sm:hidden">
+                      <span
+                        className={cn(
+                          'text-micro tabular-nums',
+                          over
+                            ? 'text-error'
+                            : 'text-faint-foreground max-sm:hidden',
+                        )}
+                      >
                         {length}
                       </span>
                     )}
@@ -152,6 +162,7 @@ export function AgentPromptEditor({
           </div>
           {AGENT_PROMPT_SECTIONS.map((section) => {
             const sectionValue = value[section.field];
+            const over = sectionValue.length > AGENT_PROMPT_MAX_CHARS;
             return (
               <TabsContent
                 key={section.key}
@@ -190,12 +201,21 @@ export function AgentPromptEditor({
                   onChange={(event) =>
                     onChange({ ...value, [section.field]: event.target.value })
                   }
+                  aria-invalid={over || undefined}
+                  aria-describedby={`agent-prompt-${section.key}-count`}
                   className="min-h-[240px] resize-y bg-background text-body leading-6 sm:min-h-[320px]"
                   placeholder={section.placeholder}
                 />
-                <p className="text-micro text-faint-foreground tabular-nums">
-                  {sectionValue.length} 字符 · 约{' '}
+                <p
+                  id={`agent-prompt-${section.key}-count`}
+                  className={cn(
+                    'text-micro tabular-nums',
+                    over ? 'text-error' : 'text-faint-foreground',
+                  )}
+                >
+                  {sectionValue.length} / {AGENT_PROMPT_MAX_CHARS} 字符 · 约{' '}
                   {estimatePromptTokens(sectionValue)} tokens
+                  {over && ' · 超出上限，删减后才能保存'}
                 </p>
               </TabsContent>
             );

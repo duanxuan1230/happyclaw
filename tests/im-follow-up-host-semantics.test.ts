@@ -61,6 +61,7 @@ function hostHarness() {
     closeRetryWaitTurnsForWithdrawnInputs: vi.fn(),
     channelTurnScopeForInput: vi.fn(() => null),
     interruptActiveSessionRun,
+    endUsageLimitWait: vi.fn(),
     learnFeishuDirectChat: vi.fn(),
     // No registered chat: a group route that failed must not be guessed.
     registeredGroups: {},

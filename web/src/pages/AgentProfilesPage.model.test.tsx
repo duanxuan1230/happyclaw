@@ -16,8 +16,8 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
 }));
 
-vi.mock('../stores/agent-profiles', () => ({
-  useAgentProfilesStore: () => ({
+vi.mock('../stores/agent-profiles', () => {
+  const state = () => ({
     profiles: mocks.profiles,
     modelConfigs: mocks.modelConfigs,
     loading: false,
@@ -31,8 +31,6 @@ vi.mock('../stores/agent-profiles', () => ({
       runtime_cleanup_pending: false,
     })),
     retryRuntimeCleanup: vi.fn(),
-    loadPromptVersions: vi.fn(async () => []),
-    restorePromptVersion: vi.fn(),
     governanceByProfile: {},
     governanceLoading: {},
     governanceErrors: {},
@@ -42,9 +40,17 @@ vi.mock('../stores/agent-profiles', () => ({
     uploadProfileAvatar: vi.fn(),
     removeProfileAvatar: vi.fn(),
     deleteProfile: vi.fn(),
+    migrateAndDeleteProfile: vi.fn(),
+    duplicateProfile: vi.fn(),
+    exportProfile: vi.fn(),
+    importProfile: vi.fn(),
     setWorkspaceAgentProfile: vi.fn(),
-  }),
-}));
+  });
+  return {
+    useAgentProfilesStore: (selector?: (value: unknown) => unknown) =>
+      selector ? selector(state()) : state(),
+  };
+});
 vi.mock('../stores/auth', () => ({
   useAuthStore: (selector: (state: unknown) => unknown) =>
     selector({ user: { id: 'admin', role: 'admin' }, appearance: null }),
@@ -79,9 +85,6 @@ vi.mock('../components/agents/AgentPromptAssistant', () => ({
 }));
 vi.mock('../components/agents/AgentPromptEditor', () => ({
   AgentPromptEditor: () => null,
-}));
-vi.mock('../components/agents/AgentPromptVersionHistory', () => ({
-  AgentPromptVersionHistory: () => null,
 }));
 vi.mock('../components/agents/EffectiveCapabilitiesPreview', () => ({
   EffectiveCapabilitiesPreview: () => null,
@@ -304,13 +307,15 @@ describe('Agent model within its configuration', () => {
     );
   });
 
-  test('a new Agent is created with its model and the summary names it', async () => {
+  test('a new Agent starts from its name; its model is set on its editor', async () => {
+    const created = profile({ id: 'new', name: '新智能体' });
     await renderPage([profile()]);
+    mocks.createProfile.mockImplementation(async () => {
+      mocks.profiles = [profile(), created];
+      return created;
+    });
     await act(async () => buttonByText('新建').click());
-    await act(async () => buttonByText('空白创建').click());
-    const name = container!.querySelector<HTMLInputElement>(
-      '#agent-profile-name',
-    )!;
+    const name = document.querySelector<HTMLInputElement>('#new-agent-name')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
@@ -318,18 +323,11 @@ describe('Agent model within its configuration', () => {
       )!.set!.call(name, '新智能体');
       name.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await choose(configSelect(), 'Claude 官方 · opus');
-    await choose(modelSelect(), 'sonnet');
-    await act(async () => buttonByText('5确认创建').click());
-    expect(container!.textContent).toContain('Claude 官方 · sonnet');
-    await act(async () => buttonByText('创建智能体').click());
-    expect(mocks.createProfile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: '新智能体',
-        model_config_id: 'official',
-        model: 'sonnet',
-      }),
-    );
+    const create = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent?.trim() === '创建',
+    )!;
+    await act(async () => create.click());
+    expect(mocks.createProfile).toHaveBeenCalledWith({ name: '新智能体' });
   });
 
   test('an older server without model lists shows no model select', async () => {

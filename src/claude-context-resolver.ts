@@ -60,7 +60,11 @@ export interface ClaudeContextPlanArgs {
   mountUserSkills?: boolean;
   userSkillsDirOverride?: string;
   managedSkillPolicy?: ManagedSkillPolicy;
-  workspaceSkillsDirOverride?: string;
+  /**
+   * Project Skill directories, lowest precedence first (see
+   * resolveWorkspaceSkillRoots). Defaults to data/groups/<folder>.
+   */
+  workspaceSkillRoots?: string[];
   pluginSkillLayers?: EffectiveSkillLayer[];
 }
 
@@ -76,7 +80,8 @@ export interface ClaudeContextPlan {
   builtinSkillsDir: string;
   projectSkillsDir: string;
   userSkillsDir?: string;
-  workspaceSkillsDir: string;
+  /** Project Skill directories, lowest precedence first. */
+  workspaceSkillRoots: string[];
   effectiveSkills: EffectiveSkillManifest;
   audit: ClaudeContextAudit;
 }
@@ -287,9 +292,9 @@ export function buildClaudeContextPlan(
       ? (args.userSkillsDirOverride ??
         path.join(args.dataDir, 'skills', ownerId))
       : undefined;
-  const workspaceSkillsDir =
-    args.workspaceSkillsDirOverride ??
-    path.join(args.dataDir, 'groups', args.group.folder, '.claude', 'skills');
+  const workspaceSkillRoots = args.workspaceSkillRoots ?? [
+    path.join(args.dataDir, 'groups', args.group.folder, '.claude', 'skills'),
+  ];
   const hostClaudeRuntime = args.groupSessionsDir
     ? path.join(args.groupSessionsDir, 'CLAUDE.md')
     : undefined;
@@ -309,7 +314,10 @@ export function buildClaudeContextPlan(
       ...(userSkillsDir
         ? [{ source: 'managed' as const, root: userSkillsDir }]
         : []),
-      { source: 'workspace', root: workspaceSkillsDir },
+      ...workspaceSkillRoots.map((root) => ({
+        source: 'workspace' as const,
+        root,
+      })),
       ...(args.pluginSkillLayers ?? []),
     ],
     managedPolicy: args.managedSkillPolicy,
@@ -336,7 +344,7 @@ export function buildClaudeContextPlan(
     ...(externalSkillsDir ? { host: [externalSkillsDir] } : {}),
     project: [projectSkillsDir],
     ...(userSkillsDir ? { managed: [userSkillsDir] } : {}),
-    workspace: [workspaceSkillsDir],
+    workspace: workspaceSkillRoots,
     ...(args.pluginSkillLayers?.length
       ? {
           plugin: args.pluginSkillLayers.flatMap((layer) =>
@@ -471,7 +479,7 @@ export function buildClaudeContextPlan(
     builtinSkillsDir,
     projectSkillsDir,
     userSkillsDir,
-    workspaceSkillsDir,
+    workspaceSkillRoots,
     effectiveSkills,
     audit,
   };

@@ -569,7 +569,11 @@ describe('/api/agent-profiles routes', () => {
         auto_compact_window: 0,
         auto_compact_percentage: 0,
       },
-      skills: { mode: 'disabled', ids: ['research'] },
+      skills: {
+        mode: 'disabled',
+        ids: ['research'],
+        host: { mode: 'disabled', ids: [] },
+      },
       mcp: { mode: 'custom', ids: ['github'] },
     });
   });
@@ -1063,6 +1067,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['retry-invalidation'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1133,6 +1138,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['post-commit'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
         blockGroupsForRuntimeSafety: () => {
           runtimeSafetyBlocked = true;
@@ -1238,6 +1244,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ keys: ['locked-governance'] }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
         blockGroupsForRuntimeSafety: () => {
           runtimeSafetyBlocked = true;
@@ -1304,6 +1311,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1364,6 +1372,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1414,6 +1423,7 @@ describe('/api/agent-profiles routes', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
@@ -1441,7 +1451,7 @@ describe('/api/agent-profiles routes', () => {
     );
   });
 
-  test('persists four-part prompt history and restores an old version as a new version', async () => {
+  test('persists the four prompt sections and the prompt mode', async () => {
     const createResponse = await routes.request('/', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1482,118 +1492,6 @@ describe('/api/agent-profiles routes', () => {
       include_claude_preset: false,
       version: 2,
     });
-
-    const historyResponse = await routes.request(
-      `/${created.id}/prompt-versions`,
-    );
-    expect(historyResponse.status).toBe(200);
-    const history = (await historyResponse.json()).versions;
-    expect(history.map((item: { version: number }) => item.version)).toEqual([
-      2, 1,
-    ]);
-    expect(history[0]).toMatchObject({
-      tools_prompt: 'Tools v2',
-      prompt_mode: 'replace',
-      change_source: 'update',
-    });
-
-    const restoreResponse = await routes.request(
-      `/${created.id}/prompt-versions/1/restore`,
-      { method: 'POST' },
-    );
-    expect(restoreResponse.status).toBe(200);
-    expect(await restoreResponse.json()).toMatchObject({
-      restored_from_version: 1,
-      profile: {
-        identity_prompt: '\nIdentity\n',
-        tools_prompt: 'Tools v1',
-        prompt_mode: 'append',
-        include_claude_preset: true,
-        version: 3,
-      },
-    });
-
-    const restoredHistory = await routes.request(
-      `/${created.id}/prompt-versions`,
-    );
-    const restoredVersions = (await restoredHistory.json()).versions;
-    expect(restoredVersions[0]).toMatchObject({
-      version: 3,
-      change_source: 'restore',
-      restored_from_version: 1,
-    });
-  });
-
-  test('keeps prompt-restore workspaces fail-closed until teardown retry succeeds', async () => {
-    const profile = db.createAgentProfile({
-      ownerUserId: 'routes-agent-user',
-      name: 'Restore Safety Agent',
-      identityPrompt: 'Restore v1',
-    });
-    const updated = db.updateAgentProfile(profile.id, 'routes-agent-user', {
-      identityPrompt: 'Restore v2',
-    })!;
-    const workspaceJid = 'web:prompt-restore-safety';
-    db.setRegisteredGroup(workspaceJid, {
-      name: 'Prompt Restore Safety',
-      folder: 'prompt-restore-safety',
-      added_at: '2026-07-10T00:00:00.000Z',
-      created_by: 'routes-agent-user',
-    });
-    db.assignWorkspaceAgentProfile('prompt-restore-safety', profile.id);
-
-    let stopCalls = 0;
-    let runtimeSafetyBlocked = false;
-    webContext.setWebDeps({
-      queue: {
-        pauseGroupsForMutation: () => ({ keys: ['prompt-restore-safety'] }),
-        resumeGroupsAfterMutation: () => {},
-        listDescendantJids: () => [],
-        stopGroup: async () => {
-          stopCalls += 1;
-          if (stopCalls === 2) {
-            throw new Error('injected restore post-commit cleanup failure');
-          }
-        },
-        blockGroupsForRuntimeSafety: () => {
-          runtimeSafetyBlocked = true;
-        },
-        unblockGroupsForRuntimeSafety: () => {
-          runtimeSafetyBlocked = false;
-        },
-        isGroupRuntimeSafetyBlocked: () => runtimeSafetyBlocked,
-      },
-    } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
-
-    const restore = () =>
-      routes.request(`/${profile.id}/prompt-versions/1/restore`, {
-        method: 'POST',
-      });
-    const failed = await restore();
-    expect(failed.status).toBe(503);
-    expect(await failed.json()).toMatchObject({
-      persisted: true,
-      profile: { identity_prompt: 'Restore v1', version: updated.version + 1 },
-    });
-    expect(runtimeSafetyBlocked).toBe(true);
-
-    const retried = await restore();
-    expect(retried.status).toBe(200);
-    expect(await retried.json()).toMatchObject({
-      profile: { identity_prompt: 'Restore v1', version: updated.version + 1 },
-      restored_from_version: 1,
-    });
-    expect(stopCalls).toBe(4);
-    expect(runtimeSafetyBlocked).toBe(false);
-
-    const historyResponse = await routes.request(
-      `/${profile.id}/prompt-versions`,
-    );
-    expect(
-      (await historyResponse.json()).versions.map(
-        (item: { version: number }) => item.version,
-      ),
-    ).toEqual([updated.version + 1, updated.version, profile.version]);
   });
 
   test('DELETE waits for membership publication and then refuses to archive the target', async () => {
@@ -1864,6 +1762,7 @@ describe('/api/agent-profiles model within a configuration', () => {
         pauseGroupsForMutation: () => ({ id: 1 }),
         resumeGroupsAfterMutation: () => {},
         listDescendantJids: () => [],
+        getStatus: () => ({ groups: [] }),
         stopGroup,
       },
     } as unknown as Parameters<typeof webContext.setWebDeps>[0]);

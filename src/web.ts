@@ -60,6 +60,12 @@ import workspaceConfigRoutes from './routes/workspace-config.js';
 import agentProfileRoutes from './routes/agent-profiles.js';
 import workspaceRoutes from './routes/workspaces.js';
 import turnTraceRoutes from './routes/turn-traces.js';
+import gitReviewRoutes from './routes/git-review.js';
+import {
+  resolveWorkspaceProjectRoot,
+  toSessionWorktreePayload,
+} from './session-worktree.js';
+import { getSessionWorktree } from './session-worktree-store.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
@@ -169,6 +175,7 @@ import {
   normalizeImageAttachments,
   toAgentImages,
 } from './message-attachments.js';
+import { listPendingUsageLimitWaits } from './usage-limit-wait.js';
 
 // --- App Setup ---
 
@@ -195,8 +202,8 @@ function normalizeTerminalSize(
  * group. Returns null when the group has no resolvable owner (no plugins to
  * resolve in that case).
  *
- * Host mode honors `group.customCwd` so inline `!` commands run against the
- * user's real repo (#18 P2-bug-4).
+ * Host mode honors `resolveWorkspaceProjectRoot(group, { agentId })` so inline
+ * `!` commands run against the session's worktree or the user's real repo.
  */
 function buildWebExpandContext(
   groupJid: string,
@@ -204,18 +211,32 @@ function buildWebExpandContext(
     folder: string;
     created_by?: string | null;
     executionMode?: string | null;
+    execution_mode?: string | null;
     customCwd?: string | null;
     is_home?: boolean;
   },
+  agentId?: string | null,
 ): ExpandContext | null {
   const deps = getWebDeps();
   const containerName = deps?.queue.getActiveContainerName(groupJid) ?? null;
+  const rawMode = group.executionMode ?? group.execution_mode;
+  const customCwd =
+    rawMode === 'host'
+      ? resolveWorkspaceProjectRoot(
+          {
+            folder: group.folder,
+            executionMode: 'host',
+            customCwd: group.customCwd ?? undefined,
+          },
+          { agentId },
+        )
+      : group.customCwd;
   return makeExpandContext({
     chatJid: groupJid,
     groupFolder: group.folder,
     ownerId: group.created_by,
-    executionMode: group.executionMode,
-    customCwd: group.customCwd,
+    executionMode: rawMode,
+    customCwd,
     groupsDir: GROUPS_DIR,
     containerName,
   });
@@ -320,6 +341,7 @@ app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/groups', agentRoutes); // Workspace session routes; /agents paths remain compatibility aliases
 app.route('/api/groups', workspaceConfigRoutes); // Workspace config under /api/groups/:jid/workspace-config
 app.route('/api/groups', turnTraceRoutes); // Stored thinking/trace of a finished turn
+app.route('/api/groups', gitReviewRoutes); // Read-only git status/diff, worktree support, same-directory peers
 app.route('/api', monitorRoutes);
 app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
@@ -432,7 +454,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
     if (!deps) return c.json({ error: 'Server not initialized' }, 500);
     try {
       const snapshot = await captureWorkspaceSnapshot(
-        group.customCwd || path.join(GROUPS_DIR, group.folder),
+        resolveWorkspaceProjectRoot(group, { agentId }),
       );
       const handoff = formatFreshWindowHandoff({
         notes: freshCommand.notes,
@@ -1200,7 +1222,11 @@ async function handleAgentConversationMessage(
       const expandParent = deps.resolveEffectiveGroup
         ? deps.resolveEffectiveGroup(parentGroup).effectiveGroup
         : parentGroup;
-      const expandCtx = buildWebExpandContext(virtualChatJid, expandParent);
+      const expandCtx = buildWebExpandContext(
+        virtualChatJid,
+        expandParent,
+        agentId,
+      );
       if (expandCtx) {
         const expansion = await expandPluginSlashCommandIfNeeded(
           expandCtx,
@@ -1704,12 +1730,26 @@ function setupWebSocket(server: any): WebSocketServer {
           phase: hasStreamSnapshot ? 'running' : 'preparing',
         });
       }
+      const usageLimitWaits = listPendingUsageLimitWaits()
+        .map((wait) => {
+          const [baseChatJid, agentId] = wait.scopeKey.split('#agent:');
+          const allowed = getGroupAllowedUserIds(baseChatJid);
+          if (allowed === null || !allowed.has(userId)) return null;
+          return {
+            chatJid: normalizeHomeJid(baseChatJid),
+            ...(agentId ? { agentId } : {}),
+            resumeAt: wait.resumeAt,
+            waitCount: wait.waitCount,
+          };
+        })
+        .filter((wait) => wait !== null);
       try {
         ws.send(
           JSON.stringify({
             type: 'active_run_snapshot',
             runs,
             queuedChatJids,
+            usageLimitWaits,
           } satisfies WsMessageOut),
         );
       } catch {
@@ -2001,8 +2041,7 @@ function setupWebSocket(server: any): WebSocketServer {
               : chatJid;
             try {
               const snapshot = await captureWorkspaceSnapshot(
-                targetGroup.customCwd ||
-                  path.join(GROUPS_DIR, targetGroup.folder),
+                resolveWorkspaceProjectRoot(targetGroup, { agentId }),
               );
               const handoff = formatFreshWindowHandoff({
                 notes: wsFreshCommand.notes,
@@ -2698,6 +2737,26 @@ export function broadcastFollowUpUpdate(
   safeBroadcast(msg, isHostGroupJid(baseChatJid), allowedUserIds);
 }
 
+/** Tell clients a Session's usage-limit wait started (resumeAt) or ended. */
+export function broadcastUsageLimitWait(
+  laneJid: string,
+  wait: { resumeAt: string; waitCount: number } | null,
+): void {
+  const [baseChatJid, agentId] = laneJid.split('#agent:');
+  const msg: WsMessageOut = {
+    type: 'usage_limit_wait',
+    chatJid: normalizeHomeJid(baseChatJid),
+    ...(agentId ? { agentId } : {}),
+    resumeAt: wait?.resumeAt ?? null,
+    ...(wait ? { waitCount: wait.waitCount } : {}),
+  };
+  safeBroadcast(
+    msg,
+    isHostGroupJid(baseChatJid),
+    getGroupAllowedUserIds(baseChatJid),
+  );
+}
+
 export function broadcastTyping(chatJid: string, isTyping: boolean): void {
   const jid = normalizeHomeJid(chatJid);
   const allowedUserIds = getGroupAllowedUserIds(chatJid);
@@ -2778,6 +2837,8 @@ interface StreamingSnapshotEntry {
   /** Currently-running hook, if any — restored on reconnect so the hook spinner
    *  survives the reconnect instead of silently disappearing. */
   activeHook?: { hookName: string; hookEvent: string } | null;
+  /** The progress statements the Agent sent in this turn, in order. */
+  progress?: Array<{ at: number; text: string }>;
   turnId?: string;
   /** Exact GroupQueue attempt that owns this projection. */
   runId?: string;
@@ -2785,6 +2846,8 @@ interface StreamingSnapshotEntry {
 }
 
 const streamingSnapshots = new Map<string, StreamingSnapshotEntry>();
+/** Progress statements a snapshot keeps; the newest win. */
+const MAX_SNAPSHOT_PROGRESS = 20;
 /** Exact query attempt currently projected for each runtime JID. This is
  * deliberately separate from process lifecycle: a conversation process may
  * stay warm while no query is active. */
@@ -3120,6 +3183,7 @@ export function buildStreamSnapshot(
       snap.activeTools.length === 0 &&
       snap.recentEvents.length === 0 &&
       snap.traceEvents.length === 0 &&
+      !snap.progress?.length &&
       Object.keys(snap.taskStates).length === 0)
   ) {
     return null;
@@ -3142,6 +3206,7 @@ export function buildStreamSnapshot(
       awaitingModel: snap.clock.awaitingModel || undefined,
       activeHook: snap.activeHook,
       turnId: snap.turnId,
+      ...(snap.progress?.length ? { progress: snap.progress } : {}),
     },
   };
 }
@@ -3223,6 +3288,17 @@ function updateStreamingSnapshot(
   snap.isThinking = snap.clock.isThinking;
 
   switch (event.eventType) {
+    case 'commentary':
+      // Only the host writes a progress statement, and only what the Web was
+      // sent reaches here: a joining tab gets it back at every level.
+      if (event.progress && event.text) {
+        snap.progress = [
+          ...(snap.progress ?? []),
+          { at: Date.now(), text: event.text.slice(0, MAX_SNAPSHOT_TEXT) },
+        ].slice(-MAX_SNAPSHOT_PROGRESS);
+      }
+      break;
+
     case 'text_delta':
       if (event.text && !event.parentToolUseId) {
         snap.partialText += event.text;
@@ -3585,6 +3661,11 @@ export function broadcastAgentStatus(
   const allowedUserIds = getGroupAllowedUserIds(chatJid);
   // Resolve kind from DB if not provided
   const resolvedKind = kind || getAgent(agentId)?.kind;
+  // Every tab learns a session's worktree branch from its status updates.
+  const worktree =
+    resultSummary === '__removed__'
+      ? null
+      : toSessionWorktreePayload(getSessionWorktree(agentId));
   const msg: WsMessageOut = {
     type: 'agent_status',
     chatJid: jid,
@@ -3595,6 +3676,7 @@ export function broadcastAgentStatus(
     prompt,
     resultSummary,
     titleGenerating,
+    ...(worktree ? { worktree } : {}),
   };
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }

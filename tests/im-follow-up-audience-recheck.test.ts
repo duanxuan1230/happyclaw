@@ -134,6 +134,7 @@ function hostHarness(registeredGroups: Record<string, Group>) {
     }),
     crypto: globalThis.crypto,
     setTimeout,
+    endUsageLimitWait: vi.fn(),
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
   const harness = createRuntimeSourceHarness(globals);
@@ -144,6 +145,8 @@ function hostHarness(registeredGroups: Record<string, Group>) {
     'settleCancelledFollowUp',
     'withdrawQueuedInputsOutsideAudience',
     'dispatchNextQueuedFollowUp',
+    'broadcastFollowUpBatchUpdate',
+    'releaseQueuedFollowUpsToColdReader',
     'recoverDurableFollowUps',
     'steerQueuedFollowUpBatch',
     'handleIncomingFollowUp',

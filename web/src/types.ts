@@ -125,17 +125,6 @@ export interface AgentProfilePrompts {
   prompt_mode: AgentProfilePromptMode;
 }
 
-export interface AgentProfilePromptVersion extends AgentProfilePrompts {
-  id: string;
-  agent_profile_id: string;
-  version: number;
-  name: string;
-  identity_hash: string;
-  change_source: 'create' | 'update' | 'restore' | 'migration';
-  restored_from_version: number | null;
-  created_at: string;
-}
-
 export interface AgentProfileRuntimePolicy {
   reasoning: {
     effort: AgentEffortLevel;
@@ -207,6 +196,8 @@ export interface AgentProfileWorkspace {
   is_home: boolean;
   execution_mode: 'container' | 'host';
   added_at: string;
+  /** Runtimes mid-turn or with queued input; older servers do not send it. */
+  active_conversations?: number;
   runtime_sessions: AgentProfileWorkspaceRuntimeSession[];
 }
 
@@ -253,6 +244,26 @@ export interface EffectiveCapabilityEntry {
   overrides: CapabilityLayerSource[];
   available: boolean;
   unavailableReason?: 'system_admin_only';
+}
+
+/**
+ * The connection and model a run uses, and which step of the pinning order
+ * chose it. Older servers do not send it.
+ */
+export interface AgentModelResolution {
+  source:
+    | 'session'
+    | 'agent'
+    | 'default'
+    | 'single'
+    | 'workspace_env'
+    | 'pool'
+    | 'none';
+  model_config_id: string | null;
+  model_config_name: string | null;
+  model: string | null;
+  /** The bound connection no longer exists, so every run fails. */
+  connection_missing?: boolean;
 }
 
 export interface AgentCapabilityPreview {
@@ -391,6 +402,29 @@ export interface AgentInfo {
   title_generating?: boolean;
   last_active_at?: string | null;
   latest_message?: { content: string; timestamp: string } | null;
+  /** The session's own git worktree (Host workspaces only), if it has one. */
+  worktree?: SessionWorktreeInfo | null;
+}
+
+export interface SessionWorktreeInfo {
+  branch: string;
+  base_commit: string;
+  /** `broken`: the checkout is missing or damaged; runs fail until deleted. */
+  status: 'active' | 'broken';
+  broken_reason: string | null;
+  /** Creation response only: what `.worktreeinclude` could not copy. */
+  include_incomplete?: WorktreeIncludeIncomplete | null;
+}
+
+export interface WorktreeIncludeIncomplete {
+  reason:
+    | 'include_file_too_large'
+    | 'list_truncated'
+    | 'file_limit'
+    | 'size_limit';
+  copied_files: number;
+  /** Up to five matched paths that were not copied. */
+  skipped_files: string[];
 }
 
 export interface AvailableImGroup {

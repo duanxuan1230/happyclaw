@@ -1244,11 +1244,17 @@ async function buildFileContentBlock(params: {
   fileName: string;
   savedRelPath: string;
   groupFolder: string;
+  /** The route passed to saveDownloadedFile. */
+  routeJid: string;
   prefixLabel: string; // e.g. "引用文件" or "文件"
 }): Promise<string> {
-  const { fileName, savedRelPath, groupFolder, prefixLabel } = params;
-  // Same root the download was saved under (customCwd for Host workspaces).
-  const absPath = path.join(resolveImDownloadRoot(groupFolder), savedRelPath);
+  const { fileName, savedRelPath, groupFolder, routeJid, prefixLabel } = params;
+  // Same root the download was saved under (customCwd for Host workspaces,
+  // the worktree of a bound session that has one).
+  const absPath = path.join(
+    resolveImDownloadRoot(groupFolder, routeJid),
+    savedRelPath,
+  );
   const extracted = await extractFileText(absPath);
   const safeName = sanitizeFileName(fileName);
 
@@ -2079,6 +2085,8 @@ export function createDingTalkConnection(
    */
   async function normalizeDingTalkImage(
     jid: string,
+    /** The admitted route; a session route picks that session's worktree. */
+    routeJid: string,
     opts: DingTalkConnectOpts,
     downloader: () => Promise<{ base64: string; mimeType: string } | null>,
     generation: number,
@@ -2114,6 +2122,7 @@ export function createDingTalkConnection(
           'dingtalk',
           filename,
           imgBuffer,
+          routeJid,
         );
         assertInboundGeneration(generation, signal);
         return {
@@ -2530,12 +2539,14 @@ export function createDingTalkConnection(
                     'dingtalk',
                     savedFilename,
                     fileBuffer,
+                    targetJid,
                   );
                   assertInboundGeneration(generation, signal);
                   const fileBlock = await buildFileContentBlock({
                     fileName,
                     savedRelPath: savedPath,
                     groupFolder,
+                    routeJid: targetJid,
                     prefixLabel: '引用文件',
                   });
                   assertInboundGeneration(generation, signal);
@@ -2566,6 +2577,7 @@ export function createDingTalkConnection(
               if (code) {
                 const normalized = await normalizeDingTalkImage(
                   jid,
+                  targetJid,
                   opts,
                   () =>
                     downloadDingTalkImageByDownloadCode(
@@ -2653,6 +2665,7 @@ export function createDingTalkConnection(
             const normalized = downloadCode
               ? await normalizeDingTalkImage(
                   jid,
+                  targetJid,
                   opts,
                   () =>
                     downloadDingTalkImageByDownloadCode(
@@ -2715,6 +2728,7 @@ export function createDingTalkConnection(
           const normalized = downloadCode
             ? await normalizeDingTalkImage(
                 jid,
+                targetJid,
                 opts,
                 () =>
                   downloadDingTalkImageByDownloadCode(
@@ -2773,12 +2787,14 @@ export function createDingTalkConnection(
                   'dingtalk',
                   savedFilename,
                   fileBuffer,
+                  targetJid,
                 );
                 assertInboundGeneration(generation, signal);
                 content = await buildFileContentBlock({
                   fileName,
                   savedRelPath: savedPath,
                   groupFolder,
+                  routeJid: targetJid,
                   prefixLabel: '文件',
                 });
                 assertInboundGeneration(generation, signal);
@@ -2830,6 +2846,7 @@ export function createDingTalkConnection(
                     'dingtalk',
                     `audio_${Date.now()}.${extension}`,
                     fileBuffer,
+                    targetJid,
                   );
                   assertInboundGeneration(generation, signal);
                   audioBlock = `[语音: audio.${extension} → ${savedPath}]`;
@@ -2882,12 +2899,14 @@ export function createDingTalkConnection(
                     'dingtalk',
                     `video_${Date.now()}.${videoType}`,
                     fileBuffer,
+                    targetJid,
                   );
                   assertInboundGeneration(generation, signal);
                   content = await buildFileContentBlock({
                     fileName,
                     savedRelPath: savedPath,
                     groupFolder,
+                    routeJid: targetJid,
                     prefixLabel: '视频',
                   });
                   assertInboundGeneration(generation, signal);
@@ -2911,6 +2930,7 @@ export function createDingTalkConnection(
           const normalized = contentUrl
             ? await normalizeDingTalkImage(
                 jid,
+                targetJid,
                 opts,
                 () =>
                   downloadDingTalkImageAsBase64(contentUrl, generation, signal),

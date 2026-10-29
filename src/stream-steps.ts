@@ -97,6 +97,12 @@ export interface StreamingStep {
    */
   commentary?: boolean;
   /**
+   * text (commentary): a progress statement the Agent sent the user
+   * (send_message with delivery_role=progress). Shown at every process
+   * visibility, unlike narration.
+   */
+  progress?: boolean;
+  /**
    * tool (AskUserQuestion): the questions it put to the reader. The call
    * returns at once (the answer is the reader's next message), so they are
    * kept on the step for the reader to answer after the turn.
@@ -397,6 +403,7 @@ export function addCommentaryStep(
   list: StepList,
   at: number,
   text: string,
+  progress = false,
 ): StepList {
   const own = text.trim();
   if (!own) return list;
@@ -408,6 +415,7 @@ export function addCommentaryStep(
     status: 'done',
     text: tail(own, MAX_TEXT_STEP_CHARS),
     commentary: true,
+    ...(progress ? { progress: true } : {}),
   });
 }
 

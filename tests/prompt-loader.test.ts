@@ -107,8 +107,9 @@ describe('prompts/ files', () => {
       'workspace is the only durable continuity boundary',
     );
     expect(workspaceMemory).toContain(
-      'Scheduled/task runs and sub-agents are read-only',
+      'a write is saved as a proposal that the owner confirms or rejects',
     );
+    expect(workspaceMemory).toContain('Sub-agents are read-only');
   });
 
   test('built-in HappyClaw identity and one-shot owner bootstrap are explicit', () => {

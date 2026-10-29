@@ -42,7 +42,10 @@ import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useStreamLayout } from '../../hooks/useStreamLayout';
 import { extractThinkingTitle } from '../../lib/thinking-text';
 import { normalizeInteractionMode } from '../../lib/interaction-mode';
-import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  isProgressStep,
+  normalizeProcessVisibility,
+} from '../../lib/process-visibility';
 import { visibleSteps } from '../../lib/process-steps';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import {
@@ -307,8 +310,8 @@ export const MessageBubble = memo(
     );
     // What the server kept of a turn this tab did not stream, shown as the
     // same rows and loaded when one is opened. A proactive workspace shows
-    // only what its owner chose: nothing when hidden, no reasoning text at
-    // the activity level.
+    // only what its owner chose: the progress the Agent sent when hidden, no
+    // reasoning text at the activity level.
     const [openOnLoad, setOpenOnLoad] = useState<
       'thinking' | 'trace' | 'process' | null
     >(null);
@@ -327,33 +330,33 @@ export const MessageBubble = memo(
         ) === 'proactive',
     );
     const loadTurnTrace = useChatStore((s) => s.loadTurnTrace);
+    // At the hidden level only the progress the Agent sent is shown of what
+    // this tab holds of the process: the rest may have been read when the
+    // level was higher.
+    const processShown = process !== 'hidden';
     // The steps this tab holds were read for the workspace as it was then. The
     // caches are let go when its view changes; this is what shows meanwhile:
     // the steps as the workspace shows them now.
-    const shownSteps = useMemo(
-      () =>
-        replySteps && proactive
-          ? {
-              ...replySteps,
-              steps: replySteps.steps.map(withoutToolResults),
-            }
-          : replySteps,
-      [replySteps, proactive],
-    );
-    // At the hidden level none of what this tab holds of the process is shown:
-    // it may have been read when the level was higher.
-    const processShown = process !== 'hidden';
+    const shownSteps = useMemo(() => {
+      if (!replySteps || !proactive) return replySteps;
+      const steps = replySteps.steps.map(withoutToolResults);
+      return {
+        ...replySteps,
+        steps: processShown ? steps : steps.filter(isProgressStep),
+      };
+    }, [replySteps, proactive, processShown]);
     // Reasoning without a summary still says how long the model thought.
     const hasReasoning =
       processShown && (!!thinkingContent || (thinkingDurationMs ?? 0) >= 1000);
     // The timeline layout sums a reply up in the same card its streaming left
     // off with: one row, the steps in order behind it. A reply without steps
     // (an older turn) and the classic layout keep the reasoning and the trace
-    // as the two rows they always were.
+    // as the two rows they always were, unless the Agent sent progress: no
+    // other row holds it.
     const settledSteps =
-      processShown &&
-      layout === 'timeline' &&
       shownSteps &&
+      (layout === 'timeline' ||
+        (proactive && shownSteps.steps.some(isProgressStep))) &&
       hasProcess(visibleSteps(shownSteps.steps, process === 'full'))
         ? shownSteps
         : null;
@@ -373,7 +376,6 @@ export const MessageBubble = memo(
       message.is_from_me &&
       (!!message.has_trace || awaitingTrace) &&
       !!message.turn_id &&
-      processShown &&
       !hasReasoning &&
       !settledSteps &&
       !(traceEvents && traceEvents.length > 0);
@@ -725,6 +727,7 @@ export const MessageBubble = memo(
             <LazyTurnTrace
               message={message}
               reasoning={process === 'full'}
+              stepsOnly={!processShown}
               onRequest={setOpenOnLoad}
               pending={!message.has_trace}
             />
@@ -863,6 +866,7 @@ export const MessageBubble = memo(
             <LazyTurnTrace
               message={message}
               reasoning={process === 'full'}
+              stepsOnly={!processShown}
               onRequest={setOpenOnLoad}
               pending={!message.has_trace}
             />

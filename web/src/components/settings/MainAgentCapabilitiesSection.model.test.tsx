@@ -9,14 +9,16 @@ import { choose, combobox } from './test-helpers';
 
 const mocks = vi.hoisted(() => ({
   patch: vi.fn(),
+  governance: vi.fn(),
   loadProfiles: vi.fn(async () => undefined),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  confirm: vi.fn(async () => true),
   state: {} as Record<string, unknown>,
 }));
 
-vi.mock('../../api/client', () => ({
-  api: { patch: mocks.patch },
+vi.mock('../../stores/confirm', () => ({
+  confirmDialog: mocks.confirm,
 }));
 vi.mock('sonner', () => ({
   toast: { success: mocks.toastSuccess, error: mocks.toastError },
@@ -129,8 +131,11 @@ function setStore(profile: AgentProfile, configs = CONFIGS) {
     modelConfigs: configs,
     loading: false,
     loadProfiles: mocks.loadProfiles,
+    // The store's update is what the section saves through.
+    updateProfile: (id: string, data: unknown) =>
+      mocks.patch(`/api/agent-profiles/${id}`, data),
     governanceByProfile: {},
-    loadProfileGovernance: vi.fn(async () => undefined),
+    loadProfileGovernance: mocks.governance,
   };
 }
 
@@ -140,6 +145,7 @@ let container: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.patch.mockResolvedValue({});
+  mocks.governance.mockResolvedValue({ workspaces: [], channel_mounts: [] });
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -284,5 +290,72 @@ describe('主 HappyClaw model within its configuration', () => {
     expect(mocks.patch.mock.calls[0][1]).toMatchObject({
       model_config_id: 'glm',
     });
+  });
+
+  test('saving only the model leaves the stored host Skills alone', async () => {
+    // An admin's main HappyClaw under host_claude runs with every host Skill.
+    setStore(
+      mainProfile({
+        runtime_policy: {
+          ...mainProfile().runtime_policy,
+          skills: {
+            mode: 'inherit',
+            ids: [],
+            host: { mode: 'inherit', ids: [] },
+          },
+        },
+      }),
+    );
+    await render();
+    await choose(configSelect(), 'GLM');
+    await save();
+    expect(mocks.patch.mock.calls[0][1]).toEqual({ model_config_id: 'glm' });
+  });
+
+  test('host Skills of an older server follow the effective context source', async () => {
+    const legacy = mainProfile();
+    delete legacy.runtime_policy.skills.host;
+    setStore({
+      ...legacy,
+      effective_runtime_policy: {
+        ...legacy.runtime_policy,
+        context: { ...legacy.runtime_policy.context!, source: 'host_claude' },
+      },
+    });
+    await render();
+    await choose(combobox('主 HappyClaw 推理努力档位'), '高');
+    await save();
+    expect(mocks.patch.mock.calls[0][1]).toMatchObject({
+      runtime_policy: {
+        reasoning: { effort: 'high' },
+        skills: { host: { mode: 'inherit', ids: [] } },
+      },
+    });
+  });
+
+  test('asks before a save interrupts running conversations', async () => {
+    setStore(mainProfile());
+    mocks.governance.mockResolvedValue({
+      workspaces: [
+        { name: 'Home', active_conversations: 2 },
+        { name: 'Idle', active_conversations: 0 },
+      ],
+      channel_mounts: [],
+    });
+    mocks.confirm.mockResolvedValueOnce(false);
+    await render();
+    await choose(configSelect(), 'GLM');
+    await save();
+    expect(mocks.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          '保存会中断 2 个正在进行的对话（「Home」2 个）',
+        ),
+      }),
+    );
+    expect(mocks.patch).not.toHaveBeenCalled();
+
+    await save();
+    expect(mocks.patch).toHaveBeenCalledOnce();
   });
 });

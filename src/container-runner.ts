@@ -95,6 +95,13 @@ import {
   setSessionModel,
   setSessionProviderId,
 } from './db.js';
+import { recordUsageEventConnection } from './runtime-state-store.js';
+import {
+  normalizeUsageLimitResetAt,
+  reserveUsageLimitWaitFor,
+  settleUsageLimitWaitAfterSuccess,
+  usageLimitWaitScopeKey,
+} from './usage-limit-wait.js';
 import {
   chatGptDefaultModel,
   chatGptLaunchModel,
@@ -144,6 +151,12 @@ import {
   syncHostClaudeContext,
 } from './claude-context-resolver.js';
 import { pluginSkillLayers } from './effective-skill-resolver.js';
+import {
+  resolveSessionWorkingDirectory,
+  resolveWorkspaceSkillRoots,
+  sessionWorktreeRunError,
+} from './session-worktree.js';
+import { getSessionWorktree } from './session-worktree-store.js';
 import { RegisteredGroup } from './types.js';
 import type {
   AgentProfileRuntimePolicy,
@@ -795,6 +808,7 @@ export function applyCodexGatewayVerdict(
       break;
     case 'reauth_required':
       output.providerFailureNotice ??= CODEX_REAUTH_REQUIRED_USER_NOTICE;
+      output.providerRateLimitResetsAt = undefined;
       break;
   }
 }
@@ -807,14 +821,24 @@ export function applyCodexGatewayVerdict(
  * it could run, and a failing account can still serve its fallback tier.
  */
 function poolCanStillServe(): boolean {
-  const enabled = getEnabledProviders();
-  if (enabled.length === 0) return false;
-  const primaryTier = new Map(
-    enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
+  const tiers = poolServingTiers();
+  return (
+    !!tiers && tiers.some((tier) => providerPool.hasCandidateForTier(tier))
   );
-  if (providerPool.hasCandidateForTier(primaryTier)) return true;
+}
+
+/**
+ * The model tiers an automatic pool may serve a run on: each member's own
+ * model first, then the system fallback model. Null without members.
+ */
+function poolServingTiers(): ProviderTier[] | null {
+  const enabled = getEnabledProviders();
+  if (enabled.length === 0) return null;
   const fallbackModel = getSystemSettings().fallbackModel?.trim();
-  return !!fallbackModel && providerPool.hasCandidateForTier(fallbackModel);
+  return [
+    new Map(enabled.map((p) => [p.id, providerModelTier(p.anthropicModel)])),
+    ...(fallbackModel ? [fallbackModel] : []),
+  ];
 }
 
 /** Host-process replay budget; each transient retry runs a fresh runner. */
@@ -836,6 +860,7 @@ export function applyProviderFailureDisposition(
   output: ContainerOutput,
   selectedProfileId: string | null,
   allowFailover = true,
+  waitScope?: UsageLimitWaitScope,
 ): boolean {
   const failureClass = resolveProviderFailureClass(output);
   // Transient failures never consult the pool: no account was judged, so the
@@ -887,11 +912,126 @@ export function applyProviderFailureDisposition(
   // healthy but unable to serve that tier, and an account wall leaves other
   // accounts' tiers untouched — neither is expressible in account health
   // alone, which is all resolveProviderFailureDisposition() can see.
-  const disposition = allowFailover
-    ? { terminal: !(selectedProfileId !== null && poolCanStillServe()) }
-    : { terminal: true };
-  applyKnownProviderFailureDisposition(output, disposition.terminal);
-  return disposition.terminal;
+  const exhausted = allowFailover
+    ? !(selectedProfileId !== null && poolCanStillServe())
+    : true;
+  // Out of usage everywhere this run may go, with a known reset: wait for it
+  // instead of ending the input.
+  const terminal =
+    exhausted &&
+    !deferUsageLimitFailure(
+      output,
+      selectedProfileId,
+      allowFailover,
+      waitScope,
+    );
+  applyKnownProviderFailureDisposition(output, terminal);
+  return terminal;
+}
+
+/** The lane and durable input a provider failure belongs to. */
+export interface UsageLimitWaitScope {
+  scopeKey: string;
+  inputKey?: string;
+}
+
+export function usageLimitWaitScopeFor(
+  input: ContainerInput,
+): UsageLimitWaitScope {
+  return {
+    scopeKey: usageLimitWaitScopeKey(input),
+    inputKey:
+      input.turnId ?? (input.isScheduledTask ? input.taskRunId : undefined),
+  };
+}
+
+/**
+ * When the run's last usable connection hit its usage limit and the upstream
+ * named a reset time, keep the input for after the reset: mark the failure
+ * with the resume time and report it non-terminal. A pinned connection waits
+ * for its own reset only; an automatic pool for the earliest reset of any
+ * member that could serve the run. Bounded per lane by usage-limit-wait.ts.
+ */
+function deferUsageLimitFailure(
+  output: ContainerOutput,
+  selectedProfileId: string | null,
+  allowFailover: boolean,
+  waitScope: UsageLimitWaitScope | undefined,
+): boolean {
+  if (!waitScope || !isDatabaseInitialized()) return false;
+  if (output.providerFailureNotice === CODEX_REAUTH_REQUIRED_USER_NOTICE) {
+    return false;
+  }
+  const ownResetAt = normalizeUsageLimitResetAt(
+    output.providerRateLimitResetsAt,
+  );
+  if (ownResetAt === null) return false;
+  const inputKey = resolveTransientRetryKey(output) || waitScope.inputKey;
+  if (!inputKey) return false;
+  const now = Date.now();
+  const candidates: Array<number | null> = [ownResetAt];
+  const tiers = allowFailover ? poolServingTiers() : null;
+  if (tiers) {
+    candidates.push(
+      providerPool.earliestReportedRecoveryAt(tiers, selectedProfileId, now),
+    );
+  }
+  const known = candidates.filter((at): at is number => at !== null);
+  if (known.length === 0) return false;
+  try {
+    const wait = reserveUsageLimitWaitFor({
+      scopeKey: waitScope.scopeKey,
+      inputKey,
+      resetAtMs: Math.min(...known),
+      nowMs: now,
+    });
+    if (!wait) return false;
+    output.providerUsageLimitResumeAt = Date.parse(wait.resumeAt);
+    logger.warn(
+      {
+        scopeKey: waitScope.scopeKey,
+        providerId: selectedProfileId,
+        resumeAt: wait.resumeAt,
+        waitCount: wait.waitCount,
+      },
+      'Usage limit reached on every usable connection; input waits for the reset',
+    );
+    return true;
+  } catch (err) {
+    logger.error(
+      { err, scopeKey: waitScope.scopeKey },
+      'Failed to record a usage-limit wait; ending the input instead',
+    );
+    return false;
+  }
+}
+
+/** A healthy turn ends the lane's run of consecutive usage-limit waits. */
+function settleUsageLimitWaitForOutput(
+  output: ContainerOutput,
+  input: ContainerInput,
+): void {
+  if (
+    output.providerFailure ||
+    output.inputTurnCompleted !== true ||
+    !isDatabaseInitialized()
+  ) {
+    return;
+  }
+  try {
+    settleUsageLimitWaitAfterSuccess(usageLimitWaitScopeKey(input));
+  } catch (err) {
+    logger.warn({ err }, 'Failed to settle the usage-limit wait of a lane');
+  }
+}
+
+/** The final output repeats the streamed failure; keep its wait with it. */
+function carryUsageLimitWait(
+  decided: ContainerOutput | undefined,
+  output: ContainerOutput,
+): void {
+  if (decided?.providerUsageLimitResumeAt === undefined) return;
+  output.providerUsageLimitResumeAt = decided.providerUsageLimitResumeAt;
 }
 
 function applyKnownProviderFailureDisposition(
@@ -909,6 +1049,27 @@ function applyKnownProviderFailureDisposition(
   if (terminal) {
     const notice = resolveTerminalProviderFailureNotice(output);
     if (notice) output.providerFailureNotice = notice;
+  }
+}
+
+/**
+ * Remember which connection served a usage event, so cache hit rates can be
+ * read per connection. The usage row itself is written by the caller under
+ * the same event id. Exported for tests.
+ */
+export function recordUsageConnection(
+  output: ContainerOutput,
+  profileId: string | null,
+): void {
+  const eventId =
+    output.streamEvent?.eventType === 'usage'
+      ? output.streamEvent.usage?.eventId
+      : undefined;
+  if (!profileId || !eventId || !isDatabaseInitialized()) return;
+  try {
+    recordUsageEventConnection(eventId, profileId);
+  } catch (err) {
+    logger.warn({ err, eventId }, 'Failed to record the usage connection');
   }
 }
 
@@ -1167,6 +1328,8 @@ function resolveAgentProfileMcpPolicy(
 function resolveRuntimeMcpServers(
   group: RegisteredGroup,
   agentProfile?: RunnerAgentProfile,
+  /** The run's project root; see resolveWorkspaceProjectRoot. */
+  workspaceDir = path.join(GROUPS_DIR, group.folder),
 ): Record<string, Record<string, unknown>> {
   const managedLayers = group.created_by
     ? loadManagedMcpLayers(group.created_by, {
@@ -1180,7 +1343,7 @@ function resolveRuntimeMcpServers(
     agentProfile,
   ).servers;
   const context = loadClaudeContextMcpServers({
-    workspaceDir: path.join(GROUPS_DIR, group.folder),
+    workspaceDir,
     externalClaudeDir: getEffectiveExternalDir(),
     includeHostClaudeContext: shouldIncludeHostClaudeContext(agentProfile),
   });
@@ -1297,22 +1460,50 @@ function resolvePinnedModelConfigId(
   modelConfigId?: string | null,
   session?: { groupFolder: string; agentId?: string | null },
 ): string | null {
+  return resolvePinnedModelConfig(modelConfigId, session).id;
+}
+
+export type PinnedModelConfigSource =
+  | 'session'
+  | 'agent'
+  | 'default'
+  | 'single'
+  | 'workspace_env'
+  | 'pool'
+  | 'none';
+
+/** resolvePinnedModelConfigId, plus which step of the order decided it. */
+export function resolvePinnedModelConfig(
+  modelConfigId?: string | null,
+  session?: { groupFolder: string; agentId?: string | null },
+): { id: string | null; source: PinnedModelConfigSource } {
   const sessionSelection = session
     ? resolveSessionModelSelection(session.groupFolder, session.agentId)
     : null;
-  if (sessionSelection) return sessionSelection;
-  if (modelConfigId) return modelConfigId;
+  if (sessionSelection) return { id: sessionSelection, source: 'session' };
+  if (modelConfigId) return { id: modelConfigId, source: 'agent' };
   // The global default is the weakest explicit choice: a Workspace that
   // carries its own provider environment keeps it.
+  // Read the Workspace environment file at most once, and only if asked.
+  let ownEnv: boolean | undefined;
+  const ownProviderEnv = () =>
+    (ownEnv ??= !!session && workspaceHasProviderEnv(session.groupFolder));
   const defaultProvider = getUsableDefaultProvider();
-  if (
-    defaultProvider &&
-    !(session && workspaceHasProviderEnv(session.groupFolder))
-  ) {
-    return defaultProvider.id;
+  if (defaultProvider && !ownProviderEnv()) {
+    return { id: defaultProvider.id, source: 'default' };
   }
   const enabledProviders = getEnabledProviders();
-  return enabledProviders.length === 1 ? enabledProviders[0].id : null;
+  if (enabledProviders.length === 1) {
+    return { id: enabledProviders[0].id, source: 'single' };
+  }
+  return {
+    id: null,
+    source: ownProviderEnv()
+      ? 'workspace_env'
+      : enabledProviders.length > 1
+        ? 'pool'
+        : 'none',
+  };
 }
 
 /** Whether the Workspace brings its own provider environment, bypassing the pool. */
@@ -3209,6 +3400,14 @@ export async function runContainerAgent(
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
+  // Worktrees are host checkouts; a container would run this session in the
+  // shared workspace directory instead, so refuse rather than substitute.
+  const sessionWorktree = getSessionWorktree(input.agentId);
+  if (sessionWorktree) {
+    const message = `会话使用独立 worktree（分支 ${sessionWorktree.branch}），只能在宿主机模式运行，本次运行已停止。`;
+    return { status: 'error', result: message, error: message };
+  }
+
   // Probed per launch as before, but asynchronously and ahead of provider
   // selection, so everything from selection to spawn stays one synchronous
   // step while the docker CLI round trip no longer blocks the event loop.
@@ -3244,9 +3443,14 @@ export async function runContainerAgent(
   );
   let providerFailureReported = false;
   let providerFailureTerminal: boolean | undefined;
+  /** The streamed failure the disposition was decided on, if it waits. */
+  let providerFailureDecision: ContainerOutput | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
   input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
+  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
+    input = { ...input, turnId: input.taskRunId };
+  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -3258,7 +3462,7 @@ export async function runContainerAgent(
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId,
+    input.turnId ?? input.taskRunId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'container',
@@ -3499,6 +3703,8 @@ export async function runContainerAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, selectedProfileId);
+        settleUsageLimitWaitForOutput(output, input);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
@@ -3574,8 +3780,10 @@ export async function runContainerAgent(
             output,
             selectedProfileId,
             !modelSelectionPinned,
+            usageLimitWaitScopeFor(input),
           );
           providerFailureTerminal = terminal;
+          providerFailureDecision = output;
           logger.warn(
             {
               group: group.name,
@@ -3715,9 +3923,11 @@ export async function runContainerAgent(
           result,
           selectedProfileId,
           !modelSelectionPinned,
+          usageLimitWaitScopeFor(input),
         );
       } else {
         applyKnownProviderFailureDisposition(result, providerFailureTerminal);
+        carryUsageLimitWait(providerFailureDecision, result);
       }
     }
 
@@ -4159,6 +4369,15 @@ export async function runHostAgent(
 
   // 1. 确定工作目录
   const defaultGroupDir = path.join(GROUPS_DIR, group.folder);
+  // A session that owns a worktree runs only there. A missing or damaged
+  // checkout fails the run; falling back would put its edits in the main
+  // checkout.
+  const sessionWorkdir = resolveSessionWorkingDirectory(input.agentId);
+  if (sessionWorkdir.kind === 'broken') {
+    return hostModeSetupError(
+      sessionWorktreeRunError(sessionWorkdir.worktree, sessionWorkdir.reason),
+    );
+  }
   if (!group.customCwd) {
     fs.mkdirSync(defaultGroupDir, { recursive: true });
     // 确保 group 目录是独立 git root，防止 Claude Code 向上找到父项目的 .git
@@ -4182,7 +4401,10 @@ export async function runHostAgent(
       }
     }
   }
-  let groupDir = group.customCwd || defaultGroupDir;
+  let groupDir =
+    sessionWorkdir.kind === 'worktree'
+      ? sessionWorkdir.cwd
+      : group.customCwd || defaultGroupDir;
   if (!path.isAbsolute(groupDir)) {
     return hostModeSetupError(`工作目录必须是绝对路径：${groupDir}`);
   }
@@ -4199,6 +4421,18 @@ export async function runHostAgent(
   // Runtime allowlist validation for custom CWD (defense-in-depth: web.ts validates at creation,
   // but re-check here in case allowlist was tightened or path was injected via DB)
   if (group.customCwd) {
+    // A worktree lives under data/worktrees; the directory the allowlist
+    // governs is still the workspace's own custom directory.
+    let allowlistTarget = groupDir;
+    if (sessionWorkdir.kind === 'worktree') {
+      try {
+        allowlistTarget = fs.realpathSync(group.customCwd);
+      } catch {
+        return hostModeSetupError(
+          `工作目录不存在或无法解析：${group.customCwd}`,
+        );
+      }
+    }
     const allowlist = loadMountAllowlist();
     if (
       allowlist &&
@@ -4221,7 +4455,7 @@ export async function runHostAgent(
           continue;
         }
 
-        const relative = path.relative(realRoot, groupDir);
+        const relative = path.relative(realRoot, allowlistTarget);
         if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
           allowed = true;
           break;
@@ -4230,7 +4464,7 @@ export async function runHostAgent(
 
       if (!allowed) {
         return hostModeSetupError(
-          `工作目录 ${groupDir} 不在允许的根目录下，请检查 mount-allowlist.json`,
+          `工作目录 ${allowlistTarget} 不在允许的根目录下，请检查 mount-allowlist.json`,
         );
       }
     }
@@ -4306,6 +4540,9 @@ export async function runHostAgent(
     mountUserSkills: hostUserSkillsPolicy.mountUserSkills,
     userSkillsDirOverride: hostUserSkillsPolicy.userSkillsDirOverride,
     managedSkillPolicy: input.agentProfile?.runtimePolicy?.skills,
+    workspaceSkillRoots: resolveWorkspaceSkillRoots(group, {
+      agentId: input.agentId,
+    }),
     pluginSkillLayers: pluginSkillLayers(preparedHostPlugins),
   });
   const hostClaudeContextSync = syncHostClaudeContext(
@@ -4316,7 +4553,11 @@ export async function runHostAgent(
     hostClaudeContextSync.claudeMdStatus;
   hostClaudeContextPlan.audit.warnings = hostClaudeContextSync.warnings;
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  const hostMcpServers = resolveRuntimeMcpServers(group, input.agentProfile);
+  const hostMcpServers = resolveRuntimeMcpServers(
+    group,
+    input.agentProfile,
+    groupDir,
+  );
   ensureSettingsJson(settingsFile, hostMcpServers, {
     replaceMcpServers: true,
     baseSettings: loadHostClaudeSettings(hostClaudeContextPlan),
@@ -4382,10 +4623,15 @@ export async function runHostAgent(
     hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
   let hostProviderFailureReported = false;
   let hostProviderFailureTerminal: boolean | undefined;
+  /** The streamed failure the disposition was decided on, if it waits. */
+  let hostProviderFailureDecision: ContainerOutput | undefined;
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
   input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
+  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
+    input = { ...input, turnId: input.taskRunId };
+  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -4397,7 +4643,7 @@ export async function runHostAgent(
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId,
+    input.turnId ?? input.taskRunId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'host',
@@ -4848,6 +5094,8 @@ export async function runHostAgent(
           return;
         }
         if (!onOutput) return;
+        recordUsageConnection(output, hostSelectedProfileId);
+        settleUsageLimitWaitForOutput(output, input);
         if (
           !output.providerFailure &&
           output.inputTurnCompleted !== undefined
@@ -4918,8 +5166,10 @@ export async function runHostAgent(
             output,
             hostSelectedProfileId,
             !hostModelSelectionPinned,
+            usageLimitWaitScopeFor(input),
           );
           hostProviderFailureTerminal = terminal;
+          hostProviderFailureDecision = output;
           logger.warn(
             {
               group: group.name,
@@ -5051,12 +5301,14 @@ export async function runHostAgent(
           hostResult,
           hostSelectedProfileId,
           !hostModelSelectionPinned,
+          usageLimitWaitScopeFor(input),
         );
       } else {
         applyKnownProviderFailureDisposition(
           hostResult,
           hostProviderFailureTerminal,
         );
+        carryUsageLimitWait(hostProviderFailureDecision, hostResult);
       }
     }
 
@@ -5230,7 +5482,9 @@ export async function runAgentWithModelFallback(
     if (
       !input.isScheduledTask ||
       !lastOutput.providerFailure ||
-      lastOutput.providerFailureTerminal === true
+      lastOutput.providerFailureTerminal === true ||
+      // Every connection is out of usage: no other attempt can serve it.
+      lastOutput.providerUsageLimitResumeAt !== undefined
     ) {
       return lastOutput;
     }

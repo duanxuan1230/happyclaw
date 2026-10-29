@@ -22,6 +22,7 @@ import type {
   UsageWindow,
 } from '../stores/usage';
 import { buildUsageQueryParams, usageQueryKey } from '../stores/usage';
+import { CacheHitRatePanel } from '../components/usage/CacheHitRatePanel';
 import { useAuthStore } from '../stores/auth';
 import { useBillingStore } from '../stores/billing';
 import { formatTokens } from '../components/billing/utils';
@@ -802,6 +803,8 @@ export function UsagePage() {
               summary={visibleSummary}
               cacheReadShare={cacheReadShare}
             />
+
+            <CacheHitRatePanel queryParams={queryKey} />
           </section>
 
           <section

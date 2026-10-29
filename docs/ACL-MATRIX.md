@@ -71,7 +71,9 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 | `/api/usage/*`                                      | Login；普通用户只见本人，管理视图再按角色过滤 |
 | `/api/billing/my/*`                                 | Login，仅本人                                 |
 
-产品级 Agent 删除前必须先迁移其工作区。渠道账号删除、登出或断开时必须清理/更新
+产品级 Agent 删除前必须先迁移其工作区（`migrate-and-delete` 一次性迁移并归档，
+目标也必须是本人的 active Agent）。复制、导入不授予宿主机资源：非 admin 得到的
+Agent 不含宿主机上下文与宿主机 Skills。渠道账号删除、登出或断开时必须清理/更新
 自身连接和绑定，不能影响其他用户或其他账号。飞书扫码建应用的注册
 （`/api/channel-accounts/feishu/registrations/*`）同样只对发起者可见，他人读取或
 取消返回 404，成功后只为发起者建号。
@@ -95,6 +97,8 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 - 查看会话当前使用的模型配置与上下文占用（`GET /api/groups/:jid/context-usage`）
 - 发送普通消息
 - 查看 Runtime Session、绑定和项目能力
+- 读取代码改动（`GET /api/groups/:jid/git/status|diff`）、worktree 可用性和同目录
+  运行提示（`workdir/peers`，看不到的工作区只计数不具名）
 - 打开 Web 终端前的资源检查
 
 Home 的 AgentProfile 归属也是系统不变量：只能绑定同一 owner 的 `is_default`
@@ -114,6 +118,8 @@ Host Workspace 在 Access 之外还要求 admin。
 - 切换会话模型与推理档位（`PUT /api/groups/:jid/model-selection`）；其中高于 `max` 的
   推理档位（目前是 `ultra`）另需 `manage_system_config`
 - 创建、修改、删除 Runtime Session
+- 为新会话创建独立 worktree（另需 Host 权限）；删除会话、工作区或 clear-history 时
+  移除 worktree、保留分支，有未提交改动须带 `force_worktree(s)=true` 确认
 - 写入工作区 Skills/MCP
 - 修改群聊绑定、激活方式、响应对象和 owner
 - `/clear`、`/fresh` 的 HTTP 与 WebSocket 分支
@@ -137,17 +143,20 @@ Memory 随 Workspace 保留，不跨 Workspace 复制。
 
 主动模式工作区的 `process_visibility` 同时约束实时广播和已存轨迹：
 
-| 级别       | 实时 WebSocket 过程事件 | `turn-traces` 与 `has_trace`                              |
-| ---------- | ----------------------- | --------------------------------------------------------- |
-| `hidden`   | 仅运行生命周期          | 404，消息不带 `has_trace`                                 |
-| `activity` | 工具、任务、todo 等结构 | 可读，`thinking` 为空，`steps` 中的思考步骤没有文本与标题 |
-| `full`     | 再加推理摘要与过程说明  | 完整                                                      |
+| 级别       | 实时 WebSocket 过程事件     | `turn-traces` 与 `has_trace`                              |
+| ---------- | --------------------------- | --------------------------------------------------------- |
+| `hidden`   | 运行生命周期与进展          | 只有进展步骤；没有进展的回合 404，其消息不带 `has_trace`  |
+| `activity` | 再加工具、任务、todo 等结构 | 可读，`thinking` 为空，`steps` 中的思考步骤没有文本与标题 |
+| `full`     | 再加推理摘要与过程说明      | 完整                                                      |
 
 模型自己产出的文字（`text_delta`、工具结果文本、子 Agent 的提示词与回答）在任何级别
-都不会广播，也不会写入轨迹。唯一的例外是 `full` 级别的过程说明（`commentary`）：主
-Agent 在调用工具前写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给
-Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行
-（宿主逐个调用判断，不向前看，详见 `docs/API.md`）。
+都不会广播，也不会写入轨迹。例外有两个。一是进展：Web 回合里 Agent 用
+`send_message(delivery_role=progress)` 发给用户的话，作为带 `progress` 的
+`commentary` 在每个级别广播并写入轨迹（IM 回合的进展是一条独立消息，不经过这里）。
+二是 `full` 级别的过程说明（不带 `progress` 的 `commentary`）：主 Agent 在调用工具前
+写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给 Web、不写入轨迹；回合
+结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行（宿主逐个调用判断，
+不向前看，详见 `docs/API.md`）。
 工具结果事件上的 `toolIsError`（SDK 的 `is_error`，布尔）在任何级别都放行；
 `toolResultFacts`（工具做了什么的数字，如增删行数）只在 Assistant 模式下发，主动模式在
 任何级别都剥掉。
@@ -155,10 +164,11 @@ Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `
 过滤读取**当前**级别和**当前**模式，而不是回合运行时的：一个回合可能按 Assistant 契约
 记录（工作区当时还是 Assistant 模式，或渠道挂载的 `interaction_mode_override` 为
 `assistant` 的消息由 Assistant Runner 处理），之后在主动模式工作区里读取。所以主动模式
-工作区读取 `turn-traces` 时，无论回合怎么记录，`steps` 都不含过程说明（text 步骤）、发言
+工作区读取 `turn-traces` 时，无论回合怎么记录，`steps` 都不含进展以外的 text 步骤、发言
 工具 `send_message` 的步骤，tool/task 步骤也都没有 `resultPreview`（工具输出、子 Agent
-的回答、权限拒绝的原因）和 `resultFacts`，只留下调用的输入摘要和成败状态；`trace` 里
-“工具结果”“Task 启动”两类行没有 `detail`（工具输出、子 Agent 的提示词）。Assistant
+的回答、权限拒绝的原因；工作区记忆写入工具的回执除外）和 `resultFacts`，只留下调用的
+输入摘要和成败状态；`trace` 里“工具结果”“Task 启动”两类行没有 `detail`（工具输出、
+子 Agent 的提示词）。Assistant
 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
 列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
 都返回 404。
@@ -177,10 +187,11 @@ Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `
 `/api/memory/workspaces/:workspaceJid/items*` 先要求 Login，再按 URL 中的
 Workspace JID 执行资源级授权：
 
-| 操作                           | 权限                                               |
-| ------------------------------ | -------------------------------------------------- |
-| GET 列表、搜索、详情、versions | `canAccessGroup()`，当前用户必须是 Workspace owner |
-| POST、PATCH、DELETE            | `canModifyGroup()`，当前用户必须是 Workspace owner |
+| 操作                             | 权限                                               |
+| -------------------------------- | -------------------------------------------------- |
+| GET 列表、搜索、详情、versions   | `canAccessGroup()`，当前用户必须是 Workspace owner |
+| POST、PATCH、DELETE              | `canModifyGroup()`，当前用户必须是 Workspace owner |
+| POST `.../confirm`、`.../reject` | `canModifyGroup()`，当前用户必须是 Workspace owner |
 
 admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均返回 404，不能据此
 枚举其他用户的 Workspace 或 Memory。客户端必须使用 `/api/workspaces` 返回的 JID，
@@ -188,14 +199,18 @@ admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均
 
 Agent Runtime 的 Workspace Memory MCP 还叠加执行上下文策略：
 
-| 执行上下文                         | 读取 | 创建、更新、忘记 |
-| ---------------------------------- | ---- | ---------------- |
-| 顶层交互式 Main/Runtime Session    | 允许 | 按 Workspace ACL |
-| Scheduled Run（group 或 isolated） | 允许 | 拒绝             |
-| SDK Task Sub-Agent                 | 允许 | 拒绝             |
+| 执行上下文                                       | 读取 | 创建、更新、忘记                   |
+| ------------------------------------------------ | ---- | ---------------------------------- |
+| 顶层 Main/Runtime Session，批次全部是 owner 输入 | 允许 | 按 Workspace ACL                   |
+| 顶层 Main/Runtime Session，含非 owner 输入       | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| Scheduled Run（group 或 isolated）               | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| Spawn/Task 会话、SDK Task Sub-Agent              | 允许 | 拒绝                               |
 
-定时任务和 Sub-Agent 即使继承 Workspace owner 身份，也不能写入 Workspace Memory；
-只读限制由 MCP 暴露面与主进程 IPC broker 共同执行，不能由模型参数扩大权限。
+owner 输入的判定在宿主：Web 输入的 sender 等于 owner 用户 id；IM 输入的发送者 IM id
+必须等于该工作区注册中由宿主记录的 owner（claim source 为 `configured`、
+`trusted_direct` 或 `auto_feishu`）。写入一律要求 Runner 的 HMAC 写能力；proposed
+只有 owner 在 Web 确认后才生效。Sub-Agent 的只读限制由 PreToolUse hook 与主进程
+IPC broker 共同执行，不能由模型参数扩大权限。
 
 ### 4.6 HappyClaw Owner Profile
 

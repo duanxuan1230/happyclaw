@@ -19,12 +19,14 @@ export const DEFAULT_HOST_SKILL_POLICY: SkillSourcePolicy = {
 };
 
 /**
- * Profiles saved before host Skill governance was introduced inherited every
- * host Skill together with host Claude context. Preserve that behavior until
- * the profile is saved with an explicit host policy.
+ * The host Skill grant a profile runs with. The server stores it on every
+ * profile; one from an older server without it followed the context source
+ * the runner actually uses, which for the main HappyClaw is the system
+ * setting reflected in `effective`, not its persisted `managed`.
  */
 export function getHostSkillPolicy(
   policy?: Partial<AgentProfileRuntimePolicy> | null,
+  effective?: Partial<AgentProfileRuntimePolicy> | null,
 ): SkillSourcePolicy {
   const explicit = policy?.skills?.host;
   if (explicit) {
@@ -33,9 +35,19 @@ export function getHostSkillPolicy(
       ids: explicit.ids ?? [],
     };
   }
-  return getAgentContextSource(policy) === 'host_claude'
+  return getAgentContextSource(effective ?? policy) === 'host_claude'
     ? { mode: 'inherit', ids: [] }
     : { ...DEFAULT_HOST_SKILL_POLICY };
+}
+
+/** Running or queued conversations a runner restart would interrupt. */
+export function countActiveConversations(
+  workspaces: Array<{ active_conversations?: number }> | undefined,
+): number {
+  return (workspaces ?? []).reduce(
+    (sum, workspace) => sum + (workspace.active_conversations ?? 0),
+    0,
+  );
 }
 
 export function skillSelectionError(
@@ -58,15 +70,6 @@ export function hostSkillPolicyForMode(
     // Skills from taking effect and can exceed the API's custom-id limit.
     ids: mode === 'custom' ? [...new Set(ids)] : [],
   };
-}
-
-export function skillPolicySummary(
-  policy: SkillSourcePolicy,
-  allLabel = '全部已启用',
-): string {
-  if (policy.mode === 'disabled') return '不使用';
-  if (policy.mode === 'inherit') return allLabel;
-  return `选择 ${policy.ids.length} 项`;
 }
 
 export const AGENT_EFFORT_OPTIONS: Array<{

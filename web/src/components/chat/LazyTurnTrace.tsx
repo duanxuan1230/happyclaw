@@ -101,12 +101,18 @@ function LazyRow({
 export function LazyTurnTrace({
   message,
   reasoning,
+  stepsOnly = false,
   onRequest,
   pending = false,
 }: {
   message: Pick<Message, 'id' | 'chat_jid' | 'turn_id'>;
   /** The server keeps reasoning text for this workspace (not just activity). */
   reasoning: boolean;
+  /**
+   * The server keeps only steps for this workspace (the progress the Agent
+   * sent, at `hidden`): one row in either layout.
+   */
+  stepsOnly?: boolean;
   /** Which row asked, so the loaded block opens at once. */
   onRequest: (row: 'thinking' | 'trace' | 'process') => void;
   /**
@@ -130,7 +136,7 @@ export function LazyTurnTrace({
     onRequest(row);
     void loadTurnTrace(message);
   };
-  if (layout === 'timeline') {
+  if (layout === 'timeline' || stepsOnly) {
     return (
       <LazyRow
         icon={Sparkles}

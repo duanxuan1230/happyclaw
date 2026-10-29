@@ -108,14 +108,14 @@ describe('frontend workspace interaction mode contract', () => {
     expect(panel).toContain("commentary={visibility === 'full'}");
     expect(panel).toContain("thinkingText={visibility === 'full'}");
 
-    // The panel shows above `hidden` only; at `hidden` the run status bar says
-    // the run is busy and offers its owner the process.
+    // At `hidden` the panel shows only for the progress the Agent sent; the
+    // run status bar says the run is busy and offers its owner the process.
     const proactive = display.slice(
       display.indexOf("if (effectiveInteractionMode === 'proactive')"),
       display.indexOf('// 计算是否有流式数据'),
     );
     expect(proactive).toContain('<ProcessPanel');
-    expect(proactive).toContain("processVisibility === 'hidden' ||");
+    expect(proactive).toContain("(processVisibility === 'hidden' &&");
     expect(proactive).not.toMatch(/partialText|StreamingMarkdown/);
     expect(statusBar).toContain('显示过程');
     expect(statusBar).toContain('requestWorkspaceSettings(groupJid)');

@@ -22,6 +22,7 @@
 | `/api/groups`                      | `src/routes/agents.ts`           | Runtime Session 与渠道绑定    |
 | `/api/groups`                      | `src/routes/turn-traces.ts`      | 回合的思考摘要与执行轨迹      |
 | `/api/groups`                      | `src/routes/workspace-config.ts` | 项目 Skills/MCP               |
+| `/api/groups`                      | `src/routes/git-review.ts`       | 代码改动与会话 worktree       |
 | `/api/workspaces`                  | `src/routes/workspaces.ts`       | Agent-first 工作区投影        |
 | `/api/agent-profiles`              | `src/routes/agent-profiles.ts`   | 产品级 Agent                  |
 | `/api/channel-accounts`            | `src/routes/channel-accounts.ts` | 多渠道账号                    |
@@ -79,7 +80,10 @@ Public：
 
 ## 工作区、消息和运行控制
 
-- `GET|POST /api/groups`
+- `GET|POST /api/groups`；`POST` 的响应带 `warnings`，`custom_cwd` 与同一用户的其他
+  宿主机工作区目录相同时为
+  `[{"code": "shared_custom_cwd", "message": "…", "workspaces": [{"jid", "name"}]}]`，
+  不阻止创建
 - `PATCH|DELETE /api/groups/:jid`
 - `PATCH /api/groups/:jid/agent-profile`
 - `POST /api/groups/:jid/stop`
@@ -88,9 +92,10 @@ Public：
 - `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型与推理档位选择
 - `GET /api/groups/:jid/context-usage`，会话当前的上下文占用（输入框旁的圆环）
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
-  Runtime Session、子对话、工作目录及 Workspace Memory（含版本历史和
-  Home Owner Profile），关联定时任务停止并移入回收站；保留工作区外壳、
-  `data/extra/` 和任务运行历史
+  Runtime Session、子对话、`data/groups/{folder}` 工作目录、会话 worktree 目录及
+  Workspace Memory（含版本历史和 Home Owner Profile），关联定时任务停止并移入回收站；
+  保留工作区外壳、`data/extra/`、任务运行历史、worktree 分支和宿主机模式的自定义
+  工作目录
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
 - `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要、执行轨迹与有序步骤
@@ -101,6 +106,15 @@ Public：
 - `POST /api/messages`
 - `GET /api/follow-ups`
 - `POST /api/follow-ups/:messageId/action`
+
+当一次运行可用的全部连接都撞了用量上限、且上游给出了重置时刻时，输入不会失败：
+该会话（lane）待处理的输入被放回 durable 队列（`delivery_status: 'queued'`，照常可
+编辑、排序、取消），在重置时刻后 60 秒加 0–30 秒抖动自动继续。同一会话最多连续等待
+3 次、单次不超过 7 天，超出则按原方式失败；新消息、`send_now`（`promote`）立即结束
+等待并与排队输入合批，`/break`、取消最后一条排队输入、停止、`/clear`、`/fresh`、删除
+工作区或会话取消等待。来源是 IM 的输入在开始等待时收到一条说明（同一输入只发一次）。
+定时任务的独立运行改为 `task_runs.status = 'retry_wait'`，`available_at` 为继续时刻，
+不消耗运行的重试预算。
 
 `model-selection` 以 `agentId`（GET 查询参数、PUT 请求体）区分 Runtime Session，
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
@@ -207,11 +221,11 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 不经过 quiesce、不重启运行时，正在运行的回合从下一个事件起按新值投影。Assistant
 模式的工作区始终展示完整过程，该字段可以设置但没有效果。三个级别对 Web 的投影：
 
-| 级别       | 广播给 Web 的 Runner 事件                                                                                                                       |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈                                                                          |
-| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；不含任何模型产出的文字 |
-| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                          |
+| 级别       | 广播给 Web 的 Runner 事件                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈，以及进展（见下）                                                                |
+| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；进展以外不含任何模型产出的文字 |
+| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                                  |
 
 `commentary` 由宿主合成，Runner 不会发这个事件：主 Agent 的文字先被扣住，只有紧接着
 调用了工具才作为一条完整的 `commentary`（先于该次调用，带该调用的 `queryRunId`）放行；
@@ -221,15 +235,30 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 消息开头读起的文字才会被扣住，所以中途调高级别时，正在写的那句话的后半截不放行。
 它只广播给 Web，不进入 IM 渠道，也不写入 `turn_traces`；重连快照不含它。
 
+进展是主动模式 Agent 用 `send_message(delivery_role=progress)` 发给用户的话，按本轮输入
+的来源渠道（绑定回合时记录）分流。IM 回合的进展是一条独立消息，与 `final` 一样经 Turn
+Outbox 发出并写入消息；IM 回合的回复路由已不可用（输入被撤回、地址缺少渠道账号）时直接
+失败，告诉 Agent 没有送达，不改投 Web。来源未知（没有 `inputTurnId` 或回合已解绑）时按
+独立消息投递。Web 回合的进展不成为消息，而是一条带 `progress: true` 的 `commentary`，只由
+宿主合成（Runner 事件上的 `progress` 标记会被去掉），在每个级别都广播，并作为 `progress`
+步骤写入 `turn_traces`，最终回复送达后由 Web 折叠进该回复的处理过程。重连快照
+`stream_snapshot.snapshot.progress` 按顺序带上本轮已发的进展（`{ at, text }`），中途加入的
+标签页据此在每个级别重建进展步骤。Web 回合发过进展却没有回复就最终结束（被停止、被引导
+转向、出错终止，或因缺少 `final` 被拒绝结单且不再重试）时，宿主写一条简短的结束说明
+（`interrupt_partial`）作为本轮回复，进展随本轮轨迹挂在它上面。会重试的失败不写说明，
+进展留给下一次尝试：重试发出 `final` 就挂在 `final` 上，否则由最终那一条结束说明带上所有
+尝试的进展。
+
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
-只保留 `toolUseId` 与布尔值 `toolIsError`（调用是否失败），工具的 `toolInput`、
+只保留 `toolUseId` 与布尔值 `toolIsError`（调用是否失败；工作区记忆写入工具的回执
+另外保留结果文本，按 `toolUseId` 对应到该调用的 `tool_use_start` 识别），工具的 `toolInput`、
 `toolResultFacts`（见下）、子 Agent 的提示词与 Workflow 的预览文本都会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
 在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
 `agent_status`，使 Task 标签与任务事件一致。
 
 回合结算时，宿主把该回合的思考摘要、思考耗时、执行轨迹和有序步骤写入 `turn_traces`
-（Assistant 模式总是写；主动模式仅当 `process_visibility` 不是 `hidden` 时写，且
+（Assistant 模式总是写；主动模式在 `hidden` 级只写进展步骤，没有进展就不写，
 `activity` 级不保存思考文本，步骤里的思考也不带文本与标题；思考文本最多 64KB，保留
 尾部并以 `…` 开头标记被截断，轨迹最多 200 条，步骤最多 100 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
 表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
@@ -368,6 +397,94 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 
 路径必须位于目标工作区允许范围内；系统目录、路径穿越和不安全符号链接会被拒绝。
 
+文件根与该会话运行时的工作目录一致：宿主机模式的自定义目录、否则
+`data/groups/{folder}`。以上接口都接受查询参数 `agentId`（Runtime Session ID，`main`
+或缺省为主会话）；会话有独立 worktree 时以 worktree 为根。`agentId` 不属于该工作区时
+返回 404。
+
+## 代码改动与会话 worktree
+
+- `GET /api/groups/:jid/git/status?agentId=&scope=working|branch`
+- `GET /api/groups/:jid/git/diff?agentId=&path=&orig_path=&scope=working|branch`
+- `GET /api/groups/:jid/git/worktree-support`
+- `GET /api/groups/:jid/workdir/peers?agentId=`
+
+访问检查与文件接口相同：看不到的工作区返回 404，宿主机工作区需要宿主机执行权限
+（403）。git 只对宿主机模式的工作区执行，命令使用参数数组、有超时与输出上限。宿主机上的
+只读 git 调用（这里的 status、diff，删除 worktree 前的改动检查，`/fresh` 的工作区快照）
+一律关闭 fsmonitor、hooks、textconv、外部 diff 和仓库配置的 filter（clean、smudge、
+process），也不取可选锁：Docker 工作区的 `.git/config` 由容器内的 Agent 控制，读取时不
+执行其中配置的任何命令。只有用户发起的 `worktree add` 保持 git 默认行为（运行仓库自己的
+hook）。HappyClaw 本身不访问网络，但 LFS 或 partial clone 仓库在 `worktree add` 和 diff
+时可能按需访问远端。
+
+`git/status` 读取会话的 worktree，或工作目录所在的仓库（`data/groups/{folder}` 只认它
+自己的仓库），返回 200：
+
+```json
+{
+  "state": "ok",
+  "root": "/srv/repo",
+  "worktree": null,
+  "branch": "main",
+  "head": "3f2c…",
+  "upstream": "origin/main",
+  "ahead": 1,
+  "behind": 0,
+  "files": [
+    {
+      "path": "src/app.ts",
+      "status": "modified",
+      "index_status": ".",
+      "worktree_status": "M",
+      "additions": 12,
+      "deletions": 3,
+      "binary": false
+    },
+    {
+      "path": "new.txt",
+      "orig_path": "old.txt",
+      "status": "renamed",
+      "index_status": "R",
+      "worktree_status": ".",
+      "additions": 0,
+      "deletions": 0,
+      "binary": false
+    }
+  ],
+  "total_files": 2,
+  "truncated": false
+}
+```
+
+`status` 取值 `modified`、`added`、`deleted`、`renamed`、`copied`、`type_changed`、
+`untracked`、`conflicted`；`scope` 默认为 `working`（相对 HEAD 的暂存与未暂存合计），
+会话拥有独立 worktree 时支持 `scope=branch`（相对审阅基底展示已提交与未提交改动，
+并额外返回该基底 `baseCommit` 与领先它的提交数 `baseAhead`）。审阅基底是 worktree 的 `base_commit`
+与 HEAD 和默认分支（本地及 `origin`，当前所在分支除外）各 tip 的 merge-base 中最新的一个，
+会话分支合入或变基到更新的默认分支后，上游提交不算作会话的改动。未跟踪文件按
+行数计入新增，二进制或过大时为 `null`。最多返回 1000 个文件，原始输出上限 2 MB，超出时
+`truncated: true`。无法读取时同样返回 200：`{"state": "unavailable", "reason":
+"container_mode" | "worktree_broken", "message": "…"}`、`{"state": "not_git_repo",
+"message": "工作目录不是 git 仓库"}` 或 `{"state": "error", "error": "…"}`，都带
+`worktree`。
+
+`git/diff` 返回单个文件相对 HEAD（或 `scope=branch` 下相对审阅基底）的 unified diff，未跟踪文件与 `/dev/null` 比较：
+`{"state": "ok", "path": "src/app.ts", "diff": "diff --git …", "binary": false,
+"truncated": false, "untracked": false}`。输出上限 512 KB（`truncated: true`）；二进制
+文件 `binary: true`。`path`、`orig_path`（重命名的原路径）必须是仓库内的相对路径：
+绝对路径、`..`、NUL 和经符号链接逃出仓库的路径返回 400。
+
+`git/worktree-support` 返回 `{"available": true}`，或
+`{"available": false, "reason": "container_mode" | "directory_missing" |
+"not_git_repo" | "repo_has_no_commits", "message": "…"}`。
+
+`workdir/peers` 列出与该会话共用工作目录、且正在运行一轮的其他会话（同工作区未用
+worktree 的会话、主会话、定时任务，或自定义目录相同的其他工作区），只提示不限制：
+`{"peers": [{"workspace_jid": "web:…", "workspace_name": "Repo", "kind": "main" |
+"session" | "task", "session_id": null, "session_name": null}], "hidden_count": 0}`；
+调用者看不到的工作区只计入 `hidden_count`。
+
 ## Runtime Session 与渠道绑定
 
 推荐使用 `/sessions` 语义：
@@ -395,6 +512,50 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 
 - `POST /api/groups/:jid/sessions`（及 `/agents`）只接受工作区 `web:*` JID；IM 聊天
   JID 返回 400，IM 聊天应绑定到 Session 而不是在其下创建 Session。
+- 请求体可带 `worktree: true`：宿主机模式、工作目录是有提交的 git 仓库时，宿主在
+  `data/worktrees/{folder}/{sessionId}` 以当前 HEAD 新建分支 `happyclaw/<短 ID>` 的
+  worktree，该会话此后每次运行都以它为工作目录（工作区在仓库子目录时进入同一子目录）。
+  不满足条件返回 400 `{"code": "WORKTREE_UNAVAILABLE", "reason": …}`，不创建会话；
+  git 失败返回 500 `WORKTREE_CREATE_FAILED`。响应与 `GET` 列表的会话带
+  `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
+  或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
+  仓库根目录的 `.worktreeinclude` 列出要复制进新 worktree 的被忽略文件（如 `.env`）：只复制
+  既匹配它、又被仓库的忽略规则（`.gitignore`、`info/exclude`、`core.excludesFile`）忽略的
+  未跟踪文件。该文件超过 64 KB 或匹配列表超过 256 KB（此时一个都不复制）、超过 100 个文件
+  或超过单文件 10 MB / 合计 50 MB 时少复制的部分会记 warn 日志，创建响应的
+  `worktree.include_incomplete` 为
+  `{"reason": "include_file_too_large" | "list_truncated" | "file_limit" | "size_limit", "copied_files", "skipped_files"}`
+  （`skipped_files` 是最多 5 个未复制的路径，前两种原因下为空），完整复制时为 `null`（`GET`
+  列表不带该字段）。Web 在新建会话后据此弹出不阻塞的提示。
+- 删除带 worktree 的会话会移除 worktree 目录、保留分支。可能丢失内容时返回 409
+  `{"code": "WORKTREE_DIRTY", "error", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules", "embedded_repos", "detached_commits", "operation_in_progress", "hidden_changes"}]}`，
+  `error` 逐条写明原因：
+  - `changed_files`：未提交改动（含未跟踪文件）；嵌入的仓库或子模块指向的提交有变化也计入。
+  - `unreadable`：目录还在但状态读不出（`.git` 丢失、找不到管理目录、git 失败，或嵌套仓库
+    扫描超过 50 万个条目 / 10 秒），按有改动处理。
+  - `submodules`：初始化过子模块（本地提交存放在 worktree 的管理目录，会随之删除）。
+  - `embedded_repos`：worktree 内任意位置（包括被 `.gitignore`、`info/exclude` 或全局
+    excludesFile 忽略的目录）有另一个仓库的 `.git`：目录、符号链接，或指向本 worktree
+    管理目录 `modules/` 以外的 `.git` 文件；其中的提交和改动只存在 worktree 里。
+  - `detached_commits`：HEAD 不在分支上，且 HEAD 提交不能从任何分支或标签到达（在
+    detached HEAD 上提交、rebase 停在 edit 等），删除后这些提交不可达。
+  - `operation_in_progress`：`"rebase"` | `"merge"` | `"cherry-pick"` | `"revert"` |
+    `"bisect"` 进行中时为对应值，否则为 `null`。
+  - `hidden_changes`：有 assume-unchanged 的文件，或磁盘上存在的 skip-worktree 文件，
+    它们的改动不会出现在状态里（稀疏检出中不在磁盘上的文件不算）。
+
+  检查只读索引、管理目录和文件系统（遍历不跟随符号链接），不会在嵌入的仓库中启动 git；
+  其他被 `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。git
+  无法移除 worktree 时只删除它自己的管理目录（`gitdir` 指向该 worktree），不会清理同一
+  仓库的其他 worktree。worktree 被标为 `broken` 后，目录恢复时（下次运行或列出会话时重新
+  检查）回到 `active`。删除工作区和 `clear-history` 同理（409 相同），确认参数为
+  `?force_worktrees=true&confirmed_worktrees=<session_id>,…`，列出调用方在 409 里看到并确认
+  的会话；停止 runner 之后会再检查一次，出现列表之外的可能丢失内容的 worktree 时再次返回
+  409（列出全部这类 worktree），只带 `force_worktrees=true` 不确认任何 worktree。工作区有
+  worktree 会话时 `PATCH` 不能切换到 Docker 执行（409 `WORKTREE_SESSIONS_EXIST`）。最后一个
+  worktree 移除后，空的 `data/worktrees/{folder}` 一并删除；启动时删除没有任何 worktree
+  记录的空目录，有内容的目录不动。
+
 - 工作区绑定只接受原生话题群（飞书话题群或 Telegram Forum）。
 - Runtime Session 绑定接受私聊和普通群，`sessionId=main` 表示该 Workspace 的主会话。
 - 话题群使用 `thread_map`，每个原生话题映射独立 Session；普通群的 @ 策略不改变绑定层级。
@@ -413,12 +574,61 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 - `POST|DELETE /api/agent-profiles/:id/avatar`
 - `POST /api/agent-profiles/:id/refine-prompt`
 - `GET /api/agent-profiles/:id/workspaces`
-- `GET /api/agent-profiles/:id/prompt-versions`
-- `POST /api/agent-profiles/:id/prompt-versions/:version/restore`
 - `POST /api/agent-profiles/:id/effective-capabilities`
+- `POST /api/agent-profiles/:id/duplicate`
+- `POST /api/agent-profiles/:id/migrate-and-delete`
+- `GET /api/agent-profiles/:id/export`
+- `POST /api/agent-profiles/import`
 
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
-脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”。
+脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”；`model_resolution`
+（`source`、`model_config_id`、`model_config_name`、`model`、`connection_missing`）
+说明运行实际用的连接与模型。请求体可带未保存的 `model_config_id`、`model`，与未保存
+的 `runtime_policy` 一样按它们计算；绑定的连接已删除时 `connection_missing` 为 true。
+`source` 按固定顺序取 `session`（会话手选，仅指定 `workspace_jid` 时看该
+工作区主会话）、`agent`（智能体绑定）、`default`（全局默认，工作区自带 Provider 环境
+变量时让位）、`single`（唯一启用）、`workspace_env`、`pool`（自动池）或 `none`。
+
+`GET /:id/workspaces` 的每个工作区带 `active_conversations`：该工作区运行时中正在
+执行或有排队输入的个数，即一次会重启 Runner 的保存会中断的对话数；只在等待输入的
+暖 Runner 不计入。
+
+名称在同一用户的 active 智能体（含内置 HappyClaw）之间唯一，按 NFKC 折叠后不区分
+大小写比较；创建、导入和改名冲突返回 409 与 `code: AGENT_NAME_TAKEN`，已有的重名
+不受影响。四段 Prompt 每段最多 20000 个字符；超限返回 400 与
+`code: PROMPT_TOO_LONG`、`field`（如 `soul_prompt`）和 `max`，名称不合法（含零宽
+空格、软连字符等不可见字符）返回 `code: INVALID_NAME`；比较名称时也会去掉这类字符。
+唯一性在数据库层的创建与改名里检查，Agent Builder 准备和发布草稿同样受约束。
+
+`runtime_policy.mcp.ids` 的引用可带 `system:`/`user:` 前缀，前缀不计入 id 的 128 字符
+上限。
+
+每个 profile 的 `runtime_policy.skills.host` 都是显式值（schema v84 起），宿主机
+Skills 不再随有效上下文来源隐式继承。
+
+`duplicate` 新建「<名称> 副本」（重名时为「副本 2」「副本 3」…），复制四段 Prompt、
+`prompt_mode`、`runtime_policy`、模型绑定、头像 Emoji/背景色与上传的头像文件（复制为
+新文件），不复制工作区和渠道挂载；内置 HappyClaw 返回 400。校验与创建相同；非
+admin 复制时去掉宿主机上下文与宿主机 Skills，响应 `stripped` 列出
+`host_context`/`host_skills`。
+
+`migrate-and-delete` 接受 `{target_agent_profile_id}`，在两个智能体的锁和工作区
+Runner 停止期间，用一个事务把该智能体的全部工作区迁到目标并归档它：归档被拒绝
+（例如仍有渠道挂载）时整体回滚并返回 409，提交前停不下 Runner 返回 503
+`persisted: false`；成功返回 `{success, migrated_workspaces, invalidated_runtime_jids}`。
+
+`export` 返回 `{format: "happyclaw-agent", version: 1, exported_at, agent}`，`agent`
+含名称、头像 Emoji/背景色、四段 Prompt、`prompt_mode` 与 `runtime_policy`；Skills 用
+目录名、MCP 用 `system:`/`user:` 前缀名引用，不含模型配置、上传头像、宿主机路径或
+凭据。`import` 接受 `{data, name?, drop_missing?, confirm_host_grants?}`：格式或
+版本不对返回 400
+（`INVALID_AGENT_EXPORT`、`UNSUPPORTED_AGENT_EXPORT_VERSION`）；引用了本账号没有的
+Skills/MCP 时返回 409 `AGENT_IMPORT_MISSING_REFERENCES` 与 `missing`，带
+`drop_missing: true` 重发会去掉这些引用后创建（去掉后为空的“所选”改为不使用）；非
+admin 导入时去掉宿主机上下文与宿主机 Skills；admin 导入会授予它们的文件时返回 409
+`AGENT_IMPORT_HOST_GRANTS` 与 `grants`，确认后带 `confirm_host_grants: true` 重发。
+成功返回 201
+`{profile, stripped, dropped}`。
 
 `GET /api/agent-profiles` 的每个 profile 带 `model_config_id` 与 `model`（该配置内
 的模型，`null` 表示配置的默认模型）；`model_configs[]` 的每项带 `models[]`（`id`、
@@ -494,6 +704,12 @@ owner 明确拒绝首次设置时可提交
 - `PATCH|DELETE /api/groups/:jid/workspace-config/mcp-servers/:id`
 
 读操作要求访问工作区，写操作要求工作区 owner。
+
+项目能力以工作区的项目根为准，运行时、能力预览和这些接口一致：宿主机模式的自定义目录
+（会话有独立 worktree 时为 worktree），否则 `data/groups/{folder}`。宿主机自定义目录
+工作区因此会加载该目录 `.mcp.json` 和 `.claude/settings.json`、`.claude/settings.local.json`
+中声明的 MCP，以及从该目录向上到 git 根的 `.claude/skills`；它们属于项目上下文层
+（CLAUDE.md §5），与系统、用户 MCP 叠加。
 
 `workspace-config/skills/install` 的 `package` 规则与 `POST /api/skills/install`
 相同：URL 形式只接受 github.com 仓库或 tree 链接，其他主机返回 400。
@@ -869,6 +1085,40 @@ POST、PATCH 和 DELETE 均返回
 `{ storeRevision, item, replayed }`；GET item 返回相同 wrapper，但不含
 `replayed`。`replayed` 表示服务端按相同 idempotency key 返回了已有写入结果。
 
+`canonicalKey` 规范化后（忽略大小写、全半角和空格/`_`/`-`）已被另一条 active 条目
+使用时（Agent 提议还包括另一条 proposed 条目），创建或改 key 返回 409：
+
+```json
+{
+  "error": "memory_duplicate",
+  "message": "An active memory already uses this canonical key: ...",
+  "existing": {
+    "id": "wmi_...",
+    "kind": "fact",
+    "title": "部署流程",
+    "status": "active",
+    "revision": 3
+  }
+}
+```
+
+### 待确认的记忆
+
+群聊成员的轮次和定时任务写入的记忆以 `status: "proposed"` 保存，不参与召回、目录和
+搜索；`GET .../items?status=proposed` 列出它们。owner 的回答：
+
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/confirm`
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/reject`
+
+请求体 `{ expectedRevision, idempotencyKey?, reason?, provenance? }`（`reason` 只用于
+reject），返回 `{ storeRevision, item, replayed }`。confirm 把条目改为 active，
+reject 写入 tombstone；审计事件分别记为 `confirm`、`reject`。带相同
+`idempotencyKey` 重发返回已有结果（`replayed: true`）。owner 用 PATCH 编辑一条提议
+也会把它变为 active；创建和 PATCH 都不接受 `status: "proposed"`（400）。条目已不是
+proposed 时
+返回 409 `not_proposed`，revision 过期返回 409 `revision_conflict`，确认时同一
+canonical key 已有 active 条目返回 409 `memory_duplicate`。
+
 并发编辑使用 compare-and-set。`expectedRevision` 过期时返回：
 
 ```json
@@ -901,6 +1151,13 @@ Web 和 Runtime 不再把它们当作第二个可写真相源。
 - `GET /api/usage/records`
 - `GET /api/usage/export.csv`
 - `GET /api/usage/users`
+- `GET /api/usage/cache`：与 `/stats` 相同的筛选参数，返回提示缓存命中率
+  `{ window, semantics: 'anthropic', summary, daily[], models[], connections[] }`；
+  每行含 `inputTokens`、`cacheCreationTokens`、`cacheReadTokens` 和
+  `hitRate = cacheRead ÷ (input + cacheCreation + cacheRead)`（无提示 Token 时为
+  `null`）。`daily[].date`、`models[].model`、`connections[]` 的 `connectionId`
+  （未记录连接时为 `null`）与 `name`（连接已删除时为 `null`）。按 Anthropic 用量语义
+  计算（input 不含缓存）；网关把缓存计入 input 时命中率偏低
 
 计费用户侧：
 
@@ -982,7 +1239,11 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 - `status_update`
 - `stream_event`
 - `stream_snapshot`，连接建立时推送进行中回合的快照（含推理文本尾部、推理计时、
-  活动工具、子 Agent 状态和轨迹）
+  活动工具、子 Agent 状态、轨迹，以及主动模式 Web 回合已发的进展 `progress`）
+- `active_run_snapshot`，连接建立时推送；`usageLimitWaits[]`
+  （`{ chatJid, agentId?, resumeAt, waitCount }`）列出正在等待用量重置的会话
+- `usage_limit_wait`，`{ chatJid, agentId?, resumeAt, waitCount? }`：会话开始等待
+  用量重置；`resumeAt: null` 表示等待结束
 - `agent_status`
 - `terminal_output`
 - `terminal_started`

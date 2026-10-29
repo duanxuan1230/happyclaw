@@ -561,7 +561,7 @@ describe('TurnStepRecorder', () => {
     expect(recorder.isEmpty).toBe(false);
   });
 
-  test('a narration the host composes is not recorded', () => {
+  test('a narration the host composes is recorded as a commentary step', () => {
     const steps = record(
       [
         [0, ev('thinking_delta', { text: '想' })],
@@ -571,8 +571,50 @@ describe('TurnStepRecorder', () => {
       30,
       { proactive: true },
     );
-    expect(steps.map((s) => s.kind)).toEqual(['thinking', 'tool']);
-    expect(JSON.stringify(steps)).not.toContain('我先读文件');
+    expect(steps.map((s) => [s.kind, s.commentary, s.text])).toEqual([
+      ['thinking', undefined, '想'],
+      ['text', true, '我先读文件。'],
+      ['tool', undefined, undefined],
+    ]);
+  });
+
+  test('does not create a duplicate task step for local_bash, monitor, or mcp_task', () => {
+    const steps = record(
+      [
+        [
+          0,
+          ev('tool_use_start', {
+            toolName: 'Bash',
+            toolUseId: 'bash-bg',
+            toolInputSummary: 'npm run dev',
+          }),
+        ],
+        [
+          10,
+          ev('task_start', {
+            taskId: 'bash-bg',
+            toolUseId: 'bash-bg',
+            taskType: 'local_bash',
+            taskDescription: 'Run dev server',
+          }),
+        ],
+        [
+          20,
+          ev('task_updated', {
+            taskId: 'bash-bg',
+            toolUseId: 'bash-bg',
+            taskPatch: { is_backgrounded: true },
+          }),
+        ],
+      ],
+      30,
+    );
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'Bash',
+      toolUseId: 'bash-bg',
+    });
   });
 });
 
@@ -820,6 +862,60 @@ describe('viewSteps and capStepsThinkingBytes', () => {
     const shown = viewSteps(steps, { includeThinking: true, proactive: true });
     expect(shown.map((s) => s.id)).toEqual(['thinking-0', 'tool-1']);
     expect(shown[0].text).toBe('**读取配置**\n\n先看一下。');
+  });
+
+  test('a proactive Workspace keeps commentary steps at full and strips them at activity', () => {
+    const withCommentary: StreamingStep[] = [
+      ...steps,
+      {
+        id: 'note-1',
+        kind: 'text',
+        at: 4,
+        endedAt: 4,
+        status: 'done',
+        text: '正在拉取最新数据。',
+        commentary: true,
+      },
+    ];
+    const full = viewSteps(withCommentary, {
+      includeThinking: true,
+      proactive: true,
+    });
+    expect(full.map((s) => s.id)).toEqual(['thinking-0', 'tool-1', 'note-1']);
+    expect(full[2]).toMatchObject({
+      kind: 'text',
+      commentary: true,
+      text: '正在拉取最新数据。',
+    });
+
+    const activity = viewSteps(withCommentary, {
+      includeThinking: false,
+      proactive: true,
+    });
+    expect(activity.map((s) => s.id)).toEqual(['thinking-0', 'tool-1']);
+  });
+
+  test('a proactive Workspace keeps memory write receipts on done memory write steps', () => {
+    const memSteps: StreamingStep[] = [
+      {
+        id: 'tool-mem-1',
+        kind: 'tool',
+        at: 1,
+        endedAt: 2,
+        status: 'done',
+        toolUseId: 'mem-1',
+        toolName: 'mcp__happyclaw__workspace_memory_remember',
+        resultPreview:
+          '{"result":"remembered","id":"wmi_1","title":"记住的偏好"}',
+      },
+    ];
+    const shown = viewSteps(memSteps, {
+      includeThinking: false,
+      proactive: true,
+    });
+    expect(shown[0].resultPreview).toBe(
+      '{"result":"remembered","id":"wmi_1","title":"记住的偏好"}',
+    );
   });
 
   test('the thinking text is cut from the oldest step, keeping its title and times', () => {

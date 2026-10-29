@@ -8,12 +8,20 @@ export function isCompactingStatus(status: string | null | undefined): boolean {
   return status === 'compacting' || !!status?.startsWith('正在整理上下文');
 }
 
+const NON_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_bash',
+  'monitor',
+  'mcp_task',
+]);
+
 /** A sub-agent or workflow is at work (it may be in the background). */
 export function hasRunningTask(
   streaming: Pick<StreamingState, 'taskStates'>,
 ): boolean {
   return Object.values(streaming.taskStates).some(
-    (task) => task.status === 'running' || task.status === 'backgrounded',
+    (task) =>
+      (task.status === 'running' || task.status === 'backgrounded') &&
+      (!task.taskType || !NON_AGENT_TASK_TYPES.has(task.taskType)),
   );
 }
 

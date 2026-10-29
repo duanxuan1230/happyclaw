@@ -73,6 +73,13 @@ import {
 } from './session-history.js';
 import { StreamEventProcessor } from './stream-processor.js';
 import {
+  ActiveTurnStopper,
+  consumeInterruptSentinel,
+  consumeStopAfterSteer,
+  discardInterruptSentinel,
+  type InterruptReason,
+} from './turn-interrupt.js';
+import {
   acknowledgeHappyClawOwnerProfileFirstWake,
   activateMcpChannelTurn,
   createMcpTools,
@@ -195,6 +202,7 @@ import {
 } from './background-task-drain.js';
 import { IpcInputClaimStore } from './ipc-input-claims.js';
 import { QueryStartupTiming } from './query-timing.js';
+import { QueryCacheUsage } from './cache-rate.js';
 import { ReplyShapeTracker } from './reply-shape.js';
 import {
   buildSilentStopContinuationPrompt,
@@ -1389,7 +1397,6 @@ function shouldClose(): boolean {
 
 const IPC_INPUT_DRAIN_SENTINEL = path.join(IPC_INPUT_DIR, '_drain');
 
-const IPC_INPUT_INTERRUPT_SENTINEL = path.join(IPC_INPUT_DIR, '_interrupt');
 const INTERRUPT_GRACE_WINDOW_MS = 10_000;
 let lastInterruptRequestedAt = 0;
 let activeInterruptQueryRunId: string | undefined;
@@ -1419,33 +1426,25 @@ function isInterruptRelatedError(err: unknown): boolean {
 }
 
 /**
- * Check for _interrupt sentinel (graceful query interruption).
+ * Check for _interrupt sentinel (graceful query interruption) and say why
+ * the host interrupted; null when there is no current interrupt.
  */
-function shouldInterrupt(): boolean {
-  if (fs.existsSync(IPC_INPUT_INTERRUPT_SENTINEL)) {
-    let sentinelQueryRunId = '';
-    try {
-      sentinelQueryRunId = fs
-        .readFileSync(IPC_INPUT_INTERRUPT_SENTINEL, 'utf8')
-        .trim();
-      fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
-    } catch {
-      /* ignore */
-    }
-    if (
-      sentinelQueryRunId &&
-      activeInterruptQueryRunId &&
-      sentinelQueryRunId !== activeInterruptQueryRunId
-    ) {
-      log(
-        `Ignoring interrupt for stale query ${sentinelQueryRunId} (active ${activeInterruptQueryRunId})`,
-      );
-      return false;
-    }
-    markInterruptRequested();
-    return true;
+function shouldInterrupt(): InterruptReason | null {
+  const interrupt = consumeInterruptSentinel(IPC_INPUT_DIR);
+  if (!interrupt) return null;
+  const sentinelQueryRunId = interrupt.queryRunId;
+  if (
+    sentinelQueryRunId &&
+    activeInterruptQueryRunId &&
+    sentinelQueryRunId !== activeInterruptQueryRunId
+  ) {
+    log(
+      `Ignoring interrupt for stale query ${sentinelQueryRunId} (active ${activeInterruptQueryRunId})`,
+    );
+    return null;
   }
-  return false;
+  markInterruptRequested();
+  return interrupt.reason;
 }
 
 /**
@@ -2163,6 +2162,7 @@ async function runQueryAttempt(
   };
   let firstResponseWatchdog: SdkFirstResponseWatchdog | undefined;
   let queryTiming: QueryStartupTiming | undefined;
+  let queryCache: QueryCacheUsage | undefined;
 
   // 如果有图片被拒绝，立即通知用户
   for (const reason of initialRejected) {
@@ -2373,38 +2373,37 @@ async function runQueryAttempt(
   // 这里主动 query.interrupt() 中止那个卡住的工具调用，让 for-await 自然结束、runner 回到
   // waitForIpcMessage() 保持 warm——不杀整个 runner。interrupt 引发的 SDK 错误由 catch 分支
   // 通过 postResultInterruptRequested 归类为 non-fatal（不退避、不上报为失败）。
+  const activeTurnStopper = new ActiveTurnStopper({
+    activeSubAgentTaskIds: () => processor.getActiveSubAgentTaskIds(),
+    isQueryFinished: () => queryFinished,
+    log,
+  });
   /**
-   * Stop the active SDK turn without re-running input queued behind it.
-   *
-   * On interrupt Claude Code at once starts the next message already written
-   * to it (verified with 2.1.296, even after the input stream ended), while
-   * the runner requeues every later accepted turn for its next query; such a
-   * turn would run twice, once unseen in this superseded process. With later
-   * turns queued in the CLI the process is closed instead, and an interrupt
-   * receipt that still lists queued input closes it as well.
+   * Interrupt the active turn (see ActiveTurnStopper). Only an explicit stop
+   * from the host (`reason` 'stop') closes the query when a sub-agent
+   * outlasts the interrupt.
    */
   const stopActiveTurn = (
     activeQuery: Pick<Query, 'interrupt' | 'close'>,
-    reason: string,
+    label: string,
     turnsQueuedInCli = ipcDeliveryTracker.laterTurnMessages.length,
+    reason?: InterruptReason,
+  ): void =>
+    activeTurnStopper.stop(activeQuery, label, turnsQueuedInCli, reason);
+  // IPC polling stops once a steer interrupts the query, so a stop the user
+  // sends while it winds down is watched for on its own.
+  let stopAfterSteerWatcher: { close: () => void } | undefined;
+  const watchForStopAfterSteer = (
+    activeQuery: Pick<Query, 'interrupt' | 'close'>,
   ): void => {
-    if (turnsQueuedInCli > 0) {
-      log(
-        `${reason}: closing the query, ${turnsQueuedInCli} later input(s) are queued in Claude Code`,
-      );
-      activeQuery.close();
-      return;
-    }
-    activeQuery
-      .interrupt()
-      .then((receipt) => {
-        if (!receipt?.still_queued?.length) return;
-        log(
-          `${reason}: closing the query, the interrupt left ${receipt.still_queued.length} queued input(s)`,
-        );
-        activeQuery.close();
-      })
-      .catch((err: unknown) => log(`${reason} interrupt failed: ${err}`));
+    stopAfterSteerWatcher = createIpcWatcher(() => {
+      if (!consumeStopAfterSteer(IPC_INPUT_DIR, activeInterruptQueryRunId)) {
+        return;
+      }
+      stopAfterSteerWatcher?.close();
+      log('Interrupt sentinel (stop) detected after a steer');
+      activeTurnStopper.requireSubAgentsToEnd(activeQuery, 'Stop after steer');
+    });
   };
 
   const interruptQueryForShutdown = (reason: string) => {
@@ -2450,8 +2449,11 @@ async function runQueryAttempt(
       ipcQueryWatcher.close();
       return;
     }
-    if (shouldInterrupt()) {
-      log('Interrupt sentinel detected, interrupting current query');
+    const interruptReason = shouldInterrupt();
+    if (interruptReason) {
+      log(
+        `Interrupt sentinel detected (${interruptReason}), interrupting current query`,
+      );
       cancelBackgroundResultCompletion();
       clearBackgroundProtocolDebtWatchdog();
       interruptedDuringQuery = true;
@@ -2476,7 +2478,13 @@ async function runQueryAttempt(
       emitResultUsage({}, containerInput.turnId || generateTurnId());
       lastInterruptRequestedAt = Date.now();
       if (queryRef) {
-        stopActiveTurn(queryRef, 'Interrupt sentinel', turnsQueuedInCli);
+        stopActiveTurn(
+          queryRef,
+          'Interrupt sentinel',
+          turnsQueuedInCli,
+          interruptReason,
+        );
+        if (interruptReason === 'steer') watchForStopAfterSteer(queryRef);
       }
       stream.end();
       ipcPolling = false;
@@ -3162,6 +3170,7 @@ async function runQueryAttempt(
       source: sourceKindOverride ?? 'input',
       queryRunId: containerInput.queryRunId,
     });
+    queryCache = new QueryCacheUsage(containerInput.queryRunId);
     const q = query({
       prompt: stream,
       options: sdkCompat.options,
@@ -3205,6 +3214,7 @@ async function runQueryAttempt(
         `Cancelled ${cancelledInputs.length} IPC input message(s) as the superseded turn started`,
       );
       suppressOutputAfterInterrupt = true;
+      // A query that has not started has no sub-agents to wait for.
       stopActiveTurn(q, 'Immediate interrupt call');
       stream.end();
       ipcPolling = false;
@@ -3317,6 +3327,7 @@ async function runQueryAttempt(
       firstResponseWatchdog.observe(message.type);
       const timingLine = queryTiming.observe(message);
       if (timingLine) logInfo(timingLine);
+      queryCache.observe(message);
       if (message.type === 'system') {
         const frame = message as {
           subtype?: string;
@@ -4509,8 +4520,12 @@ async function runQueryAttempt(
     throw err;
   } finally {
     queryFinished = true;
+    activeTurnStopper.dispose();
+    stopAfterSteerWatcher?.close();
     const timingLine = queryTiming?.finish();
     if (timingLine) logInfo(timingLine);
+    const cacheLine = queryCache?.finish();
+    if (cacheLine) logInfo(cacheLine);
     firstResponseWatchdog?.clear();
     clearBackgroundProtocolDebtWatchdog();
     backgroundResultGate.dispose();
@@ -5036,11 +5051,7 @@ async function main(): Promise<void> {
         // host may synchronously publish a new interrupt for the next current
         // turn as soon as it receives the status below; cleaning afterwards
         // would erase that newer, query-valid sentinel.
-        try {
-          fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
-        } catch {
-          /* ignore */
-        }
+        discardInterruptSentinel(IPC_INPUT_DIR);
         // Do not delete _drain here. It is an independent runner-lifecycle
         // request (for example, an incompatible queued replacement), not part
         // of the query-bound interrupt being acknowledged. The subsequent
@@ -5251,11 +5262,7 @@ async function main(): Promise<void> {
           if (autoContResult.interruptedDuringQuery) {
             log('WARN: Auto-continue query was interrupted by user');
             resumeAt = undefined;
-            try {
-              fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
-            } catch {
-              /* ignore */
-            }
+            discardInterruptSentinel(IPC_INPUT_DIR);
             clearInterruptRequested();
             if (autoContResult.pipedMessagesDuringQuery.length > 0) {
               requeueIpcInputMessages(
@@ -5422,11 +5429,7 @@ async function main(): Promise<void> {
         if (contResult.interruptedDuringQuery) {
           log('WARN: Truncation-continue query was interrupted by user');
           resumeAt = undefined;
-          try {
-            fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL);
-          } catch {
-            /* ignore */
-          }
+          discardInterruptSentinel(IPC_INPUT_DIR);
           clearInterruptRequested();
           if (contResult.pipedMessagesDuringQuery.length > 0) {
             requeueIpcInputMessages(

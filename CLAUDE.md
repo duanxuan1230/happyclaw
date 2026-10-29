@@ -31,7 +31,7 @@ Telegram、QQ、钉钉、微信、企业微信、Discord、WhatsApp。
 Agent Profile（身份、四段 Prompt、能力策略）
 └── Workspace（文件目录、执行模式、环境变量、话题群绑定）
     ├── Main Session（可绑定私聊或普通群）
-    ├── Runtime Session（独立 Claude 上下文，可绑定私聊或普通群）
+    ├── Runtime Session（独立 Claude 上下文，可绑定私聊或普通群；Host 工作区可选独立 git worktree）
     ├── Native Context Session（飞书话题等原生线程）
     └── Scheduled Run（group 或 isolated）
 ```
@@ -44,6 +44,11 @@ Agent Profile（身份、四段 Prompt、能力策略）
   不是产品级 Agent Profile。
 - 同一个 Workspace 内的会话共享工作区文件目录，但拥有独立 Claude Session；
   工作区文件隔离与对话上下文隔离是两件事。
+- 例外是独立 worktree 的 Runtime Session：Host 工作区的工作目录是 git 仓库时，新建会话
+  可选它，宿主在 `data/worktrees/{folder}/{sessionId}` 建分支 `happyclaw/<短 id>`，该会话
+  每轮以它为 cwd，文件面板、项目 Skills 和 Review 面板也以它为根。worktree 缺失或损坏时
+  运行失败，不回退到主仓库；删除会话时移除 worktree、保留分支，有未提交改动或已初始化的
+  子模块时须确认。同一目录上同时有别的会话在跑时，对话页提示但不阻塞。
 
 ## 3. 主要模块
 
@@ -62,6 +67,10 @@ Agent Profile（身份、四段 Prompt、能力策略）
 | `src/im-manager.ts`                | 多用户、多账号渠道连接池                               |
 | `src/agent-capability-preview.ts`  | Agent 最终上下文和能力预览                             |
 | `src/claude-context-resolver.ts`   | Claude 上下文、Skills 与来源解析                       |
+| `src/session-worktree.ts`          | 会话 worktree、工作区项目根与清理                      |
+| `src/git-review.ts`                | Review 面板的只读 git 状态与单文件 diff                |
+| `src/usage-limit-wait.ts`          | 撞用量上限后的等待与自动继续                           |
+| `src/memory-service.ts`            | Workspace Memory 召回、目录、提议与审计                |
 
 渠道实现位于：
 
@@ -160,7 +169,27 @@ Web UI 约定：
 - 显式“发送”或 `steer` 是优先屏障：它中断当前 loop，与它之前已排队的普通消息按可见
   顺序一起进入下一轮；之后才到达的普通消息不会被吞并，留到再下一轮合批。
 - 普通消息与定时任务使用明确的队列状态；失败采用有界指数退避。
-- `CONTAINER_TIMEOUT` 控制单次运行上限，`IDLE_TIMEOUT` 控制暖 Runner 的空闲保留时间。
+- 中断分两类。显式停止（`/break`、Web 与飞书卡片的停止按钮、飞书撤回）在 `_interrupt`
+  之外再写 `_interrupt_reason`（`{"queryId","reason":"stop"}`，两个文件都以临时文件加
+  rename 写入）；`/steer`、「发送」、没有原因的旧信号，以及撞额度、换模型、模型上限、子代理
+  provider 错误、关停等内部中断只调用 `interrupt()`。CLI 的 `interrupt()` 本身就会停掉运行
+  中的子 Agent；Runner 从不调用 `stopTask`，因为它会把停止通知排成新的隐藏计费轮次，并一直
+  等后台 shell 退出。显式停止后（包括先 steer 再停止）3 秒仍有主 Agent 直接启动的子 Agent
+  （任务类型 `local_agent`、`remote_agent`、`in_process_teammate`、`local_workflow`）未结清时
+  `close()` 兜底；shell、监视器、MCP 任务、未知类型和嵌套子 Agent 不计入。CLI 里已排队后续
+  输入时立即 `close()`。
+- `CONTAINER_TIMEOUT` 是 Runner 的无输出看门狗：每次有输出都重新计时，超过它（再加 15 秒
+  关闭宽限）仍没有任何输出才判定超时，不是单次运行的总时长上限；`IDLE_TIMEOUT` 控制暖
+  Runner 的空闲保留时间。
+- Container 名额只按执行中的 Runner 计：已达 `maxConcurrentContainers` 且有会话在等时，
+  回收空闲最久、没有在途 IPC、后台任务、待续写和排队输入的暖容器。Host Runner 不受影响。
+- 可用连接都撞了用量上限且上游给出重置时刻时，输入连同该会话已排队的输入放回 durable
+  队列，在重置后 60 秒加 0–30 秒抖动自动继续（WS `usage_limit_wait`）；同一输入最多连续
+  等待 3 次、单次不超过 7 天，超出按原逻辑失败。智能体绑定的连接只看这一个连接，自动池取
+  全池最早的重置时刻。新消息或「立即发送」结束等待并合批；`/break`、取消、`/clear`、
+  `/fresh`、删除取消等待。定时任务进入 `retry_wait`，不消耗尝试次数。等待期间不占
+  Runner 或容器名额。
+- 定时任务连续因同一错误失败时只通知一次，恢复成功后通知一次「已恢复」。
 - Script 任务与其他任务共用 `CONTAINER_TIMEOUT`，不设置独立并发池或超时配置。
 - 服务重启时，错过的周期任务记为 `missed` 并推进计划；一次性任务仍会补跑。
 - 后台子代理未结清时 Runner 扣住本轮结果，游标不前进，重启后整轮重跑。子代理（Task）
@@ -232,8 +261,16 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   文件版本，旧版本读到会忽略、凭据不受影响。新建连接只有在没有其他启用的连接时才默认
   加入自动池。测试连接和获取模型列表只有在上游确实接受了凭据时才记录认证头方式。
 - 宿主机 Skills 由 `runtime_policy.skills.host` 独立选择，不能通过
-  `host_claude` 开关隐式获得。
-- 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。
+  `host_claude` 开关隐式获得；每个智能体都存显式值，新建、复制、导入一律写显式值。
+- 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。项目根按 CLI
+  的规则从工作目录向上找到 git 根（Host 自定义目录与会话 worktree 同样适用），运行时、
+  能力预览和工作区设置共用这个根；Host 自定义目录的 `.mcp.json` 因此会被加载。
+- Skill、MCP、Plugin 变更会停相关 Runner 并开新 SDK 会话，下一轮自动补注近期历史；
+  运行中的 Agent 自己调用 `install_skill` 时，本轮结果送达后才重置。安装、卸载 Skill
+  只接受工作区主人亲自发起的轮次。
+- Workspace Memory 只有整批输入都来自工作区主人的互动轮次才直接写入；群成员轮次与定时
+  任务的写入存为 `proposed`，在记忆页确认后才参与召回。每轮按用户本人正文的词项召回
+  相关条目（`workspace_memory_recall_fts`），全部条目的标题目录随每轮笔记增量注入。
 - 禁用、删除或缺失的精确选择能力必须让配置失败，不得静默替换。
 - Prompt 或能力身份变化后必须失效旧的暖 Runner。
 
@@ -274,6 +311,14 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   不合并成只有单一回复目标的批次。
 - 文件和图片投递必须使用当前 Turn 的 `ChannelTurnContext`，不能从“最近一条群消息”
   猜测目标。
+- 主动模式下 Agent 用 `send_message(delivery_role=progress)` 发的进展，按这一轮输入自己的
+  来源渠道路由：IM 来源作为独立消息发出（IM 无法折叠），没有可用路由时以
+  `native_route_unavailable` 拒绝，绝不转进 Web；Web 来源进入过程视图，在
+  `process_visibility` 的所有级别都显示（运行快照 `stream_snapshot.progress` 让新标签页和
+  重连也能看到），最终回复送达后随过程折叠，并随回合存进 turn_traces（`hidden` 级别只存
+  进展）。发过进展的 Web 轮次被停止、出错或因缺少 final 而终止时，宿主写一条收尾片段
+  （`interrupt_partial`）承载这些进展。没有 inputTurnId 的进展与 main 一致直接作为消息
+  发出。工具调用前的旁白仍只在 `full` 显示。
 
 ### 6.3 飞书会话语义
 
@@ -404,6 +449,7 @@ data/
 ├── db/messages.db
 ├── config/
 ├── groups/{folder}/
+├── worktrees/{folder}/{sessionId}/
 ├── sessions/{folder}/.claude/
 ├── sessions/{folder}/agents/{sessionId}/.claude/
 ├── ipc/{folder}/
@@ -426,19 +472,24 @@ data/
 
 - 用户与认证：`users`、`user_sessions`、`invite_codes`、`auth_audit_log`
 - 工作区与会话：`registered_groups`、`sessions`、`workspaces`、
-  `workspace_runtime_sessions`、`session_model_selections`
-- Agent：`agent_profiles`、`agent_profile_prompt_versions`、
-  `agent_builder_drafts`、`workspace_agent_profiles`、`agents`
+  `workspace_runtime_sessions`、`session_model_selections`、`session_worktrees`、
+  `session_history_reinjections`
+- Agent：`agent_profiles`、`agent_builder_drafts`、`workspace_agent_profiles`、
+  `agents`
 - 渠道：`channel_accounts`、`channel_mounts`、`agent_channel_mounts`、
   `im_context_bindings`
 - 消息与调度：`chats`、`messages`、`scheduled_tasks`、`task_runs`、
   `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、执行
-  轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）
-- 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary` 及
-  `billing_*`、订阅、余额和兑换码相关表
+  轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）、
+  `usage_limit_waits`、`task_failure_notices`
+- 记忆：`workspace_memory_*`（含召回索引 `workspace_memory_recall_fts`）
+- 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary`、
+  `usage_event_connections` 及 `billing_*`、订阅、余额和兑换码相关表
 
 Channel Reliability 的 Inbox/Turn/Outbox/Card 表由
-`src/channel-reliability-store.ts` 在同一数据库连接上创建。
+`src/channel-reliability-store.ts` 在同一数据库连接上创建；同样，`session_worktrees` 由
+`src/session-worktree-store.ts`，等待、补注、失败通知和用量连接表由
+`src/runtime-state-store.ts` 创建。
 
 ## 8. 认证与权限
 
@@ -467,7 +518,7 @@ Web 持久设置 > 环境变量 > 代码默认值
 | `WEB_PORT`                           | `3000`                            | HTTP、WebSocket 端口               |
 | `WEB_SESSION_SECRET`                 | 自动生成并持久化                  | Cookie 签名                        |
 | `CONTAINER_IMAGE`                    | `riba2534/happyclaw-agent:latest` | GitHub Actions 发布的 Runner 镜像  |
-| `CONTAINER_TIMEOUT`                  | `1800000`                         | 默认运行超时                       |
+| `CONTAINER_TIMEOUT`                  | `1800000`                         | Runner 无输出看门狗                |
 | `IDLE_TIMEOUT`                       | `1800000`                         | 暖 Runner 空闲时间                 |
 | `STUCK_RUNNER_FORCE_RESTART_MINUTES` | `10`                              | IPC 债务强制恢复上限（4–120 分钟） |
 | `MAX_CONCURRENT_CONTAINERS`          | `20`                              | Docker 并发                        |

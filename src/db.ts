@@ -14,7 +14,6 @@ import {
   AgentBuilderDraft,
   AgentProfilePromptMode,
   AgentProfilePrompts,
-  AgentProfilePromptVersion,
   AgentProfileRuntimePolicy,
   AgentKind,
   AgentStatus,
@@ -82,6 +81,14 @@ import {
   normalizeAgentProfilePrompts,
   promptModeFromLegacyPreset,
 } from './agent-profile-prompts.js';
+import {
+  bindHappyClawPlatformIdentityHash,
+  canOwnerUseHostResources,
+  legacyHostSkillPolicy,
+  resolveEffectiveAgentRuntimePolicy,
+  type AgentProfileHostAccess,
+  type MainAgentContextSettings,
+} from './agent-profile-identity.js';
 import { assertDatabaseMaintenanceAccess } from './database-maintenance.js';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
 import type {
@@ -106,6 +113,17 @@ import {
   HAPPYCLAW_OWNER_INTRODUCTION_FLOW_KEY,
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
+import { initSessionWorktreeStore } from './session-worktree-store.js';
+import { keyPrefixRange } from './sql-key-prefix.js';
+import {
+  clearAgentSessionHistoryReinjections,
+  clearFolderRuntimeState,
+  clearSessionHistoryReinjection,
+  clearTaskFailure,
+  clearTaskFailureNotices,
+  clearUsageLimitWait,
+  initRuntimeStateStore,
+} from './runtime-state-store.js';
 import { splitLegacyEmbeddedReferenceContent } from './message-prompt.js';
 
 let db: InstanceType<typeof Database>;
@@ -1060,6 +1078,8 @@ export function initDatabase(
     );
   `);
 
+  initSessionWorktreeStore(db);
+
   // v65 -> v66: HappyClaw Owner Profile remains a reserved Workspace Memory
   // item; this table tracks only its one-shot onboarding lifecycle. Duplicate
   // legacy items must be reconciled before the reserved-key unique index is
@@ -1216,25 +1236,6 @@ export function initDatabase(
       WHERE is_default = 1 AND status = 'active';
     CREATE INDEX IF NOT EXISTS idx_agent_profiles_owner
       ON agent_profiles(owner_user_id, status);
-
-    CREATE TABLE IF NOT EXISTS agent_profile_prompt_versions (
-      id TEXT PRIMARY KEY,
-      agent_profile_id TEXT NOT NULL,
-      version INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      identity_prompt TEXT NOT NULL DEFAULT '',
-      soul_prompt TEXT NOT NULL DEFAULT '',
-      agents_prompt TEXT NOT NULL DEFAULT '',
-      tools_prompt TEXT NOT NULL DEFAULT '',
-      prompt_mode TEXT NOT NULL DEFAULT 'append',
-      identity_hash TEXT NOT NULL,
-      change_source TEXT NOT NULL DEFAULT 'update',
-      restored_from_version INTEGER,
-      created_at TEXT NOT NULL,
-      UNIQUE(agent_profile_id, version)
-    );
-    CREATE INDEX IF NOT EXISTS idx_agent_profile_prompt_versions_profile
-      ON agent_profile_prompt_versions(agent_profile_id, version DESC);
 
     CREATE TABLE IF NOT EXISTS agent_builder_drafts (
       id TEXT PRIMARY KEY,
@@ -2325,26 +2326,6 @@ export function initDatabase(
     'confirmation_phrase',
     "TEXT NOT NULL DEFAULT ''",
   );
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS agent_profile_prompt_versions (
-      id TEXT PRIMARY KEY,
-      agent_profile_id TEXT NOT NULL,
-      version INTEGER NOT NULL,
-      name TEXT NOT NULL,
-      identity_prompt TEXT NOT NULL DEFAULT '',
-      soul_prompt TEXT NOT NULL DEFAULT '',
-      agents_prompt TEXT NOT NULL DEFAULT '',
-      tools_prompt TEXT NOT NULL DEFAULT '',
-      prompt_mode TEXT NOT NULL DEFAULT 'append',
-      identity_hash TEXT NOT NULL,
-      change_source TEXT NOT NULL DEFAULT 'update',
-      restored_from_version INTEGER,
-      created_at TEXT NOT NULL,
-      UNIQUE(agent_profile_id, version)
-    );
-    CREATE INDEX IF NOT EXISTS idx_agent_profile_prompt_versions_profile
-      ON agent_profile_prompt_versions(agent_profile_id, version DESC);
-  `);
   if (promptSchemaVersion < 48) {
     const legacyRows = prepareCached(
       'SELECT * FROM agent_profiles',
@@ -2381,17 +2362,6 @@ export function initDatabase(
           identityHash,
           String(row.id),
         );
-        insertAgentProfilePromptVersionSnapshot({
-          profileId: String(row.id),
-          version: Number(row.version ?? 1),
-          name: String(row.name ?? ''),
-          prompts,
-          identityHash,
-          changeSource: 'migration',
-          createdAt: String(
-            row.updated_at ?? row.created_at ?? new Date().toISOString(),
-          ),
-        });
       }
     })();
   }
@@ -2704,6 +2674,7 @@ export function initDatabase(
   // schema and fenced APIs; db.ts only binds it to this process connection.
   createChannelReliabilitySchema(db);
   bindChannelReliabilityDatabase(db);
+  initRuntimeStateStore(db);
 
   // v63 -> v64: early Feishu reply enrichment embedded quoted ancestors in
   // messages.content, leaking prompt scaffolding into Web history and then
@@ -2850,6 +2821,12 @@ export function initDatabase(
   } else {
     dropStrayRouterCursorBlobs();
   }
+
+  // v83 -> v84: Agents no longer keep a prompt history. The pre-migration
+  // backup still holds the old snapshots.
+  db.exec('DROP TABLE IF EXISTS agent_profile_prompt_versions');
+  // v83 -> v84: host Skills become an explicit per-Agent grant.
+  pinAgentProfileHostSkillPolicies();
 
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
@@ -4562,7 +4539,7 @@ export interface UsageQueryFilters {
   source?: string;
 }
 
-function buildUsageWhere(filters: UsageQueryFilters): {
+export function buildUsageWhere(filters: UsageQueryFilters): {
   sql: string;
   params: unknown[];
 } {
@@ -5544,6 +5521,10 @@ export function permanentlyDeleteTasksWithRevisions(
         currentTasks.push(current);
       }
 
+      const deleteRunWaits = prepareCached(
+        `DELETE FROM usage_limit_waits
+         WHERE scope_key IN (SELECT 'task-run:' || id FROM task_runs WHERE task_id = ?)`,
+      );
       const deleteRunLogs = prepareCached(
         'DELETE FROM task_run_logs WHERE task_id = ?',
       );
@@ -5553,6 +5534,7 @@ export function permanentlyDeleteTasksWithRevisions(
       const deleteDefinition = prepareCached(`DELETE FROM scheduled_tasks
          WHERE id = ? AND revision = ? AND deleted_at IS NOT NULL`);
       for (const task of currentTasks) {
+        deleteRunWaits.run(task.id);
         deleteRunLogs.run(task.id);
         deleteRuns.run(task.id);
         const result = deleteDefinition.run(task.id, task.revision);
@@ -5562,6 +5544,7 @@ export function permanentlyDeleteTasksWithRevisions(
           );
         }
       }
+      clearTaskFailureNotices(currentTasks.map((task) => task.id));
 
       return {
         status: 'deleted',
@@ -5583,6 +5566,11 @@ export function updateTaskWorkspace(
 
 export function deleteTask(id: string): void {
   // Delete child records first (FK constraint)
+  prepareCached(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (SELECT 'task-run:' || id FROM task_runs WHERE task_id = ?)`,
+  ).run(id);
+  clearTaskFailure(id);
   prepareCached('DELETE FROM task_runs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
@@ -8371,6 +8359,11 @@ export function updateTaskRunLog(
   );
 }
 
+/** Drop one run log, e.g. a run that paused instead of ending. */
+export function deleteTaskRunLog(id: number): void {
+  prepareCached('DELETE FROM task_run_logs WHERE id = ?').run(id);
+}
+
 export function cleanupStaleRunningLogs(): number {
   const result = prepareCached(`
     UPDATE task_run_logs SET status = 'error', error = 'Process crashed before completion'
@@ -8385,6 +8378,14 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
   ).toISOString();
   const result = prepareCached(
     `DELETE FROM task_run_logs WHERE run_at < ?`,
+  ).run(cutoff);
+  prepareCached(
+    `DELETE FROM usage_limit_waits
+     WHERE scope_key IN (
+       SELECT 'task-run:' || id FROM task_runs
+       WHERE completed_at IS NOT NULL AND completed_at < ?
+         AND status IN ('success','failed','cancelled','missed')
+     )`,
   ).run(cutoff);
   const durable = prepareCached(`DELETE FROM task_runs
        WHERE completed_at IS NOT NULL AND completed_at < ?
@@ -8443,8 +8444,8 @@ export function getRouterStateByPrefix(
   prefix: string,
 ): Array<{ key: string; value: string }> {
   return prepareCached(
-    'SELECT key, value FROM router_state WHERE key LIKE ?',
-  ).all(`${prefix}%`) as Array<{ key: string; value: string }>;
+    'SELECT key, value FROM router_state WHERE key >= @from AND key < @to',
+  ).all(keyPrefixRange(prefix)) as Array<{ key: string; value: string }>;
 }
 
 // --- Session accessors ---
@@ -8654,6 +8655,9 @@ export function setSession(
         groupFolder,
         effectiveAgentId,
       );
+    }
+    if (sessionId) {
+      clearSessionHistoryReinjection(groupFolder, effectiveAgentId);
     }
     syncWorkspaceRuntimeSessionProjection(groupFolder, effectiveAgentId);
   })();
@@ -8993,6 +8997,33 @@ export function listTurnIdsWithTrace(
   return found;
 }
 
+/**
+ * Which of these turns have a stored trace holding a progress statement (the
+ * flag for message lists at the `hidden` level). Steps are stored as JSON, in
+ * which a quote inside a string value is escaped, so the pattern matches the
+ * `progress` key of a step and nothing a step says.
+ */
+export function listTurnIdsWithProgress(
+  chatJid: string,
+  turnIds: readonly string[],
+): Set<string> {
+  const found = new Set<string>();
+  if (!isDatabaseInitialized() || turnIds.length === 0) return found;
+  const CHUNK = 400;
+  for (let offset = 0; offset < turnIds.length; offset += CHUNK) {
+    const chunk = turnIds.slice(offset, offset + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT turn_id FROM turn_traces
+         WHERE chat_jid = ? AND turn_id IN (${chunk.map(() => '?').join(',')})
+           AND steps_json LIKE '%"progress":true%'`,
+      )
+      .all(chatJid, ...chunk) as Array<{ turn_id: string }>;
+    for (const row of rows) found.add(row.turn_id);
+  }
+  return found;
+}
+
 export function deleteTurnTracesForChat(chatJid: string): number {
   if (!isDatabaseInitialized()) return 0;
   return prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
@@ -9037,14 +9068,12 @@ export function deleteTurnTraceIfOrphan(
 /** The chat and every Runtime Session chat (`{chat}#agent:{id}`) under it. */
 export function deleteTurnTracesForChatTree(chatJid: string): number {
   if (!isDatabaseInitialized()) return 0;
-  const sessionPrefix = `${chatJid}#agent:`;
   return (
     prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid)
       .changes +
-    // substr, not LIKE: a JID may contain the wildcard characters % and _.
     prepareCached(
-      'DELETE FROM turn_traces WHERE substr(chat_jid, 1, ?) = ?',
-    ).run([...sessionPrefix].length, sessionPrefix).changes
+      'DELETE FROM turn_traces WHERE chat_jid >= @from AND chat_jid < @to',
+    ).run(keyPrefixRange(`${chatJid}#agent:`)).changes
   );
 }
 
@@ -9095,9 +9124,9 @@ export function deleteAllSessionsForFolder(groupFolder: string): void {
     prepareCached(
       'DELETE FROM workspace_runtime_sessions WHERE group_folder = ?',
     ).run(groupFolder);
-    prepareCached('DELETE FROM router_state WHERE key LIKE ?').run(
-      `channel_session_owner:${groupFolder}:%`,
-    );
+    prepareCached(
+      'DELETE FROM router_state WHERE key >= @from AND key < @to',
+    ).run(keyPrefixRange(`channel_session_owner:${groupFolder}:`));
   })();
 }
 
@@ -9548,90 +9577,155 @@ export function computeAgentProfileIdentityHash(
     .digest('hex');
 }
 
-function mapAgentProfilePromptVersionRow(
-  row: Record<string, unknown>,
-): AgentProfilePromptVersion {
-  return {
-    id: String(row.id),
-    agent_profile_id: String(row.agent_profile_id),
-    version: Number(row.version),
-    name: String(row.name),
-    identity_prompt: String(row.identity_prompt ?? ''),
-    soul_prompt: String(row.soul_prompt ?? ''),
-    agents_prompt: String(row.agents_prompt ?? ''),
-    tools_prompt: String(row.tools_prompt ?? ''),
-    prompt_mode: row.prompt_mode === 'replace' ? 'replace' : 'append',
-    identity_hash: String(row.identity_hash),
-    change_source:
-      row.change_source === 'create' ||
-      row.change_source === 'restore' ||
-      row.change_source === 'migration'
-        ? row.change_source
-        : 'update',
-    restored_from_version:
-      row.restored_from_version == null
-        ? null
-        : Number(row.restored_from_version),
-    created_at: String(row.created_at),
-  };
-}
-
-function insertAgentProfilePromptVersionSnapshot(input: {
-  profileId: string;
-  version: number;
-  name: string;
-  prompts: AgentProfilePrompts;
-  identityHash: string;
-  changeSource: AgentProfilePromptVersion['change_source'];
-  restoredFromVersion?: number | null;
-  createdAt?: string;
-}): void {
-  prepareCached(`INSERT OR IGNORE INTO agent_profile_prompt_versions (
-      id, agent_profile_id, version, name,
-      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-      identity_hash, change_source, restored_from_version, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    crypto.randomUUID(),
-    input.profileId,
-    input.version,
-    input.name,
-    input.prompts.identity_prompt,
-    input.prompts.soul_prompt,
-    input.prompts.agents_prompt,
-    input.prompts.tools_prompt,
-    input.prompts.prompt_mode,
-    input.identityHash,
-    input.changeSource,
-    input.restoredFromVersion ?? null,
-    input.createdAt ?? new Date().toISOString(),
+/** The identity a run of `profile` carries under its effective policy. */
+export function computeEffectiveAgentProfileIdentityHash(
+  profile: AgentProfilePrompts & Pick<AgentProfile, 'is_default' | 'name'>,
+  effectiveRuntimePolicy: AgentProfileRuntimePolicy,
+): string {
+  const identityHash = computeAgentProfileIdentityHash(
+    profile,
+    effectiveRuntimePolicy,
+    profile.name,
   );
+  return profile.is_default
+    ? bindHappyClawPlatformIdentityHash(identityHash)
+    : identityHash;
 }
 
-export function listAgentProfilePromptVersions(
-  profileId: string,
-  ownerUserId: string,
-): AgentProfilePromptVersion[] {
-  const profile = getAgentProfileForUser(profileId, ownerUserId);
-  if (!profile) return [];
-  const rows = prepareCached(`SELECT * FROM agent_profile_prompt_versions
-       WHERE agent_profile_id = ? ORDER BY version DESC`).all(
-    profileId,
-  ) as Array<Record<string, unknown>>;
-  return rows.map(mapAgentProfilePromptVersionRow);
+let readMainAgentContextSettings: (() => MainAgentContextSettings) | undefined;
+
+/**
+ * The main HappyClaw's context comes from system settings. runtime-config
+ * reads DATA_DIR as it loads, so db.ts does not import it; the module that
+ * resolves Agent runtime policy registers the reader when it loads, before
+ * the server calls initDatabase.
+ */
+export function registerMainAgentContextSettingsReader(
+  reader: () => MainAgentContextSettings,
+): void {
+  readMainAgentContextSettings = reader;
 }
 
-export function getAgentProfilePromptVersion(
-  profileId: string,
-  ownerUserId: string,
-  version: number,
-): AgentProfilePromptVersion | undefined {
-  const profile = getAgentProfileForUser(profileId, ownerUserId);
-  if (!profile) return undefined;
-  const row = prepareCached(`SELECT * FROM agent_profile_prompt_versions
-       WHERE agent_profile_id = ? AND version = ?`).get(profileId, version) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? mapAgentProfilePromptVersionRow(row) : undefined;
+function knownAgentProfileHostAccess(
+  profile: Pick<AgentProfile, 'owner_user_id' | 'is_default'>,
+): AgentProfileHostAccess | undefined {
+  const canUseHostResources = canOwnerUseHostResources(
+    getUserById(profile.owner_user_id),
+  );
+  if (!profile.is_default) return { canUseHostResources };
+  const mainAgent = readMainAgentContextSettings?.();
+  return mainAgent ? { canUseHostResources, mainAgent } : undefined;
+}
+
+/** What the owner's role and the system settings allow `profile` to run with. */
+export function resolveAgentProfileHostAccess(
+  profile: Pick<AgentProfile, 'owner_user_id' | 'is_default'>,
+): AgentProfileHostAccess {
+  const access = knownAgentProfileHostAccess(profile);
+  if (!access) {
+    throw new Error('Main HappyClaw context settings reader is not registered');
+  }
+  return access;
+}
+
+/**
+ * The host Skill policy a profile saved without one has been running with,
+ * or undefined while the main HappyClaw's settings cannot be read (a
+ * maintenance tool); the next server start pins it then.
+ */
+function effectiveLegacyHostSkillPolicy(
+  profile: Pick<
+    AgentProfile,
+    'owner_user_id' | 'is_default' | 'runtime_policy'
+  >,
+): NonNullable<AgentProfileRuntimePolicy['skills']['host']> | undefined {
+  const access = knownAgentProfileHostAccess(profile);
+  return access
+    ? legacyHostSkillPolicy(
+        resolveEffectiveAgentRuntimePolicy(profile, access).context.source,
+      )
+    : undefined;
+}
+
+/**
+ * Pin `skills.host` on every active profile saved without one. The runner
+ * resolved a missing value from the effective context source (the main
+ * HappyClaw's comes from system settings) while the Web form read the
+ * persisted one, so saving only the main HappyClaw's model silently turned
+ * its host Skills off. The pinned value is what the runner resolved, so runs
+ * behave as before; SDK sessions recorded under the old identity hash move to
+ * the new one and the revision stays, so no conversation restarts.
+ */
+export function pinAgentProfileHostSkillPolicies(): number {
+  // Runs on every start; once pinned, the scan decodes nothing. Malformed
+  // JSON is decoded like the runner decodes it (to the default policy).
+  const pending = (
+    prepareCached(`SELECT * FROM agent_profiles
+       WHERE status = 'active'
+         AND CASE WHEN json_valid(runtime_policy)
+           THEN json_extract(runtime_policy, '$.skills.host') IS NULL
+           ELSE 1 END`).all() as Array<Record<string, unknown>>
+  )
+    .map(mapAgentProfileRow)
+    .filter((profile) => !profile.runtime_policy.skills.host);
+  if (pending.length === 0) return 0;
+
+  const updateProfile = prepareCached(
+    'UPDATE agent_profiles SET runtime_policy = ?, identity_hash = ? WHERE id = ?',
+  );
+  const carrySessions = prepareCached(
+    'UPDATE sessions SET identity_hash = ? WHERE agent_profile_id = ? AND identity_hash = ?',
+  );
+  const carryRuntimeSessions = prepareCached(
+    'UPDATE workspace_runtime_sessions SET identity_hash = ? WHERE agent_profile_id = ? AND identity_hash = ?',
+  );
+  let pinnedCount = 0;
+  let carried = 0;
+  db.transaction(() => {
+    for (const profile of pending) {
+      const access = knownAgentProfileHostAccess(profile);
+      if (!access) continue;
+      pinnedCount += 1;
+      const effective = resolveEffectiveAgentRuntimePolicy(profile, access);
+      const runtimePolicy = {
+        ...profile.runtime_policy,
+        skills: {
+          ...profile.runtime_policy.skills,
+          host: legacyHostSkillPolicy(effective.context.source),
+        },
+      };
+      const pinned = { ...profile, runtime_policy: runtimePolicy };
+      updateProfile.run(
+        serializeAgentProfileRuntimePolicy(runtimePolicy),
+        computeAgentProfileIdentityHash(pinned, runtimePolicy, pinned.name),
+        profile.id,
+      );
+      const before = computeEffectiveAgentProfileIdentityHash(
+        profile,
+        effective,
+      );
+      const after = computeEffectiveAgentProfileIdentityHash(
+        pinned,
+        resolveEffectiveAgentRuntimePolicy(pinned, access),
+      );
+      if (before === after) continue;
+      carried += carrySessions.run(after, profile.id, before).changes;
+      carryRuntimeSessions.run(after, profile.id, before);
+    }
+  })();
+  if (pinnedCount < pending.length) {
+    logger.warn(
+      { deferred: pending.length - pinnedCount },
+      'Main HappyClaw settings unavailable; host Skill policies are pinned at the next server start',
+    );
+  }
+  if (pinnedCount > 0) {
+    logger.info(
+      { profiles: pinnedCount, sessions: carried },
+      'Pinned explicit host Skill policies on Agent profiles',
+    );
+  }
+  return pinnedCount;
 }
 
 function mapAgentProfileRow(row: Record<string, unknown>): AgentProfile {
@@ -9943,43 +10037,38 @@ export function getOrCreateDefaultAgentProfile(userId: string): AgentProfile {
   const name = DEFAULT_AGENT_PROFILE_NAME;
   const prompts = normalizeAgentProfilePrompts();
   const runtimePolicy = normalizeAgentProfileRuntimePolicy();
+  const hostSkills = effectiveLegacyHostSkillPolicy({
+    owner_user_id: userId,
+    is_default: true,
+    runtime_policy: runtimePolicy,
+  });
+  if (hostSkills) runtimePolicy.skills.host = hostSkills;
   const identityHash = computeAgentProfileIdentityHash(
     prompts,
     runtimePolicy,
     name,
   );
   const runtimePolicyJson = serializeAgentProfileRuntimePolicy(runtimePolicy);
-  db.transaction(() => {
-    prepareCached(`INSERT INTO agent_profiles (
-        id, owner_user_id, name,
-        identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-        include_claude_preset, runtime_policy, identity_hash, version,
-        is_default, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'active', ?, ?)`).run(
-      id,
-      userId,
-      name,
-      prompts.identity_prompt,
-      prompts.soul_prompt,
-      prompts.agents_prompt,
-      prompts.tools_prompt,
-      prompts.prompt_mode,
-      includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
-      runtimePolicyJson,
-      identityHash,
-      now,
-      now,
-    );
-    insertAgentProfilePromptVersionSnapshot({
-      profileId: id,
-      version: 1,
-      name,
-      prompts,
-      identityHash,
-      changeSource: 'create',
-      createdAt: now,
-    });
-  })();
+  prepareCached(`INSERT INTO agent_profiles (
+      id, owner_user_id, name,
+      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
+      include_claude_preset, runtime_policy, identity_hash, version,
+      is_default, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'active', ?, ?)`).run(
+    id,
+    userId,
+    name,
+    prompts.identity_prompt,
+    prompts.soul_prompt,
+    prompts.agents_prompt,
+    prompts.tools_prompt,
+    prompts.prompt_mode,
+    includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
+    runtimePolicyJson,
+    identityHash,
+    now,
+    now,
+  );
   return getAgentProfile(id)!;
 }
 
@@ -10005,6 +10094,7 @@ export function createAgentProfile(input: {
   includeClaudePreset?: boolean;
   avatarEmoji?: string | null;
   avatarColor?: string | null;
+  avatarUrl?: string | null;
   modelConfigId?: string | null;
   /** A model of `modelConfigId`'s list; ignored without a configuration. */
   model?: string | null;
@@ -10021,48 +10111,41 @@ export function createAgentProfile(input: {
       input.promptMode ??
       promptModeFromLegacyPreset(input.includeClaudePreset ?? true),
   });
+  assertAgentProfileNameAvailable(input.ownerUserId, input.name);
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(input.runtimePolicy);
+  // Host Skills are an explicit grant; nothing inherits them by omission.
+  runtimePolicy.skills.host ??= { mode: 'disabled', ids: [] };
   const runtimePolicyJson = serializeAgentProfileRuntimePolicy(runtimePolicy);
   const identityHash = computeAgentProfileIdentityHash(
     prompts,
     runtimePolicy,
     input.name,
   );
-  db.transaction(() => {
-    prepareCached(`INSERT INTO agent_profiles (
-        id, owner_user_id, name,
-        identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-        include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
-        is_default, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
-      id,
-      input.ownerUserId,
-      input.name,
-      prompts.identity_prompt,
-      prompts.soul_prompt,
-      prompts.agents_prompt,
-      prompts.tools_prompt,
-      prompts.prompt_mode,
-      includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
-      input.avatarEmoji ?? null,
-      input.avatarColor ?? null,
-      input.modelConfigId ?? null,
-      (input.modelConfigId && input.model) || null,
-      runtimePolicyJson,
-      identityHash,
-      now,
-      now,
-    );
-    insertAgentProfilePromptVersionSnapshot({
-      profileId: id,
-      version: 1,
-      name: input.name,
-      prompts,
-      identityHash,
-      changeSource: 'create',
-      createdAt: now,
-    });
-  })();
+  prepareCached(`INSERT INTO agent_profiles (
+      id, owner_user_id, name,
+      identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
+      include_claude_preset, avatar_emoji, avatar_color, avatar_url, model_config_id, model, runtime_policy, identity_hash, version,
+      is_default, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
+    id,
+    input.ownerUserId,
+    input.name,
+    prompts.identity_prompt,
+    prompts.soul_prompt,
+    prompts.agents_prompt,
+    prompts.tools_prompt,
+    prompts.prompt_mode,
+    includeClaudePresetForMode(prompts.prompt_mode) ? 1 : 0,
+    input.avatarEmoji ?? null,
+    input.avatarColor ?? null,
+    input.avatarUrl ?? null,
+    input.modelConfigId ?? null,
+    (input.modelConfigId && input.model) || null,
+    runtimePolicyJson,
+    identityHash,
+    now,
+    now,
+  );
   return getAgentProfile(id)!;
 }
 
@@ -10084,13 +10167,14 @@ export function updateAgentProfile(
     /** Null runs the configuration's default; another configuration clears it. */
     model?: string | null;
     runtimePolicy?: RuntimePolicyInput | AgentProfileRuntimePolicy | null;
-    changeSource?: AgentProfilePromptVersion['change_source'];
-    restoredFromVersion?: number | null;
   },
 ): AgentProfile | undefined {
   const existing = getAgentProfileForUser(profileId, ownerUserId);
   if (!existing) return undefined;
   const nextName = updates.name ?? existing.name;
+  if (nextName !== existing.name) {
+    assertAgentProfileNameAvailable(ownerUserId, nextName, profileId);
+  }
   const nextPromptMode =
     updates.promptMode ??
     (updates.includeClaudePreset === undefined
@@ -10110,6 +10194,14 @@ export function updateAgentProfile(
           updates.runtimePolicy,
         )
       : existing.runtime_policy;
+  // A policy update that does not name the host grant keeps the one the
+  // profile runs with, pinned if it was still implicit.
+  if (updates.runtimePolicy !== undefined && !nextRuntimePolicy.skills.host) {
+    const host =
+      existing.runtime_policy.skills.host ??
+      effectiveLegacyHostSkillPolicy(existing);
+    if (host) nextRuntimePolicy.skills.host = host;
+  }
   const nextAvatarEmoji =
     updates.avatarEmoji === undefined
       ? existing.avatar_emoji
@@ -10141,60 +10233,37 @@ export function updateAgentProfile(
     nextName,
   );
   const identityChanged = nextHash !== existing.identity_hash;
-  const promptChanged =
-    nextPrompts.identity_prompt !== existing.identity_prompt ||
-    nextPrompts.soul_prompt !== existing.soul_prompt ||
-    nextPrompts.agents_prompt !== existing.agents_prompt ||
-    nextPrompts.tools_prompt !== existing.tools_prompt ||
-    nextPrompts.prompt_mode !== existing.prompt_mode;
+  // The version is the Agent's runtime revision: it advances with anything
+  // that changes how its runs behave so existing SDK sessions are invalidated.
   const nextVersion =
     identityChanged || modelConfigChanged || modelChanged
       ? existing.version + 1
       : existing.version;
   const now = new Date().toISOString();
-  db.transaction(() => {
-    prepareCached(`UPDATE agent_profiles
-       SET name = ?, identity_prompt = ?, soul_prompt = ?, agents_prompt = ?, tools_prompt = ?,
-           prompt_mode = ?, include_claude_preset = ?, avatar_emoji = ?, avatar_color = ?, avatar_url = ?, model_config_id = ?,
-           model = ?, runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
-       WHERE id = ? AND owner_user_id = ? AND status = 'active'`).run(
-      nextName,
-      nextPrompts.identity_prompt,
-      nextPrompts.soul_prompt,
-      nextPrompts.agents_prompt,
-      nextPrompts.tools_prompt,
-      nextPrompts.prompt_mode,
-      includeClaudePresetForMode(nextPrompts.prompt_mode) ? 1 : 0,
-      nextAvatarEmoji,
-      nextAvatarColor,
-      nextAvatarUrl,
-      nextModelConfigId,
-      nextModel,
-      serializeAgentProfileRuntimePolicy(nextRuntimePolicy),
-      nextHash,
-      nextVersion,
-      now,
-      profileId,
-      ownerUserId,
-    );
-    // Runtime identity versions intentionally also advance for name and
-    // capability-policy changes so existing SDK sessions are invalidated.
-    // Prompt history, however, is a history of the four prompt sections and
-    // prompt mode only; recording unrelated identity versions here would show
-    // duplicate prompt revisions in the editor.
-    if (promptChanged) {
-      insertAgentProfilePromptVersionSnapshot({
-        profileId,
-        version: nextVersion,
-        name: nextName,
-        prompts: nextPrompts,
-        identityHash: nextHash,
-        changeSource: updates.changeSource ?? 'update',
-        restoredFromVersion: updates.restoredFromVersion,
-        createdAt: now,
-      });
-    }
-  })();
+  prepareCached(`UPDATE agent_profiles
+     SET name = ?, identity_prompt = ?, soul_prompt = ?, agents_prompt = ?, tools_prompt = ?,
+         prompt_mode = ?, include_claude_preset = ?, avatar_emoji = ?, avatar_color = ?, avatar_url = ?, model_config_id = ?,
+         model = ?, runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
+     WHERE id = ? AND owner_user_id = ? AND status = 'active'`).run(
+    nextName,
+    nextPrompts.identity_prompt,
+    nextPrompts.soul_prompt,
+    nextPrompts.agents_prompt,
+    nextPrompts.tools_prompt,
+    nextPrompts.prompt_mode,
+    includeClaudePresetForMode(nextPrompts.prompt_mode) ? 1 : 0,
+    nextAvatarEmoji,
+    nextAvatarColor,
+    nextAvatarUrl,
+    nextModelConfigId,
+    nextModel,
+    serializeAgentProfileRuntimePolicy(nextRuntimePolicy),
+    nextHash,
+    nextVersion,
+    now,
+    profileId,
+    ownerUserId,
+  );
   return getAgentProfile(profileId);
 }
 
@@ -10244,6 +10313,106 @@ export function archiveAgentProfile(
     "UPDATE agent_profiles SET status = 'archived', updated_at = ? WHERE id = ? AND owner_user_id = ?",
   ).run(new Date().toISOString(), profileId, ownerUserId);
   return 'ok';
+}
+
+class AgentProfileArchiveRollback extends Error {
+  constructor(
+    readonly result: Exclude<ReturnType<typeof archiveAgentProfile>, 'ok'>,
+  ) {
+    super(`Agent profile archive rolled back: ${result}`);
+  }
+}
+
+/**
+ * Move every listed Workspace to `targetProfileId`, then archive the profile,
+ * as one transaction: when the archive is refused (a channel mount or a
+ * Workspace that was not listed still names the profile) nothing moves.
+ */
+export function migrateAgentProfileWorkspacesAndArchive(
+  profileId: string,
+  ownerUserId: string,
+  targetProfileId: string,
+  groupFolders: readonly string[],
+): ReturnType<typeof archiveAgentProfile> {
+  try {
+    db.transaction(() => {
+      for (const folder of groupFolders) {
+        assignWorkspaceAgentProfile(folder, targetProfileId);
+      }
+      const result = archiveAgentProfile(profileId, ownerUserId);
+      if (result !== 'ok') throw new AgentProfileArchiveRollback(result);
+    })();
+    return 'ok';
+  } catch (err) {
+    if (err instanceof AgentProfileArchiveRollback) return err.result;
+    throw err;
+  }
+}
+
+/**
+ * Names compare after NFKC folding without invisible characters (zero-width
+ * spaces, soft hyphens, joiners), ignoring case and surrounding space.
+ */
+function agentProfileNameKey(name: string): string {
+  return name
+    .normalize('NFKC')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .trim()
+    .toLowerCase();
+}
+
+/** A name another active Agent of the same owner already uses. */
+export class AgentProfileNameTakenError extends Error {
+  constructor(
+    readonly requestedName: string,
+    readonly conflict: { id: string | null; name: string },
+  ) {
+    super(
+      `Agent name "${requestedName}" is already used by the Agent "${conflict.name}"; names compare case-insensitively after Unicode normalization and the built-in HappyClaw counts. Ask the user for a different name.`,
+    );
+    this.name = 'AgentProfileNameTakenError';
+  }
+}
+
+/** Every write that names an Agent goes through this, whatever its caller. */
+function assertAgentProfileNameAvailable(
+  ownerUserId: string,
+  name: string,
+  excludeProfileId?: string,
+): void {
+  const conflict = findAgentProfileNameConflict(
+    ownerUserId,
+    name,
+    excludeProfileId,
+  );
+  if (conflict) throw new AgentProfileNameTakenError(name, conflict);
+}
+
+/**
+ * The active profile of `ownerUserId` (the built-in HappyClaw included)
+ * whose name collides with `name`, other than `excludeProfileId`.
+ */
+export function findAgentProfileNameConflict(
+  ownerUserId: string,
+  name: string,
+  excludeProfileId?: string,
+): { id: string | null; name: string } | undefined {
+  const key = agentProfileNameKey(name);
+  const rows = prepareCached(
+    "SELECT id, name, is_default FROM agent_profiles WHERE owner_user_id = ? AND status = 'active'",
+  ).all(ownerUserId) as Array<{ id: string; name: string; is_default: number }>;
+  const builtIn = rows.find((row) => row.is_default === 1);
+  if (
+    key === agentProfileNameKey(DEFAULT_AGENT_PROFILE_NAME) &&
+    builtIn?.id !== excludeProfileId
+  ) {
+    return { id: builtIn?.id ?? null, name: DEFAULT_AGENT_PROFILE_NAME };
+  }
+  const conflict = rows.find(
+    (row) =>
+      row.id !== excludeProfileId && agentProfileNameKey(row.name) === key,
+  );
+  return conflict ? { id: conflict.id, name: conflict.name } : undefined;
 }
 
 /**
@@ -13097,6 +13266,7 @@ export function deleteGroupData(
       'DELETE FROM im_context_bindings WHERE workspace_jid = ?',
     ).run(jid);
     // 1. 删除定时任务运行日志 + 定时任务
+    clearFolderRuntimeState(folder, jid);
     prepareCached(
       'DELETE FROM task_runs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)',
     ).run(folder);
@@ -13130,13 +13300,16 @@ export function deleteGroupData(
       'DELETE FROM subagent_checkpoints WHERE group_folder = ? OR chat_jid = ?',
     ).run(folder, jid);
     // 6. 删除聊天记录
+    const sessionChats = keyPrefixRange(`${jid}#agent:`);
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
-    prepareCached('DELETE FROM messages WHERE chat_jid LIKE ?').run(
-      `${jid}#agent:%`,
-    );
+    prepareCached(
+      'DELETE FROM messages WHERE chat_jid >= @from AND chat_jid < @to',
+    ).run(sessionChats);
     deleteTurnTracesForChatTree(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
-    prepareCached('DELETE FROM chats WHERE jid LIKE ?').run(`${jid}#agent:%`);
+    prepareCached('DELETE FROM chats WHERE jid >= @from AND jid < @to').run(
+      sessionChats,
+    );
     // 7. 删除 pin 记录
     prepareCached('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // 8. 清除定时任务的工作区关联（任务本身不删，只断开绑定）
@@ -13263,6 +13436,20 @@ export function getMessagesForTurn(
       NewMessage & { is_from_me: number }
     >;
   return rows.map((row) => normalizeMessageRow(row));
+}
+
+/**
+ * Keep one message out of the history replayed into a fresh model session:
+ * a note written for the reader, not words the model said.
+ */
+export function excludeMessageFromHistoryRecovery(
+  chatJid: string,
+  messageId: string,
+): void {
+  if (!isDatabaseInitialized()) return;
+  prepareCached(
+    'UPDATE messages SET history_recovery_allowed = 0 WHERE chat_jid = ? AND id = ?',
+  ).run(chatJid, messageId);
 }
 
 /**
@@ -14764,6 +14951,16 @@ export function listActiveConversationAgents(): SubAgent[] {
 
 export function deleteAgent(id: string): void {
   db.transaction(() => {
+    const existing = getAgent(id);
+    if (existing) {
+      clearUsageLimitWait(`${existing.chat_jid}#agent:${id}`);
+    }
+    // The Session's scope under any chat, compared exactly: LIKE would read
+    // `_` and `%` in the id as wildcards and delete other Sessions' waits.
+    prepareCached(
+      'DELETE FROM usage_limit_waits WHERE substr(scope_key, -length(@suffix)) = @suffix',
+    ).run({ suffix: `#agent:${id}` });
+    clearAgentSessionHistoryReinjections(id);
     // A product Session can own an SDK runtime resume row and channel mounts;
     // clear all three projections together so direct DB callers cannot leave
     // routable ghosts behind.
@@ -16318,6 +16515,7 @@ export function closeDatabase(): void {
   bindChannelReliabilityDatabase(null);
   bindWorkspaceMemoryDatabase(null);
   bindOwnerProfileDatabase(null);
+  initRuntimeStateStore(null);
   if (db) {
     db.close();
   }

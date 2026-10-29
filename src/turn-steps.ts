@@ -27,6 +27,7 @@
 import type { StreamEvent } from './stream-event.types.js';
 import {
   MAX_STEPS,
+  addCommentaryStep,
   appendThinkingText,
   closeOpenSteps,
   closeThinkingStep,
@@ -51,7 +52,10 @@ import {
 } from './stream-steps.js';
 import { capTailByBytes, isSubagentEvent } from './stream-trace.js';
 import { THINKING_OMITTED_MARKER } from './thinking-text.js';
-import { isMessageDeliveryTool } from './workspace-interaction-runtime.js';
+import {
+  isMemoryWriteTool,
+  isMessageDeliveryTool,
+} from './workspace-interaction-runtime.js';
 
 /**
  * Reply text kept to cut the commentary of a text step from. The Web bounds its
@@ -66,12 +70,20 @@ const TOOLS_ENDED_BY_LIFECYCLE: ReadonlySet<string> = new Set([
   'Skill',
 ]);
 
+/** SDK task types that are not sub-agents (e.g. backgrounded Bash, monitors). */
+const NON_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_bash',
+  'monitor',
+  'mcp_task',
+]);
+
 type TaskRuntimeStatus = 'running' | 'completed' | 'error' | 'backgrounded';
 
 /** What the Web's StreamingTaskRuntimeState contributes to a task's step. */
 interface TaskRuntime {
   title: string;
   status: TaskRuntimeStatus;
+  taskType?: string;
   latestSummary?: string;
 }
 
@@ -252,6 +264,18 @@ export class TurnStepRecorder {
     );
   }
 
+  /** A progress statement the Agent sent is among the steps. */
+  get hasProgress(): boolean {
+    return this.list.steps.some(isProgressStep);
+  }
+
+  /** The progress statements among the steps, in order. */
+  progressSteps(): Array<{ at: number; text: string }> {
+    return this.list.steps
+      .filter(isProgressStep)
+      .map((step) => ({ at: step.at, text: step.text ?? '' }));
+  }
+
   observe(event: StreamEvent, now: number): void {
     this.lastEventAt = now;
     if (this.options.proactive && this.observeSpeechTool(event, now)) {
@@ -264,10 +288,16 @@ export class TurnStepRecorder {
       case 'text_delta':
         this.observeText(event, now);
         break;
-      // `commentary` (a proactive workspace's narration before a tool call,
-      // which the Web shows as a step) is not recorded: it is model text that
-      // the host broadcasts and never stores, so a proactive turn has no text
-      // steps.
+      case 'commentary':
+        if (isSubagentEvent(event) || !event.text) break;
+        this.endThinkingBurst(now);
+        this.list = addCommentaryStep(
+          this.list,
+          now,
+          event.text,
+          !!event.progress,
+        );
+        break;
       case 'thinking_delta':
         if (event.parentToolUseId) {
           this.updateTask(event);
@@ -585,6 +615,9 @@ export class TurnStepRecorder {
     if (event.taskDescription && (!task.title || task.title === 'Task')) {
       task.title = event.taskDescription;
     }
+    if (event.taskType) {
+      task.taskType = event.taskType;
+    }
     if (event.eventType === 'task_progress') {
       task.status = 'running';
       task.latestSummary =
@@ -628,9 +661,23 @@ export class TurnStepRecorder {
     if (event.parentToolUseId) return;
     const taskId = taskIdFromEvent(event);
     if (!taskId) return;
-    let list = this.list;
-    if (!hasTaskStep(list, taskId)) list = this.closeOpen(now);
     const task = this.tasks.get(taskId);
+    const effectiveTaskType = event.taskType ?? task?.taskType;
+    const id = event.toolUseId ?? taskId;
+    let list = this.list;
+    if (
+      (effectiveTaskType && NON_AGENT_TASK_TYPES.has(effectiveTaskType)) ||
+      list.steps.some(
+        (s) =>
+          s.kind === 'tool' &&
+          s.toolUseId === id &&
+          s.toolName !== 'Task' &&
+          s.toolName !== 'Agent',
+      )
+    ) {
+      return;
+    }
+    if (!hasTaskStep(list, taskId)) list = this.closeOpen(now);
     list = ensureTaskStep(
       list,
       {
@@ -670,6 +717,16 @@ export interface StepsView {
    * mode) and the Workspace's *current* mode decides what is shown.
    */
   proactive?: boolean;
+  /**
+   * Only the progress statements the Agent sent the user (a proactive
+   * Workspace at `hidden`): nothing else of the process is shown.
+   */
+  progressOnly?: boolean;
+}
+
+/** A progress statement the Agent sent the user: every level shows it. */
+export function isProgressStep(step: StreamingStep): boolean {
+  return step.kind === 'text' && !!step.progress;
 }
 
 /**
@@ -684,20 +741,30 @@ export function viewSteps(
   const out: StreamingStep[] = [];
   for (const step of steps) {
     let shown = step;
+    const progress = isProgressStep(step);
+    if (view.progressOnly && !progress) continue;
     if (view.proactive) {
-      if (shown.kind === 'text') continue;
+      if (shown.kind === 'text' && !shown.commentary) continue;
       if (shown.kind === 'tool' && isMessageDeliveryTool(shown.toolName)) {
         continue;
       }
+      const keepMemoryReceipt =
+        shown.kind === 'tool' &&
+        shown.status === 'done' &&
+        isMemoryWriteTool(shown.toolName);
       // What a tool or a sub-agent returned, and the numbers read from it, are
       // model-facing text: a proactive Workspace never sends them (the status of
-      // the call, which says whether it failed, stays).
+      // the call, which says whether it failed, and workspace memory write
+      // receipts stay).
       if (
-        shown.resultPreview !== undefined ||
+        (!keepMemoryReceipt && shown.resultPreview !== undefined) ||
         shown.resultFacts !== undefined
       ) {
         const { resultPreview: _preview, resultFacts: _facts, ...rest } = shown;
-        shown = rest;
+        shown =
+          keepMemoryReceipt && shown.resultPreview !== undefined
+            ? { ...rest, resultPreview: shown.resultPreview }
+            : rest;
       }
       // Nor the questions a call would put to the reader: its Web events
       // never carry a tool's input.
@@ -707,7 +774,7 @@ export function viewSteps(
       }
     }
     if (!view.includeThinking) {
-      if (shown.kind === 'text') continue;
+      if (shown.kind === 'text' && !progress) continue;
       if (shown.kind === 'thinking') {
         const { text: _text, title: _title, ...rest } = shown;
         shown = rest;
@@ -876,6 +943,7 @@ function readStep(raw: unknown): StreamingStep | null {
   if (isFiniteNumber(row.durationMs)) step.durationMs = row.durationMs;
   if (isFiniteNumber(row.from)) step.from = row.from;
   if (row.commentary === true) step.commentary = true;
+  if (row.progress === true) step.progress = true;
   for (const key of [
     'text',
     'title',

@@ -10,15 +10,12 @@ function read(relativePath: string): string {
 
 describe('Agent effort runtime contracts', () => {
   test('normal conversations and isolated scheduled tasks forward runtime policy', () => {
-    const main = read('src/index.ts');
-    const scheduler = read('src/task-scheduler.ts');
-
-    expect(main).toMatch(
-      /function toContainerAgentProfile[\s\S]*runtimePolicy: profile\.runtime_policy/,
-    );
-    expect(scheduler).toMatch(
+    expect(read('src/runner-agent-profile.ts')).toMatch(
       /function toRunnerAgentProfile[\s\S]*runtimePolicy: profile\.runtime_policy/,
     );
+    for (const caller of ['src/index.ts', 'src/task-scheduler.ts']) {
+      expect(read(caller)).toContain('agentProfile: toRunnerAgentProfile(');
+    }
   });
 
   test("host and container starts remove Provider effort only for explicit Agents, under a conversation's own", () => {

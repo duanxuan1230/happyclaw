@@ -21,6 +21,7 @@ import type {
   CreateWorkspaceOptions,
   InteractionMode,
   ProcessVisibility,
+  SessionWorktreeInfo,
   WorkspaceDeleteImpact,
 } from '../types';
 import {
@@ -36,9 +37,11 @@ import {
   normalizeInteractionMode,
 } from '../lib/interaction-mode';
 import {
+  MEMORY_WRITE_TOOLS,
   SPEECH_TOOL_NAME,
   filterProactiveStreamEvent,
   hasVisibleWork,
+  isProgressStep,
   isSpeechToolEvent,
   normalizeProcessVisibility,
   scrubTaskStates,
@@ -58,6 +61,11 @@ import {
   type ClientActiveRuns,
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
+import {
+  dirtyWorktreesFromError,
+  worktreeConfirmationParams,
+  type WorktreeDirtyInfo,
+} from '../lib/session-worktree';
 import { markdownTail } from '../lib/markdown-blocks';
 import { hasListedSteps } from '../lib/process-steps';
 import {
@@ -288,6 +296,11 @@ export interface StreamSnapshotData {
   systemStatus: string | null;
   isThinking?: boolean;
   activeHook?: { hookName: string; hookEvent: string } | null;
+  /**
+   * The progress statements the Agent sent in this proactive Web turn, in
+   * order, with when each was sent (epoch ms).
+   */
+  progress?: Array<{ at: number; text: string }>;
   turnId?: string;
 }
 
@@ -811,20 +824,24 @@ export function isProactiveRuntime(
 }
 
 /**
- * A proactive turn's state cut down to what `visibility` shows: nothing but
- * the spinner at `hidden`, no reasoning text at `activity`. The owner can
- * lower the level while a turn runs; what the new level hides is dropped.
+ * A proactive turn's state cut down to what `visibility` shows: the spinner
+ * and the progress the Agent sent at `hidden`, no reasoning text at
+ * `activity`. The owner can lower the level while a turn runs; what the new
+ * level hides is dropped, and the progress, which every level shows, stays.
  */
 function scrubForVisibility(
   state: StreamingState,
   visibility: ProcessVisibility,
 ): StreamingState {
   if (visibility === 'hidden') {
+    const progress = state.steps?.filter(isProgressStep);
     return {
       ...DEFAULT_STREAMING_STATE,
       turnId: state.turnId,
+      inputTurnId: state.inputTurnId,
       sessionId: state.sessionId,
       systemStatus: state.systemStatus,
+      ...(progress?.length ? { steps: progress } : {}),
     };
   }
   // The reply is never shown, whatever the level; so is what a tool was given.
@@ -848,13 +865,40 @@ function scrubForVisibility(
     thinkingGap: false,
     // Reasoning text and the narration before a tool call are `full` only.
     steps: state.steps
-      ?.filter((step) => !step.commentary)
+      ?.filter((step) => !step.commentary || isProgressStep(step))
       .map((step) =>
         step.kind === 'thinking'
           ? { ...step, text: '', title: undefined }
           : step,
       ),
   };
+}
+
+/**
+ * `steps` with the progress statements a reconnect snapshot names that they
+ * do not already hold (this tab may have missed some while it was away), in
+ * the order they were sent among the other steps.
+ */
+function withSnapshotProgress(
+  steps: StreamingStep[],
+  progress: ReadonlyArray<{ at: number; text: string }>,
+): StreamingStep[] {
+  const held = new Set(
+    steps.filter(isProgressStep).map((step) => step.text?.trim()),
+  );
+  const missing = progress.filter((entry) => !held.has(entry.text.trim()));
+  if (missing.length === 0) return steps;
+  const added: StreamingStep[] = missing.map((entry, index) => ({
+    id: `progress-snapshot-${entry.at}-${index}`,
+    kind: 'text',
+    at: entry.at,
+    endedAt: entry.at,
+    status: 'done',
+    commentary: true,
+    progress: true,
+    text: entry.text,
+  }));
+  return [...steps, ...added].sort((a, b) => a.at - b.at);
 }
 
 /** Thinking time so far, including a burst still in progress. */
@@ -1123,7 +1167,14 @@ interface ChatState {
   ) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
-  clearHistory: (jid: string) => Promise<boolean>;
+  /**
+   * Rebuild the workspace. Session worktrees that could lose work refuse it
+   * until `confirmedWorktrees` names every such session.
+   */
+  clearHistory: (
+    jid: string,
+    options?: { confirmedWorktrees?: string[] },
+  ) => Promise<boolean | { worktreesDirty: WorktreeDirtyInfo[] }>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
   handleMessageDeleted: (
     messageChatJid: string,
@@ -1138,7 +1189,12 @@ interface ChatState {
   createFlow: (
     name: string,
     options?: CreateWorkspaceOptions,
-  ) => Promise<{ jid: string; folder: string }>;
+  ) => Promise<{
+    jid: string;
+    folder: string;
+    /** Non-blocking notes, e.g. another workspace uses the same directory. */
+    warnings: Array<{ code: string; message: string }>;
+  }>;
   renameFlow: (jid: string, name: string) => Promise<void>;
   updateInteractionMode: (
     jid: string,
@@ -1153,7 +1209,7 @@ interface ChatState {
   inspectDeleteFlow: (jid: string) => Promise<WorkspaceDeleteImpact>;
   deleteFlow: (
     jid: string,
-    options?: { unbindChannels?: boolean },
+    options?: { unbindChannels?: boolean; confirmedWorktrees?: string[] },
   ) => Promise<void>;
   /**
    * Load the reasoning and execution trace the server kept of a finished
@@ -1183,6 +1239,8 @@ interface ChatState {
     resultSummary?: string,
     kind?: AgentInfo['kind'],
     titleGenerating?: boolean,
+    /** Sent for a session that owns a worktree. */
+    worktree?: SessionWorktreeInfo,
   ) => void;
   clearStreaming: (
     chatJid: string,
@@ -1197,13 +1255,22 @@ interface ChatState {
   ) => void;
   // Sub-agent actions
   loadAgents: (jid: string, opts?: { force?: boolean }) => Promise<void>;
-  deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
+  /**
+   * Resolves true when deleted. A session whose worktree has uncommitted
+   * changes is kept until `forceWorktree` confirms discarding them.
+   */
+  deleteAgentAction: (
+    jid: string,
+    agentId: string,
+    options?: { forceWorktree?: boolean },
+  ) => Promise<boolean | { worktreesDirty: WorktreeDirtyInfo[] }>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
   createConversation: (
     jid: string,
     name?: string,
     description?: string,
+    options?: { worktree?: boolean },
   ) => Promise<AgentInfo | null>;
   renameConversation: (
     jid: string,
@@ -1560,6 +1627,12 @@ function proactiveReplyLanded(
   live: StreamingState | undefined,
   utterance: Message,
 ): boolean {
+  if (
+    utterance.finalization_reason &&
+    utterance.finalization_reason !== 'completed'
+  ) {
+    return false;
+  }
   return (
     isProactiveRuntime(s, runtimeJid) &&
     streamsInputOf(s.activeRuns, runtimeJid, live, utterance.turn_id)
@@ -1568,14 +1641,16 @@ function proactiveReplyLanded(
 
 /**
  * `traceAwaited` with `reply` as the proactive reply of `runtimeJid` whose
- * trace is coming: only where the process is kept (not at `hidden`).
+ * trace is coming: where the process is kept, and at `hidden` only for a turn
+ * that sent progress statements (all that level keeps).
  */
 function withAwaitedTrace(
   s: ChatState,
   runtimeJid: string,
   reply: Message,
 ): Record<string, string> {
-  return processViewOfRuntime(s, runtimeJid) === 'proactive:hidden'
+  return processViewOfRuntime(s, runtimeJid) === 'proactive:hidden' &&
+    !liveStreamOf(s, runtimeJid)?.steps?.some(isProgressStep)
     ? s.traceAwaited
     : { ...s.traceAwaited, [runtimeJid]: reply.id };
 }
@@ -1679,6 +1754,47 @@ function withoutProcessCaches(
     traceCache: without(s.traceCache),
     stepsCache: without(s.stepsCache),
     turnTraceStatus: without(s.turnTraceStatus),
+    ...withoutStaleTraceFlags(
+      s,
+      jids.filter((jid) => processView(s.groups[jid]) === 'proactive:hidden'),
+    ),
+  };
+}
+
+/**
+ * The replies of workspaces now `hidden`, without the `has_trace` read at
+ * another level. At `hidden` only a turn that sent progress has a trace to
+ * show, and which ones did is the server's to say on the next load.
+ */
+function withoutStaleTraceFlags(
+  s: ChatState,
+  jids: readonly string[],
+): Partial<ChatState> {
+  if (jids.length === 0) return {};
+  const prefixes = jids.map((jid) => `${jid}#agent:`);
+  const unflag = (
+    lists: Record<string, Message[]>,
+    owned: (key: string, list: Message[]) => boolean,
+  ): Record<string, Message[]> => {
+    let next = lists;
+    for (const [key, list] of Object.entries(lists)) {
+      if (!list.some((message) => message.has_trace) || !owned(key, list)) {
+        continue;
+      }
+      if (next === lists) next = { ...lists };
+      next[key] = list.map((message) =>
+        message.has_trace ? { ...message, has_trace: false } : message,
+      );
+    }
+    return next;
+  };
+  return {
+    messages: unflag(s.messages, (jid) => jids.includes(jid)),
+    agentMessages: unflag(s.agentMessages, (_, list) =>
+      list.some((message) =>
+        prefixes.some((prefix) => message.chat_jid.startsWith(prefix)),
+      ),
+    ),
   };
 }
 
@@ -1771,14 +1887,25 @@ function withReplySteps(
 
 /**
  * A step without what its tool or sub-agent returned: the preview of the
- * output and the numbers read from it. A proactive workspace never shows them.
+ * output and the numbers read from it. A proactive workspace never shows them,
+ * except structured workspace-memory write receipts.
  */
 export function withoutToolResults(step: StreamingStep): StreamingStep {
-  if (step.resultPreview === undefined && step.resultFacts === undefined) {
+  const keepMemoryReceipt =
+    step.kind === 'tool' &&
+    step.status === 'done' &&
+    !!step.toolName &&
+    MEMORY_WRITE_TOOLS.has(step.toolName);
+  if (
+    (keepMemoryReceipt || step.resultPreview === undefined) &&
+    step.resultFacts === undefined
+  ) {
     return step;
   }
   const { resultPreview: _preview, resultFacts: _facts, ...rest } = step;
-  return rest;
+  return keepMemoryReceipt && step.resultPreview !== undefined
+    ? { ...rest, resultPreview: step.resultPreview }
+    : rest;
 }
 
 /**
@@ -1962,20 +2089,53 @@ interface PendingDelta {
 const pendingDeltas = new Map<string, PendingDelta>();
 
 /**
- * The calls of a proactive turn's speech tool, per runtime: its start names
- * the tool, its later events carry only the id of the call. Kept for the
- * run that made them, so a new run starts empty.
+ * Tool calls of one kind, per runtime: a call's start names its tool, its
+ * later events carry only the id of the call. Kept for the run that made them,
+ * so a new run starts empty.
  */
-const speechToolCalls = new Map<
-  string,
-  { runId: string; calls: Set<string> }
->();
-const MAX_SPEECH_CALLS = 64;
+const NO_CALLS: ReadonlySet<string> = new Set();
 
-function speechCallsOf(runtimeJid: string, runId?: string): Set<string> {
-  const entry = speechToolCalls.get(runtimeJid);
-  return entry && entry.runId === (runId ?? '') ? entry.calls : new Set();
+class RunToolCalls {
+  private readonly byRuntime = new Map<
+    string,
+    { runId: string; calls: Set<string> }
+  >();
+
+  constructor(private readonly max: number) {}
+
+  of(runtimeJid: string, runId?: string): ReadonlySet<string> {
+    const entry = this.byRuntime.get(runtimeJid);
+    return entry && entry.runId === (runId ?? '') ? entry.calls : NO_CALLS;
+  }
+
+  remember(
+    runtimeJid: string,
+    runId: string | undefined,
+    ids: Iterable<string>,
+  ): void {
+    const key = runId ?? '';
+    let entry = this.byRuntime.get(runtimeJid);
+    if (!entry || entry.runId !== key) {
+      entry = { runId: key, calls: new Set() };
+      this.byRuntime.set(runtimeJid, entry);
+    }
+    for (const id of ids) {
+      if (entry.calls.size >= this.max) {
+        const oldest = entry.calls.values().next().value;
+        if (oldest !== undefined) entry.calls.delete(oldest);
+      }
+      entry.calls.add(id);
+    }
+  }
 }
+
+/** The calls of a proactive turn's speech tool. */
+const speechToolCalls = new RunToolCalls(64);
+/**
+ * The calls of a proactive turn's memory write tools: only their results are
+ * kept, as the receipts the process links to.
+ */
+const memoryWriteCalls = new RunToolCalls(64);
 
 /** The speech tool's calls in a reconnect snapshot: its rows and running calls. */
 function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
@@ -1984,26 +2144,6 @@ function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
     if (tool.toolName === SPEECH_TOOL_NAME) calls.add(tool.toolUseId);
   }
   return calls;
-}
-
-function rememberSpeechCalls(
-  runtimeJid: string,
-  runId: string | undefined,
-  ids: Iterable<string>,
-): void {
-  const key = runId ?? '';
-  let entry = speechToolCalls.get(runtimeJid);
-  if (!entry || entry.runId !== key) {
-    entry = { runId: key, calls: new Set() };
-    speechToolCalls.set(runtimeJid, entry);
-  }
-  for (const id of ids) {
-    if (entry.calls.size >= MAX_SPEECH_CALLS) {
-      const oldest = entry.calls.values().next().value;
-      if (oldest !== undefined) entry.calls.delete(oldest);
-    }
-    entry.calls.add(id);
-  }
 }
 
 // Match the runner's retry banner (including unknown SDK counters), not user
@@ -2723,6 +2863,9 @@ function updateTaskRuntime(
 /** Tools whose end comes from their own lifecycle, not their tool_result. */
 const TOOLS_ENDED_BY_LIFECYCLE = new Set(['Task', 'Agent', 'Skill']);
 
+/** SDK task types that are not sub-agents (e.g. backgrounded Bash, monitors). */
+const NON_AGENT_TASK_TYPES = new Set(['local_bash', 'monitor', 'mcp_task']);
+
 function stepStatusOfTask(
   status: StreamingTaskRuntimeState['status'],
 ): StepStatus {
@@ -2745,11 +2888,25 @@ function applyTaskToSteps(
   if (event.parentToolUseId) return;
   const taskId = taskIdFromEvent(event);
   if (!taskId) return;
+  const task = next.taskStates[taskId];
+  const effectiveTaskType = event.taskType ?? task?.taskType;
+  const id = event.toolUseId ?? taskId;
   let list = stepsOf(next);
+  if (
+    (effectiveTaskType && NON_AGENT_TASK_TYPES.has(effectiveTaskType)) ||
+    list.steps.some(
+      (s) =>
+        s.kind === 'tool' &&
+        s.toolUseId === id &&
+        s.toolName !== 'Task' &&
+        s.toolName !== 'Agent',
+    )
+  ) {
+    return;
+  }
   if (!hasTaskStep(list, taskId)) {
     list = closeOpenSteps(list, at, prev.partialText, prev.partialBase ?? 0);
   }
-  const task = next.taskStates[taskId];
   list = ensureTaskStep(
     list,
     {
@@ -2806,7 +2963,10 @@ function applyStreamEvent(
       // step of the process, never the reply: no partial text is involved.
       if (isSubagentEvent(event) || !event.text) break;
       endThinkingBurst(prev, next, at);
-      setSteps(next, addCommentaryStep(stepsOf(next), at, event.text));
+      setSteps(
+        next,
+        addCommentaryStep(stepsOf(next), at, event.text, !!event.progress),
+      );
       break;
     }
     case 'thinking_delta': {
@@ -3779,13 +3939,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return succeeded;
   },
 
-  clearHistory: async (jid: string) => {
+  clearHistory: async (jid: string, options = {}) => {
     // Set clearing lock BEFORE the API call to block polling & WS injection
     set((s) => ({ clearing: { ...s.clearing, [jid]: true } }));
 
     try {
+      const search = worktreeConfirmationParams(
+        options.confirmedWorktrees,
+      ).toString();
       await api.post<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/clear-history`,
+        `/api/groups/${encodeURIComponent(jid)}/clear-history${
+          search ? `?${search}` : ''
+        }`,
       );
 
       void deleteGroupMessageSnapshots(jid);
@@ -3887,15 +4052,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       useFileStore.getState().loadFiles(jid);
       return true;
     } catch (err) {
+      const worktreesDirty = dirtyWorktreesFromError(err);
       // Release clearing lock on failure
       set((s) => {
         const { [jid]: _, ...nextClearing } = s.clearing;
         return {
           clearing: nextClearing,
-          error: extractErrorMessage(err),
+          ...(worktreesDirty ? {} : { error: extractErrorMessage(err) }),
         };
       });
-      return false;
+      return worktreesDirty ? { worktreesDirty } : false;
     }
   },
 
@@ -4053,6 +4219,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         success: boolean;
         jid: string;
         group: GroupInfo;
+        warnings?: Array<{ code: string; message: string }>;
       }>('/api/groups', body, needsLongTimeout ? 120_000 : undefined);
       if (!data.success) {
         throw new Error('服务器未能创建工作区');
@@ -4064,7 +4231,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: null,
       }));
 
-      return { jid: data.jid, folder: group.folder };
+      return {
+        jid: data.jid,
+        folder: group.folder,
+        warnings: data.warnings ?? [],
+      };
     } catch (err) {
       set({ error: extractErrorMessage(err) });
       throw err;
@@ -4221,7 +4392,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteFlow: async (jid: string, options = {}) => {
     try {
-      const query = options.unbindChannels ? '?unbind_channels=true' : '';
+      const params = worktreeConfirmationParams(options.confirmedWorktrees);
+      if (options.unbindChannels) params.set('unbind_channels', 'true');
+      const search = params.toString();
+      const query = search ? `?${search}` : '';
       await api.delete<{ success: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}${query}`,
       );
@@ -4582,18 +4756,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // never its model text: whatever else reaches the Web is dropped here,
     // even if the host sent it.
     if (isProactiveRuntime(get(), runtimeJid)) {
+      if (
+        event.eventType === 'tool_use_start' &&
+        event.toolUseId &&
+        MEMORY_WRITE_TOOLS.has(event.toolName ?? '')
+      ) {
+        memoryWriteCalls.remember(runtimeJid, runId, [event.toolUseId]);
+      }
       const allowed = filterProactiveStreamEvent(
         normalizeProcessVisibility(get().groups[chatJid]?.process_visibility),
         event,
+        memoryWriteCalls.of(runtimeJid, runId),
       );
       if (!allowed) return;
       event = allowed;
       // Calling the speech tool is the reply itself, not work to watch: it is
       // neither a step nor the latest tool, and does not count among the tools
       // used. Its start still ends the reasoning before it.
-      if (isSpeechToolEvent(event, speechCallsOf(runtimeJid, runId))) {
+      if (isSpeechToolEvent(event, speechToolCalls.of(runtimeJid, runId))) {
         if (event.eventType === 'tool_use_start' && event.toolUseId) {
-          rememberSpeechCalls(runtimeJid, runId, [event.toolUseId]);
+          speechToolCalls.remember(runtimeJid, runId, [event.toolUseId]);
           // Keep arrival order: reasoning still waiting for its frame came first.
           flushPendingDeltaForRuntime(runtimeJid, set);
           set((s) => {
@@ -4832,7 +5014,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // ② task_start / Task tool start → 创建/更新虚拟 Agent（SDK Task）
     if (
-      (event.eventType === 'task_start' && event.toolUseId) ||
+      (event.eventType === 'task_start' &&
+        event.toolUseId &&
+        !(event.taskType && NON_AGENT_TASK_TYPES.has(event.taskType))) ||
       (event.eventType === 'tool_use_start' &&
         event.toolName === 'Task' &&
         event.toolUseId)
@@ -5502,6 +5686,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     resultSummary?,
     kind?,
     titleGenerating?,
+    worktree?,
   ) => {
     set((s) => {
       const existing = s.agents[chatJid] || [];
@@ -5572,6 +5757,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           typeof titleGenerating === 'boolean'
             ? titleGenerating
             : previous?.title_generating,
+        ...(worktree ? { worktree } : {}),
       };
       const updated =
         idx >= 0
@@ -5752,10 +5938,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 删除子 Agent
-  deleteAgentAction: async (jid, agentId) => {
+  deleteAgentAction: async (jid, agentId, options) => {
     try {
       await api.delete(
-        `/api/groups/${encodeURIComponent(jid)}/sessions/${agentId}`,
+        `/api/groups/${encodeURIComponent(jid)}/sessions/${agentId}${
+          options?.forceWorktree ? '?force_worktree=true' : ''
+        }`,
       );
       void deleteAgentMessageSnapshot(jid, agentId);
       clearSdkTaskCleanupTimer(agentId);
@@ -5797,7 +5985,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : '删除会话失败' });
+      const worktreesDirty = dirtyWorktreesFromError(err);
+      if (worktreesDirty) return { worktreesDirty };
+      set({ error: extractErrorMessage(err) || '删除会话失败' });
       return false;
     }
   },
@@ -5825,18 +6015,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // -- Conversation agent actions --
 
-  createConversation: async (jid, name, description?) => {
+  createConversation: async (jid, name, description?, options?) => {
     try {
       const data = await api.post<{ session?: AgentInfo; agent?: AgentInfo }>(
         `/api/groups/${encodeURIComponent(jid)}/sessions`,
-        { name, description },
+        { name, description, ...(options?.worktree ? { worktree: true } : {}) },
       );
       const created = data.session ?? data.agent;
       if (!created) throw new Error('创建会话失败');
       set((s) => {
         const existing = s.agents[jid] || [];
-        // WS agent_status broadcast may have already added it
-        if (existing.some((a) => a.id === created.id)) return s;
+        // WS agent_status broadcast may have already added it, without the
+        // worktree only the creation response carries.
+        if (existing.some((a) => a.id === created.id)) {
+          return {
+            agents: {
+              ...s.agents,
+              [jid]: existing.map((a) =>
+                a.id === created.id
+                  ? { ...a, worktree: created.worktree ?? null }
+                  : a,
+              ),
+            },
+          };
+        }
         return { agents: { ...s.agents, [jid]: [...existing, created] } };
       });
       return created;
@@ -6273,7 +6475,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const speech = isProactiveRuntime(get(), runtimeJid)
       ? speechCallsOfSnapshot(snapshot)
       : null;
-    if (speech) rememberSpeechCalls(runtimeJid, runId, speech);
+    if (speech) {
+      speechToolCalls.remember(runtimeJid, runId, speech);
+      // A memory write still running returns its receipt after the snapshot.
+      memoryWriteCalls.remember(
+        runtimeJid,
+        runId,
+        (snapshot.activeTools ?? [])
+          .filter((tool) => MEMORY_WRITE_TOOLS.has(tool.toolName))
+          .map((tool) => tool.toolUseId),
+      );
+    }
     // A proactive workspace's snapshot is cut to the level its owner chose,
     // whatever the host put in it.
     const levelOf = (s: ChatState): ProcessVisibility | null =>
@@ -6390,6 +6602,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restored.steps = rebuilt.steps;
         restored.stepsDropped = rebuilt.dropped;
         restored.stepsRebuilt = true;
+      }
+      // The progress the Agent sent is no part of what the pieces rebuild:
+      // the snapshot names it, in order, and the steps take what they lack.
+      if (snapshot.progress?.length) {
+        restored.steps = withSnapshotProgress(
+          restored.steps ?? [],
+          snapshot.progress,
+        );
       }
       return level ? scrubForVisibility(restored, level) : restored;
     };
@@ -6777,4 +6997,78 @@ useChatStore.subscribe((state, previous) => {
   }
   if (changed.length === 0) return;
   useChatStore.setState((current) => withoutProcessCaches(current, changed));
+  for (const jid of changed) {
+    if (processView(state.groups[jid]) === 'proactive:hidden') {
+      void resyncTraceFlags(jid);
+    }
+  }
 });
+
+/** The newest replies whose `has_trace` is read again after a view change. */
+const TRACE_FLAG_RESYNC_LIMIT = 200;
+
+/**
+ * The `has_trace` of the replies this tab holds of `jid` and its sessions,
+ * read again for the view now in force. At `hidden` the server flags only the
+ * turns whose progress it keeps, which this tab cannot tell from what it
+ * holds; the flags read at another level were let go meanwhile.
+ */
+async function resyncTraceFlags(jid: string): Promise<void> {
+  const view = processViewOfRuntime(useChatStore.getState(), jid);
+  const flaggedOf = async (query: string): Promise<Set<string> | null> => {
+    try {
+      const data = await api.get<{ messages: Message[] }>(
+        `/api/groups/${encodeURIComponent(jid)}/messages?${query}`,
+      );
+      if (processViewOfRuntime(useChatStore.getState(), jid) !== view) {
+        return null;
+      }
+      return new Set(data.messages.filter((m) => m.has_trace).map((m) => m.id));
+    } catch {
+      return null;
+    }
+  };
+  const flag = (list: Message[], flagged: Set<string>): Message[] =>
+    list.some((m) => !m.has_trace && flagged.has(m.id))
+      ? list.map((m) =>
+          !m.has_trace && flagged.has(m.id) ? { ...m, has_trace: true } : m,
+        )
+      : list;
+  const limit = `limit=${TRACE_FLAG_RESYNC_LIMIT}`;
+  if (useChatStore.getState().messages[jid]?.length) {
+    const flagged = await flaggedOf(limit);
+    if (flagged?.size) {
+      useChatStore.setState((s) =>
+        s.messages[jid]
+          ? {
+              messages: {
+                ...s.messages,
+                [jid]: flag(s.messages[jid], flagged),
+              },
+            }
+          : s,
+      );
+    }
+  }
+  const sessions = Object.entries(useChatStore.getState().agentMessages)
+    .filter(([, list]) =>
+      list.some((m) => m.chat_jid.startsWith(`${jid}#agent:`)),
+    )
+    .map(([agentId]) => agentId);
+  for (const agentId of sessions) {
+    const flagged = await flaggedOf(
+      `agentId=${encodeURIComponent(agentId)}&${limit}`,
+    );
+    if (!flagged?.size) continue;
+    useChatStore.setState((s) =>
+      s.agentMessages[agentId]
+        ? {
+            agentMessages: {
+              ...s.agentMessages,
+              [agentId]: flag(s.agentMessages[agentId], flagged),
+            },
+          }
+        : s,
+    );
+  }
+}

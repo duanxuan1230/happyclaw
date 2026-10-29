@@ -252,8 +252,8 @@ function hostSteps(
       steps_dropped: stored[0].stepsDropped ?? 0,
       created_at: '2026-10-13T00:00:00.000Z',
     },
-    { visible: true, includeThinking: true, proactive: mode === 'proactive' },
-  ).steps;
+    { includeThinking: true, proactive: mode === 'proactive' },
+  )!.steps;
 }
 
 function expectSameSteps(script: Script, end: number, options: Options = {}) {

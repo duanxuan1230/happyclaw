@@ -37,9 +37,11 @@ function between(start: string, end: string, from = 0): string {
 describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
   test('the periodic sweep cancels retry_wait Turns older than the bound', () => {
     const cancelStaleRetryWaitChannelTurns = vi.fn(() => 2);
+    // Which inputs a usage-limit wait keeps: usage-limit-wait-park.
     const globals: Record<string, unknown> = {
       logger,
       cancelStaleRetryWaitChannelTurns,
+      listPendingUsageLimitWaits: () => [],
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS');
@@ -78,6 +80,8 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
       registeredGroups: {},
       getRegisteredGroup: () => undefined,
       cancelRetryWaitChannelTurnsForInputs,
+      listQueuedFollowUps: () => [],
+      endUsageLimitWait: vi.fn(),
     };
     const harness = createRuntimeSourceHarness(globals);
     for (const name of [
@@ -100,6 +104,11 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
         agentId: 'session-1',
         correlationIds: ['om_q'],
       }),
+    );
+    // The last queued input gone: a usage-limit wait has nothing to resume.
+    expect(globals.endUsageLimitWait).toHaveBeenCalledWith(
+      'web:ws#agent:session-1',
+      'cancelled',
     );
   });
 
@@ -215,7 +224,12 @@ describe('inbound wiring', () => {
     ).toHaveLength(1);
   });
 
-  test('IM downloads resolve from the Agent working directory', () => {
+  test('IM downloads resolve from the Agent working directory', async () => {
+    const path = await import('node:path');
+    const { GROUPS_DIR } = await import('../src/config.js');
+    const { resolveWorkspaceProjectRoot } =
+      await import('../src/session-worktree.js');
+    const { agentIdOfJid } = await import('../src/utils.js');
     const groups: Record<string, any> = {
       'web:host-cwd': {
         folder: 'host-cwd',
@@ -234,8 +248,14 @@ describe('inbound wiring', () => {
       getRegisteredGroup: (jid: string) => groups[jid],
       findWebJidForFolder: (folder: string) => `web:${folder}`,
       resolveEffectiveGroup: (group: unknown) => ({ effectiveGroup: group }),
+      resolveWorkspaceProjectRoot,
+      agentIdOfJid,
+      path,
+      GROUPS_DIR,
     };
     const harness = createRuntimeSourceHarness(globals);
+    harness.install('agentWorkingRoot');
+    harness.install('imDownloadRoot');
     harness.installCallArgument(
       'downloadRootResolver',
       'main',
@@ -244,11 +264,18 @@ describe('inbound wiring', () => {
     );
     const resolve = globals.downloadRootResolver as (
       folder: string,
+      routeJid: string,
     ) => string | undefined;
-    expect(resolve('host-cwd')).toBe('/srv/project');
-    expect(resolve('host-default')).toBeUndefined();
-    expect(resolve('container')).toBeUndefined();
-    expect(resolve('missing')).toBeUndefined();
+    expect(resolve('host-cwd', 'web:host-cwd')).toBe('/srv/project');
+    expect(resolve('host-default', 'web:host-default')).toBe(
+      path.join(GROUPS_DIR, 'host-default'),
+    );
+    expect(resolve('container', 'web:container')).toBe(
+      path.join(GROUPS_DIR, 'container'),
+    );
+    expect(resolve('missing', 'web:missing')).toBe(
+      path.join(GROUPS_DIR, 'missing'),
+    );
   });
 });
 

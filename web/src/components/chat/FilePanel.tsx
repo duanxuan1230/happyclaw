@@ -30,7 +30,12 @@ import {
   AlertCircle,
   Copy,
 } from 'lucide-react';
-import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
+import {
+  useFileStore,
+  FileEntry,
+  toBase64Url,
+  workspaceFilesUrl,
+} from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useScrollIsolation } from '../../hooks/useScrollIsolation';
@@ -248,7 +253,7 @@ function formatSize(bytes: number): string {
 
 function buildPreviewUrl(groupJid: string, filePath: string): string {
   return withBasePath(
-    `/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(filePath)}`,
+    workspaceFilesUrl(groupJid, `files/preview/${toBase64Url(filePath)}`),
   );
 }
 
@@ -954,7 +959,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
   const handleDownload = (item: FileEntry) => {
     const encoded = toBase64Url(item.path);
-    const url = `/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`;
+    const url = workspaceFilesUrl(groupJid, `files/download/${encoded}`);
     downloadFromUrl(url, item.name).catch((err) => {
       console.error('Download failed:', err);
       showToast(
@@ -1006,12 +1011,9 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     setOpenDirLoading(true);
     setOpenDirError(null);
     try {
-      await api.post(
-        `/api/groups/${encodeURIComponent(groupJid)}/files/open-directory`,
-        {
-          path: currentDir,
-        },
-      );
+      await api.post(workspaceFilesUrl(groupJid, 'files/open-directory'), {
+        path: currentDir,
+      });
     } catch (err) {
       if (err instanceof Error) {
         setOpenDirError(err.message);

@@ -692,3 +692,102 @@ describe('withdrawals and restores', () => {
     expect(block).toContain('Use the fields for the current input only');
   });
 });
+
+describe('the memory index', () => {
+  const indexed = (
+    entries: Array<[string, string]>,
+    total = entries.length,
+  ): WorkspaceMemorySnapshot => ({
+    ...memory(),
+    directory: {
+      entries: entries.map(([id, title]) => ({ id, kind: 'fact', title })),
+      total,
+    },
+  });
+  const withIndex = (snapshot: WorkspaceMemorySnapshot | null) =>
+    sources({
+      memory: snapshot,
+      ownerProfile: null,
+      channelContext: undefined,
+    });
+  const ab = (): Array<[string, string]> => [
+    ['wmi_a', 'Deploy <process>'],
+    ['wmi_b', 'Release day'],
+  ];
+
+  test('the first turn lists it whole; later turns only what changed', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    const first = turn(ledger, 'u1', withIndex(indexed(ab(), 5)));
+    expect(first.memoryIndex).toBe(
+      [
+        '<workspace_memory_index trust="historical_data" instruction_priority="none">',
+        'wmi_a · fact · Deploy &lt;process&gt;',
+        'wmi_b · fact · Release day',
+        '3 more not listed; workspace_memory_search finds them.',
+        '</workspace_memory_index>',
+      ].join('\n'),
+    );
+    expect(turn(ledger, 'u2', withIndex(indexed(ab(), 5))).memoryIndex).toBe(
+      '',
+    );
+    // A snapshot without an index, or none at all, keeps what is held.
+    expect(turn(ledger, 'u3', withIndex(memory())).memoryIndex).toBe('');
+    expect(turn(ledger, 'u4', withIndex(null)).memoryIndex).toBe('');
+
+    const changed = turn(
+      ledger,
+      'u5',
+      withIndex(
+        indexed([
+          ['wmi_a', 'Deploy process, revised'],
+          ['wmi_c', 'New lesson'],
+        ]),
+      ),
+    );
+    expect(changed.memoryIndex).toBe(
+      [
+        '<workspace_memory_index trust="historical_data" instruction_priority="none" changes_only="true">',
+        '+ wmi_a · fact · Deploy process, revised',
+        '+ wmi_c · fact · New lesson',
+        '- wmi_b',
+        'Every memory is listed.',
+        '</workspace_memory_index>',
+      ].join('\n'),
+    );
+    expect(decorateUserTurn('hello', changed)).toBe(
+      `${changed.memoryIndex}\n\nhello`,
+    );
+  });
+
+  test('the index rides before the snapshot and comes back whole after a compaction', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    const snapshot: WorkspaceMemorySnapshot = {
+      ...memory({ id: 'wmi_a' }),
+      directory: {
+        entries: [{ id: 'wmi_a', kind: 'fact', title: 'Deploy' }],
+        total: 1,
+      },
+    };
+    const decorated = decorateUserTurn(
+      'hello',
+      turn(ledger, 'u1', withIndex(snapshot)),
+    );
+    expect(decorated.indexOf('<workspace_memory_index')).toBeGreaterThanOrEqual(
+      0,
+    );
+    expect(decorated.indexOf('<workspace_memory_index')).toBeLessThan(
+      decorated.indexOf('<workspace_memory_snapshot'),
+    );
+    ledger.bindSession('s1');
+    ledger.stage('u2', withIndex(snapshot));
+    ledger.beginCompaction();
+    const restored = ledger.restoreAfterCompaction();
+    ledger.endCompaction();
+    expect(restored).toContain(
+      '<workspace_memory_index trust="historical_data" instruction_priority="none">\nwmi_a · fact · Deploy',
+    );
+    expect(ledger.stage('u3', withIndex(snapshot)).memoryIndex).toBe('');
+  });
+});
