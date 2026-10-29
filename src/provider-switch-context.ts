@@ -9,7 +9,6 @@ export interface ProviderSwitchInput {
   turnId?: string;
   /** Persisted message IDs already represented by this cold-run prompt. */
   readonly currentBatchMessageIds?: readonly string[];
-  isScheduledTask?: boolean;
   agentId?: string;
 }
 
@@ -33,10 +32,6 @@ function conversationHistoryChatJid(input: ProviderSwitchInput): string {
 function seedPromptWithPersistedHistory<T extends ProviderSwitchInput>(
   input: T,
 ): T {
-  // Isolated scheduled tasks use their own session namespace and must not
-  // inherit the workspace chat. Conversation turns (including group-mode
-  // scheduled prompts that arrive via processGroupMessages) do.
-  if (input.isScheduledTask) return input;
   // Orchestration may already have prepended recovery/provider-switch history.
   if (input.prompt.includes('<system_context>')) return input;
 
@@ -72,8 +67,6 @@ function seedPromptWithPersistedHistory<T extends ProviderSwitchInput>(
  * When the pool fails over or the conversation changes model, drop the resume
  * token and seed the replacement session with HappyClaw's persisted
  * transcript so prior user/assistant turns survive.
- *
- * Isolated scheduled tasks only drop the resume token.
  */
 export function applyProviderSwitchToInput<T extends ProviderSwitchInput>(
   input: T,

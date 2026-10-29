@@ -270,7 +270,6 @@ import {
   withAgentProfileLocks,
   WorkspaceRuntimeQuiesceError,
 } from '../agent-profile-runtime.js';
-import { notifyTaskSchedulerChanged } from '../task-scheduler.js';
 import {
   SYSTEM_CAPABILITY_LOCK_KEY,
   withCapabilityScopeLocks,
@@ -4137,9 +4136,6 @@ configRoutes.put(
             delete deps.sessions[folder];
         }
         const value = saveSystemSettings(validation.data);
-        if (hostOnlyMigration?.migratedTaskIds.length) {
-          notifyTaskSchedulerChanged();
-        }
         return value;
       };
       let saved: ReturnType<typeof saveSystemSettings>;

@@ -1,8 +1,7 @@
 /**
  * Durable runtime and scheduling state that must survive a restart:
  * usage-limit waits, the history hand-off owed to sessions reset by a
- * capability change, de-duplicated scheduled-task failure notices, and the
- * connection that served each usage event.
+ * capability change, and the connection that served each usage event.
  *
  * db.ts binds this module to its connection; no other module touches these
  * tables directly.
@@ -65,14 +64,6 @@ export function initRuntimeStateStore(db: SqliteDatabase | null): void {
       agent_id TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       PRIMARY KEY (group_folder, agent_id)
-    );
-    CREATE TABLE IF NOT EXISTS task_failure_notices (
-      task_id TEXT PRIMARY KEY,
-      error_key TEXT NOT NULL,
-      error_text TEXT NOT NULL,
-      failure_count INTEGER NOT NULL,
-      first_failed_at TEXT NOT NULL,
-      last_failed_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS usage_event_connections (
       event_id TEXT PRIMARY KEY,
@@ -272,100 +263,6 @@ export function takeSessionHistoryReinjection(
   return false;
 }
 
-// ─── Scheduled-task failure notices ────────────────────────
-
-export interface TaskFailureNoticeState {
-  taskId: string;
-  errorKey: string;
-  errorText: string;
-  failureCount: number;
-  firstFailedAt: string;
-  lastFailedAt: string;
-}
-
-function toTaskFailureNotice(
-  row: Record<string, unknown>,
-): TaskFailureNoticeState {
-  return {
-    taskId: String(row.task_id),
-    errorKey: String(row.error_key),
-    errorText: String(row.error_text),
-    failureCount: Number(row.failure_count) || 0,
-    firstFailedAt: String(row.first_failed_at),
-    lastFailedAt: String(row.last_failed_at),
-  };
-}
-
-const SELECT_FAILURE = 'SELECT * FROM task_failure_notices WHERE task_id = ?';
-
-/**
- * Record a failed run. `notify` is true for the first failure of a streak
- * and whenever the normalized error changes; a repeat of the error already
- * reported is only counted.
- */
-export function recordTaskFailure(
-  taskId: string,
-  errorKey: string,
-  errorText: string,
-  now = new Date().toISOString(),
-): { notify: boolean; state: TaskFailureNoticeState } {
-  return requireDatabase().transaction(() => {
-    const row = stmt(SELECT_FAILURE).get(taskId) as
-      | Record<string, unknown>
-      | undefined;
-    const repeat = !!row && String(row.error_key) === errorKey;
-    if (repeat) {
-      stmt(
-        `UPDATE task_failure_notices
-         SET failure_count = failure_count + 1, last_failed_at = ?
-         WHERE task_id = ?`,
-      ).run(now, taskId);
-    } else {
-      stmt(
-        `INSERT INTO task_failure_notices (
-           task_id, error_key, error_text, failure_count,
-           first_failed_at, last_failed_at
-         ) VALUES (?, ?, ?, 1, ?, ?)
-         ON CONFLICT(task_id) DO UPDATE SET
-           error_key = excluded.error_key,
-           error_text = excluded.error_text,
-           failure_count = 1,
-           first_failed_at = excluded.first_failed_at,
-           last_failed_at = excluded.last_failed_at`,
-      ).run(taskId, errorKey, errorText, now, now);
-    }
-    return {
-      notify: !repeat,
-      state: toTaskFailureNotice(
-        stmt(SELECT_FAILURE).get(taskId) as Record<string, unknown>,
-      ),
-    };
-  })();
-}
-
-/** End a failure streak; returns it so the caller can announce recovery. */
-export function clearTaskFailure(
-  taskId: string,
-): TaskFailureNoticeState | null {
-  if (!database) return null;
-  return requireDatabase().transaction(() => {
-    const row = stmt(SELECT_FAILURE).get(taskId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return null;
-    stmt('DELETE FROM task_failure_notices WHERE task_id = ?').run(taskId);
-    return toTaskFailureNotice(row);
-  })();
-}
-
-export function clearTaskFailureNotices(taskIds: readonly string[]): void {
-  if (!database || taskIds.length === 0) return;
-  const del = stmt('DELETE FROM task_failure_notices WHERE task_id = ?');
-  for (const taskId of taskIds) {
-    del.run(taskId);
-  }
-}
-
 export function clearFolderRuntimeState(
   groupFolder: string,
   chatJid?: string,
@@ -374,17 +271,6 @@ export function clearFolderRuntimeState(
   stmt('DELETE FROM session_history_reinjections WHERE group_folder = ?').run(
     groupFolder,
   );
-  stmt(
-    `DELETE FROM task_failure_notices
-     WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)`,
-  ).run(groupFolder);
-  stmt(
-    `DELETE FROM usage_limit_waits
-     WHERE scope_key IN (
-       SELECT 'task-run:' || id FROM task_runs
-       WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)
-     )`,
-  ).run(groupFolder);
   stmt(
     `DELETE FROM usage_limit_waits
      WHERE scope_key IN (

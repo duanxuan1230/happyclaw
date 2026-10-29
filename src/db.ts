@@ -119,8 +119,6 @@ import {
   clearAgentSessionHistoryReinjections,
   clearFolderRuntimeState,
   clearSessionHistoryReinjection,
-  clearTaskFailure,
-  clearTaskFailureNotices,
   clearUsageLimitWait,
   initRuntimeStateStore,
 } from './runtime-state-store.js';
@@ -196,8 +194,8 @@ function stmts() {
           id, chat_jid, source_jid, sender, sender_name, content, timestamp, is_from_me,
           attachments, token_usage, channel_context, turn_id, session_id, sdk_message_uuid, source_kind, finalization_reason, task_id,
           delivery_mode, delivery_status, delivery_run_id, delivery_priority, delivery_updated_at,
-          history_recovery_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          automation_run_id, history_recovery_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
           COALESCE((
             SELECT history_recovery_allowed FROM messages
             WHERE id = ? AND chat_jid = ?
@@ -252,7 +250,7 @@ function stmts() {
       ),
       getMessagesSince: db.prepare(
         `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
-                m.attachments, m.channel_context, m.source_kind, m.task_id,
+                m.attachments, m.channel_context, m.source_kind, m.task_id, m.automation_run_id,
                 m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
                 m.delivery_updated_at, seq.sequence AS ingest_sequence
          FROM message_ingest_sequences seq
@@ -263,7 +261,7 @@ function stmts() {
       ),
       getMessagesSinceLimited: db.prepare(
         `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
-                m.attachments, m.channel_context, m.source_kind, m.task_id,
+                m.attachments, m.channel_context, m.source_kind, m.task_id, m.automation_run_id,
                 m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
                 m.delivery_updated_at, seq.sequence AS ingest_sequence
          FROM message_ingest_sequences seq
@@ -287,7 +285,7 @@ function getNewMessagesStmt(jidCount: number): any {
     const placeholders = Array(jidCount).fill('?').join(',');
     s = db.prepare(
       `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
-              m.attachments, m.channel_context, m.source_kind, m.task_id,
+              m.attachments, m.channel_context, m.source_kind, m.task_id, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -295,7 +293,7 @@ function getNewMessagesStmt(jidCount: number): any {
        WHERE seq.sequence > ?
          AND m.chat_jid IN (${placeholders})
          AND m.is_from_me = 0
-         AND COALESCE(m.source_kind, '') NOT IN ('user_command', 'scheduled_task_prompt')
+         AND COALESCE(m.source_kind, '') NOT IN ('user_command', 'scheduled_task_prompt', 'automation_prompt')
          AND COALESCE(m.delivery_status, '') NOT IN ('queued', 'promoting', 'cancelled', 'awaiting_companion', 'subsumed')
        ORDER BY seq.sequence ASC`,
     );
@@ -331,6 +329,8 @@ interface StoredMessageMeta {
   deliveryRunId?: string | null;
   deliveryPriority?: number | null;
   deliveryUpdatedAt?: string | null;
+  /** automation_runs.id of an automation_prompt input. */
+  automationRunId?: string | null;
 }
 
 function hasColumn(tableName: string, columnName: string): boolean {
@@ -1708,6 +1708,7 @@ export function initDatabase(
   ensureColumn('messages', 'delivery_run_id', 'TEXT');
   ensureColumn('messages', 'delivery_priority', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('messages', 'delivery_updated_at', 'TEXT');
+  ensureColumn('messages', 'automation_run_id', 'TEXT');
   // v72 -> v73: fence legacy workspace transcript rows that mixed private and
   // group messages without trusting provider-controlled timestamps. Existing
   // rows can be disabled for model recovery while future rows default to safe.
@@ -1747,6 +1748,10 @@ export function initDatabase(
   ensureColumn('agents', 'root_message_id', 'TEXT');
   ensureColumn('agents', 'title_source', 'TEXT');
   ensureColumn('agents', 'last_active_at', 'TEXT');
+  ensureColumn('agents', 'automation_id', 'TEXT');
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_agents_automation ON agents(automation_id)',
+  );
 
   // Add index on target_agent_id for fast lookup of IM bindings
   db.exec(
@@ -3383,6 +3388,7 @@ export function storeMessageDirect(
     meta?.deliveryRunId ?? null,
     meta?.deliveryPriority ?? 0,
     meta?.deliveryUpdatedAt ?? null,
+    meta?.automationRunId ?? null,
     effectiveMsgId,
     chatJid,
   );
@@ -3660,6 +3666,12 @@ function normalizeQueuedFollowUpRow(
     timestamp: String(row.timestamp),
     attachments: row.attachments ? String(row.attachments) : undefined,
     channel_context: parseChannelTurnContext(row.channel_context),
+    source_kind: row.source_kind
+      ? (String(row.source_kind) as MessageSourceKind)
+      : null,
+    automation_run_id: row.automation_run_id
+      ? String(row.automation_run_id)
+      : null,
     delivery_mode: (row.delivery_mode === 'steer'
       ? 'steer'
       : 'queue') as FollowUpMode,
@@ -3672,8 +3684,8 @@ function normalizeQueuedFollowUpRow(
 
 const FOLLOW_UP_SELECT = `
   SELECT id, chat_jid, source_jid, sender, sender_name, content, timestamp,
-         attachments, channel_context, delivery_mode, delivery_status, delivery_run_id,
-         delivery_priority,
+         attachments, channel_context, source_kind, automation_run_id,
+         delivery_mode, delivery_status, delivery_run_id, delivery_priority,
          (SELECT sequence FROM message_ingest_sequences seq
           WHERE seq.chat_jid = messages.chat_jid AND seq.message_id = messages.id)
            AS ingest_sequence
@@ -5544,7 +5556,6 @@ export function permanentlyDeleteTasksWithRevisions(
           );
         }
       }
-      clearTaskFailureNotices(currentTasks.map((task) => task.id));
 
       return {
         status: 'deleted',
@@ -5570,7 +5581,6 @@ export function deleteTask(id: string): void {
     `DELETE FROM usage_limit_waits
      WHERE scope_key IN (SELECT 'task-run:' || id FROM task_runs WHERE task_id = ?)`,
   ).run(id);
-  clearTaskFailure(id);
   prepareCached('DELETE FROM task_runs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
   prepareCached('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
@@ -13368,7 +13378,7 @@ export function getMessagesPage(
       ? `
       SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
              m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
              m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
              m.delivery_updated_at, seq.sequence AS ingest_sequence
       FROM message_ingest_sequences seq
@@ -13381,7 +13391,7 @@ export function getMessagesPage(
         ? `
       SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
              m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
              m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
              m.delivery_updated_at, seq.sequence AS ingest_sequence
       FROM message_ingest_sequences seq
@@ -13393,7 +13403,7 @@ export function getMessagesPage(
         : `
       SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
              m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+             m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
              m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
              m.delivery_updated_at, seq.sequence AS ingest_sequence
       FROM message_ingest_sequences seq
@@ -13426,7 +13436,7 @@ export function getMessagesForTurn(
   const rows =
     prepareCached(`SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13468,7 +13478,7 @@ export function getConversationHistoryMessagesPage(
   const rows =
     prepareCached(`SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13502,7 +13512,7 @@ export function getMessagesAfter(
     stableSequence !== undefined
       ? `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13512,7 +13522,7 @@ export function getMessagesAfter(
        LIMIT ?`
       : `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13602,7 +13612,7 @@ export function getMessagesPageMulti(
     stableSequence !== undefined
       ? `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13613,7 +13623,7 @@ export function getMessagesPageMulti(
       : before
         ? `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
                 m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-                m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+                m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
                 m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
                 m.delivery_updated_at, seq.sequence AS ingest_sequence
          FROM message_ingest_sequences seq
@@ -13623,7 +13633,7 @@ export function getMessagesPageMulti(
          LIMIT ?`
         : `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13669,7 +13679,7 @@ export function getMessagesAfterMulti(
     stableSequence !== undefined
       ? `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -13679,7 +13689,7 @@ export function getMessagesAfterMulti(
        LIMIT ?`
       : `SELECT m.id, m.chat_jid, m.source_jid, m.sender, m.sender_name, m.content, m.timestamp,
               m.is_from_me, m.attachments, m.token_usage, m.channel_context,
-              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason,
+              m.turn_id, m.session_id, m.sdk_message_uuid, m.source_kind, m.finalization_reason, m.automation_run_id,
               m.delivery_mode, m.delivery_status, m.delivery_run_id, m.delivery_priority,
               m.delivery_updated_at, seq.sequence AS ingest_sequence
        FROM message_ingest_sequences seq
@@ -14626,8 +14636,8 @@ export function queryAuthAuditLogs(
 // ===================== Sub-Agent CRUD =====================
 
 export function createAgent(agent: SubAgent): void {
-  prepareCached(`INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, source_kind, thread_id, root_message_id, title_source, last_active_at, last_im_jid)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  prepareCached(`INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, source_kind, thread_id, root_message_id, title_source, last_active_at, last_im_jid, automation_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     agent.id,
     agent.group_folder,
     agent.chat_jid,
@@ -14646,6 +14656,7 @@ export function createAgent(agent: SubAgent): void {
     agent.title_source ?? null,
     agent.last_active_at ?? null,
     agent.last_im_jid ?? null,
+    agent.automation_id ?? null,
   );
 }
 
@@ -15008,7 +15019,8 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
             | 'native_thread'
             | 'feishu_thread'
             | 'auto_im'
-            | 'channel_direct')
+            | 'channel_direct'
+            | 'automation')
         : null,
     thread_id: typeof row.thread_id === 'string' ? row.thread_id : null,
     root_message_id:
@@ -15024,6 +15036,8 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
         : null,
     last_active_at:
       typeof row.last_active_at === 'string' ? row.last_active_at : null,
+    automation_id:
+      typeof row.automation_id === 'string' ? row.automation_id : null,
   };
 }
 
@@ -15133,9 +15147,13 @@ export function getAgentBuilderInputMessage(
   is_from_me: number;
   source_kind: string | null;
   task_id: string | null;
+  automation_run_id: string | null;
+  sender_name: string | null;
+  attachments: string | null;
 } | null {
   const row =
-    prepareCached(`SELECT id, chat_jid, content, sender, source_jid, is_from_me, source_kind, task_id
+    prepareCached(`SELECT id, chat_jid, content, sender, source_jid, is_from_me, source_kind, task_id, automation_run_id,
+              sender_name, attachments
        FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1`).get(
       messageId,
       chatJid,
@@ -15149,6 +15167,9 @@ export function getAgentBuilderInputMessage(
           is_from_me: number;
           source_kind: string | null;
           task_id: string | null;
+          automation_run_id: string | null;
+          sender_name: string | null;
+          attachments: string | null;
         }
       | undefined;
   return row

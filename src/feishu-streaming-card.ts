@@ -125,6 +125,11 @@ export interface StreamingCardOptions {
    * so it is identical across processes.
    */
   idempotencyKey?: string;
+  /**
+   * Fixed header title for every card of this reply (an automation run shows
+   * the automation's name). Without it the header is a status word.
+   */
+  title?: string;
 }
 
 export interface StreamingCardLifecycleSnapshot {
@@ -969,6 +974,7 @@ function buildStreamingCard(
   state: 'streaming' | 'completed' | 'aborted',
   footerNote?: string,
   ask?: AskCardInput,
+  title?: string,
 ): object {
   // Terminal states delegate to the structured v2 builder, which drives the
   // header off status: `done` drops the header so short replies aren't reduced
@@ -979,6 +985,7 @@ function buildStreamingCard(
     return buildAgentReplyCard({
       status: 'done',
       text,
+      title,
       footer: footerNote,
       ask,
     });
@@ -987,6 +994,7 @@ function buildStreamingCard(
     return buildAgentReplyCard({
       status: 'warning',
       text,
+      title,
       footer: footerNote,
     });
   }
@@ -996,7 +1004,7 @@ function buildStreamingCard(
   // body intact (first line stays in MAIN_CONTENT) means the streaming→terminal
   // transition no longer shuffles the first line between header and body.
   const optimized = feishuCardMarkdown(text || STREAMING_PLACEHOLDER);
-  const streamingTitle = statusHeadline('running');
+  const streamingTitle = title?.trim() || statusHeadline('running');
   const elements: Array<Record<string, unknown>> = [
     {
       tag: 'markdown',
@@ -1173,12 +1181,12 @@ function pickPrimaryModel(
 
 // ─── Streaming Mode Card Builder ──────────────────────────────
 
-function buildStreamingModeCard(initialText: string): object {
+function buildStreamingModeCard(initialText: string, title?: string): object {
   // Delegate to the shared rich skeleton: STATUS_BANNER + PROGRESS / TOOLS /
   // THINKING collapsible_panels + MAIN_CONTENT (typewriter) + INTERRUPT button
   // + FOOTER_NOTE. Each panel wraps a markdown element with its own element_id
   // so the controller can patch slots independently.
-  return buildStreamingAgentCard({ initialText, rich: true });
+  return buildStreamingAgentCard({ initialText, rich: true, title });
 }
 
 // ─── Flush Controller ─────────────────────────────────────────
@@ -2416,6 +2424,7 @@ class MultiCardManager {
     replyInThread = false,
     onCardCreated?: (messageId: string) => void,
     uuidSeed?: string,
+    private readonly fixedTitle?: string,
   ) {
     this.client = client;
     this.chatId = chatId;
@@ -2458,7 +2467,12 @@ class MultiCardManager {
    */
   async initialize(initialText: string): Promise<string> {
     const card = new CardKitBackend(this.client);
-    const cardJson = buildSchema2Card(initialText, 'streaming');
+    const cardJson = buildSchema2Card(
+      initialText,
+      'streaming',
+      '',
+      this.fixedTitle,
+    );
     await card.createCard(cardJson);
     const messageId = await this.sendNewCard(card);
     this.cards.push(card);
@@ -2566,7 +2580,8 @@ class MultiCardManager {
     // Continuation cards keep the title extracted from the FULL text so all
     // cards of one reply share a consistent header.
     const overrideTitle =
-      this.cardIndex > 0 ? extractTitleAndBody(text).title : undefined;
+      this.fixedTitle ??
+      (this.cardIndex > 0 ? extractTitleAndBody(text).title : undefined);
 
     // After rollover the tail may STILL exceed one card (rollover caps at 8
     // freezes, and the final unfrozen slice can be a full budget). For terminal
@@ -2650,7 +2665,9 @@ class MultiCardManager {
       const groupState = isLast ? state : ('frozen' as const);
       const prefix = i === 0 ? firstTitlePrefix : '(续) ';
       const titleOverride =
-        i === 0 ? overrideTitle : extractTitleAndBody(tail).title;
+        i === 0
+          ? overrideTitle
+          : (this.fixedTitle ?? extractTitleAndBody(tail).title);
       const card = buildSchema2Card(
         render(groupText),
         groupState,
@@ -2771,7 +2788,7 @@ class MultiCardManager {
    * text, never repeatedly for the same content.
    */
   private async rollover(fullText: string): Promise<void> {
-    const { title } = extractTitleAndBody(fullText);
+    const title = this.fixedTitle ?? extractTitleAndBody(fullText).title;
     // A degradation handover can dump a large backlog in one commit; freeze it
     // across multiple cards. Guard caps pathological loops.
     let guard = 0;
@@ -2808,7 +2825,7 @@ class MultiCardManager {
         frozenText,
         'frozen',
         this.cardIndex > 0 ? '(续) ' : '',
-        this.cardIndex > 0 ? title : undefined,
+        this.cardIndex > 0 || this.fixedTitle ? title : undefined,
       );
       const currentCard = this.cards[this.cards.length - 1];
       if (currentCard) {
@@ -2875,6 +2892,7 @@ export class StreamingCardController {
   private readonly onFallback?: () => void;
   private readonly onCardCreated?: (messageId: string) => void;
   private readonly lifecycle?: StreamingCardLifecycle;
+  private readonly title?: string;
 
   // CardKit mode
   private useCardKit = false;
@@ -2976,6 +2994,7 @@ export class StreamingCardController {
     this.onFallback = opts.onFallback;
     this.onCardCreated = opts.onCardCreated;
     this.lifecycle = opts.lifecycle;
+    this.title = opts.title?.trim() || undefined;
     this.idempotencyKey =
       opts.idempotencyKey?.trim() ||
       opts.lifecycle?.idempotencyKey?.trim() ||
@@ -3629,7 +3648,9 @@ export class StreamingCardController {
           this.accumulatedText || STREAMING_PLACEHOLDER,
         )[0];
         try {
-          await backend.createCard(buildStreamingModeCard(page.text));
+          await backend.createCard(
+            buildStreamingModeCard(page.text, this.title),
+          );
           break;
         } catch (error) {
           if (!this.reduceNativeCapacity(error)) throw error;
@@ -3693,6 +3714,7 @@ export class StreamingCardController {
         this.replyInThread,
         this.onCardCreated,
         this.idempotencyKey,
+        this.title,
       );
       const messageId = await this.multiCard.initialize(initialText);
 
@@ -3730,7 +3752,13 @@ export class StreamingCardController {
   }
 
   private async createLegacyCard(initialText: string): Promise<void> {
-    const card = buildStreamingCard(initialText, 'streaming');
+    const card = buildStreamingCard(
+      initialText,
+      'streaming',
+      undefined,
+      undefined,
+      this.title,
+    );
     const content = JSON.stringify(card);
 
     try {
@@ -4824,6 +4852,7 @@ export class StreamingCardController {
       const card = buildAgentReplyCard({
         status,
         text: text || '> ⚠️ 本次运行没有生成可展示的最终内容。',
+        title: this.title,
         thinking,
         ask: askInput,
         meta: {
@@ -5043,6 +5072,7 @@ export class StreamingCardController {
         displayState,
         footerNote,
         ask,
+        this.title,
       );
 
       try {

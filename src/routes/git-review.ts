@@ -211,7 +211,6 @@ gitReviewRoutes.get('/:jid/git/worktree-support', authMiddleware, async (c) => {
 });
 
 const AGENT_JID_MARKER = '#agent:';
-const TASK_JID_MARKER = '#task:';
 
 function workspaceForFolder(folder: string): WorkspaceGroup | undefined {
   for (const jid of getJidsByFolder(folder)) {
@@ -245,7 +244,7 @@ gitReviewRoutes.get('/:jid/workdir/peers', authMiddleware, (c) => {
   const peers: Array<{
     workspace_jid: string;
     workspace_name: string;
-    kind: 'main' | 'session' | 'task';
+    kind: 'main' | 'session';
     session_id: string | null;
     session_name: string | null;
   }> = [];
@@ -257,21 +256,13 @@ gitReviewRoutes.get('/:jid/workdir/peers', authMiddleware, (c) => {
       agentMarker >= 0
         ? entry.jid.slice(agentMarker + AGENT_JID_MARKER.length)
         : null;
-    const kind = agentId
-      ? 'session'
-      : entry.jid.includes(TASK_JID_MARKER)
-        ? 'task'
-        : 'main';
+    const kind = agentId ? 'session' : 'main';
     const workspace = workspaceForFolder(entry.groupFolder);
     if (!workspace) continue;
-    if (
-      kind !== 'task' &&
-      workspace.folder === scope.group.folder &&
-      agentId === scope.agentId
-    ) {
+    if (workspace.folder === scope.group.folder && agentId === scope.agentId) {
       continue;
     }
-    const key = kind === 'task' ? entry.jid : `${workspace.jid}\0${agentId}`;
+    const key = `${workspace.jid}\0${agentId}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const dir = realpathBestEffort(

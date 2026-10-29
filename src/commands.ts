@@ -11,6 +11,7 @@ import {
   ensureChatExists,
   getMessageCursor,
 } from './db.js';
+import { cancelAutomationRunsOfLanes } from './automation-run-ledger.js';
 import { logger } from './logger.js';
 import { notifyConversationContextCleared } from './context-usage-events.js';
 import { clearSessionFiles } from './session-files.js';
@@ -142,6 +143,12 @@ export async function executeSessionReset(
   const mode: SessionResetMode = opts?.mode === 'fresh' ? 'fresh' : 'clear';
   const dividerContent =
     mode === 'fresh' ? 'context_fresh_window' : 'context_reset';
+  // The reset skips every input of the session, so their automation runs
+  // end now, before the runner stops.
+  cancelAutomationRunsOfLanes(
+    resetTargetJids(folder, targetJid, agentId),
+    mode,
+  );
 
   if (agentId) {
     // Agent-specific reset: only stop the agent's virtual JID process
