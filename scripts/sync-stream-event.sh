@@ -66,3 +66,8 @@ done
 # to guide the user through adding one.
 sync_file "$ROOT/shared/model-providers.ts" "$ROOT/src/model-providers.ts"
 sync_file "$ROOT/shared/model-providers.ts" "$ROOT/web/src/lib/model-providers.ts"
+
+# --- Automations: validation, labels and the per-run context (all three) ---
+sync_file "$ROOT/shared/automation.ts" "$ROOT/src/automation.ts"
+sync_file "$ROOT/shared/automation.ts" "$ROOT/web/src/lib/automation.ts"
+sync_file "$ROOT/shared/automation.ts" "$ROOT/container/agent-runner/src/automation.ts"
