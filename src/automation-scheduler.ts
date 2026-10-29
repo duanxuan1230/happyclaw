@@ -572,7 +572,7 @@ export class AutomationEngine implements AutomationScheduler {
     }
 
     // The check decides whether the run happens at all, so it runs before
-    // any session is created, in the workspace directory.
+    // any session is created.
     const firedAt = run.firedAt ?? run.createdAt;
     let preCheckOutput: string | null = null;
     const check = automation.preRunCheck;
@@ -585,7 +585,14 @@ export class AutomationEngine implements AutomationScheduler {
           automationName: automation.name,
           runId,
           command: check.command,
-          cwd: this.deps.resolveWorkdir(automation, null),
+          // A bound or persistent run checks in its session's directory (a
+          // session worktree if it has one); fresh has no session yet.
+          cwd: this.deps.resolveWorkdir(
+            automation,
+            automation.sessionMode === 'fresh'
+              ? null
+              : automation.targetSessionJid,
+          ),
           timeoutMs,
           firedAt,
           lastFinishedAt: automation.lastFinishedAt,

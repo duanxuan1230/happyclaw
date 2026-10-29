@@ -917,6 +917,28 @@ describe('run lifecycle fixes', () => {
     expect(runtime.injected).toHaveLength(1);
   });
 
+  test('a bound run checks in its target session directory', async () => {
+    const workdirs: Array<string | null> = [];
+    const { engine, service } = setup('2026-10-30T00:00:00Z', {
+      resolveWorkdir: (_automation, sessionJid) => {
+        workdirs.push(sessionJid);
+        return os.tmpdir();
+      },
+    });
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({
+        schedule: { kind: 'manual' },
+        sessionMode: 'bound',
+        preRunCheck: { command: 'exit 2' },
+      }),
+      targetSessionJid: WS,
+    });
+    await service.runNow(web, a.id);
+    await engine.idle();
+    expect(workdirs).toEqual([WS]);
+  });
+
   test('a billing denial creates no session', async () => {
     const { engine, service, runtime } = setup('2026-10-30T00:00:00Z', {
       checkBilling: () => ({ ok: false, reason: '余额不足' }),
