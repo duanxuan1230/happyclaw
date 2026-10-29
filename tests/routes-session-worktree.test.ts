@@ -425,6 +425,39 @@ describe('Review panel and file panel roots', () => {
     expect(branchDiff.body.diff).toContain('+x');
   });
 
+  test('after merging main, the branch review shows only the session’s work', async () => {
+    const repo = makeRepo();
+    const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+    const created = await createSession(jid, { worktree: true });
+    const sessionId = created.body.session.id as string;
+    const worktree = store.getSessionWorktree(sessionId)!;
+    fs.writeFileSync(path.join(worktree.worktree_path, 'own.txt'), 'own\n');
+    git(worktree.worktree_path, 'add', '.');
+    git(worktree.worktree_path, 'commit', '-qm', 'session work');
+    fs.writeFileSync(path.join(repo, 'upstream.txt'), 'upstream\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'upstream work');
+    git(worktree.worktree_path, 'merge', '-q', '--no-edit', 'main');
+    const mergeBase = git(worktree.worktree_path, 'rev-parse', 'main');
+
+    const status = await call(
+      gitRoutes,
+      `/${enc(jid)}/git/status?agentId=${sessionId}&scope=branch`,
+    );
+    expect(status.body).toMatchObject({
+      state: 'ok',
+      baseCommit: mergeBase,
+      baseAhead: 2,
+      scope: 'branch',
+    });
+    expect(status.body.files.map((f: any) => f.path)).toEqual(['own.txt']);
+    const upstream = await call(
+      gitRoutes,
+      `/${enc(jid)}/git/diff?agentId=${sessionId}&path=upstream.txt&scope=branch`,
+    );
+    expect(upstream.body).toMatchObject({ state: 'ok', diff: '' });
+  });
+
   test('explains unsupported workspaces instead of failing', async () => {
     const container = seedWorkspace({ executionMode: 'container' });
     const status = await call(gitRoutes, `/${enc(container.jid)}/git/status`);

@@ -328,6 +328,8 @@ export interface GitReviewFile {
 export type GitReviewScope = 'working' | 'branch';
 
 export interface GitReviewReadOptions {
+  /** Branch reviews: the base from `resolveBranchReviewBase`, not the raw
+   * recorded commit. */
   baseCommit?: string | null;
   scope?: GitReviewScope;
   origPath?: string;
@@ -546,6 +548,77 @@ async function resolveValidBaseCommit(
   } catch {
     return null;
   }
+}
+
+/** One trimmed line of git output, or null when git fails. */
+async function gitLine(root: string, args: string[]): Promise<string | null> {
+  try {
+    return (await runGit(root, args, { maxBytes: 1024 })).stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tips of the repository's default branch, local and remote, that exist,
+ * except the branch HEAD is on: reviewing the default branch itself, its own
+ * commits are the work.
+ */
+async function defaultBranchTips(root: string): Promise<string[]> {
+  const [originHead, current] = await Promise.all([
+    gitLine(root, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']),
+    gitLine(root, ['symbolic-ref', '--quiet', 'HEAD']),
+  ]);
+  const refs = originHead?.startsWith('refs/remotes/origin/')
+    ? [
+        `refs/heads/${originHead.slice('refs/remotes/origin/'.length)}`,
+        originHead,
+      ]
+    : ['refs/heads/main', 'refs/heads/master'];
+  const tips = await Promise.all(
+    refs
+      .filter((ref) => ref !== current)
+      .map((ref) => resolveValidBaseCommit(root, ref)),
+  );
+  return [...new Set(tips.filter((tip): tip is string => tip !== null))];
+}
+
+/**
+ * The commit a session branch's own work starts from, for a branch review.
+ * The commit recorded at creation stops being that once the branch merges or
+ * rebases onto newer upstream work, which would then be shown as the
+ * session's. No base branch is recorded, so take the newest of the recorded
+ * commit and the merge-bases of HEAD with the default branch's tips; it only
+ * ever moves forward along history, never back past the recorded commit.
+ * Resolve it once per request and hand it to both readers.
+ */
+export async function resolveBranchReviewBase(
+  root: string,
+  recorded: string | null | undefined,
+): Promise<string | null> {
+  let best = await resolveValidBaseCommit(root, recorded);
+  if (!best) return null;
+  const mergeBases = await Promise.all(
+    (await defaultBranchTips(root)).map((tip) =>
+      gitLine(root, ['merge-base', 'HEAD', tip]),
+    ),
+  );
+  for (const mergeBase of mergeBases) {
+    if (
+      mergeBase &&
+      COMMIT_SHA_RE.test(mergeBase) &&
+      mergeBase !== best &&
+      (await gitLine(root, [
+        'merge-base',
+        '--is-ancestor',
+        best,
+        mergeBase,
+      ])) !== null
+    ) {
+      best = mergeBase;
+    }
+  }
+  return best;
 }
 
 async function countBaseAhead(

@@ -205,7 +205,7 @@ function WorktreeBadge({
   return (
     <Badge
       variant={broken ? 'warning' : 'neutral'}
-      title={`分支 ${worktree.branch}，基于 ${worktree.base_commit.slice(0, 7)}${
+      title={`分支 ${worktree.branch}，创建自 ${worktree.base_commit.slice(0, 7)}${
         broken ? '，当前不可用' : ''
       }`}
     >

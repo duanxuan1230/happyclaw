@@ -29,6 +29,7 @@ import {
   locateGitRepo,
   readGitFileDiff,
   readGitStatus,
+  resolveBranchReviewBase,
 } from '../git-review.js';
 import {
   getWorktreeSupport,
@@ -147,7 +148,10 @@ gitReviewRoutes.get('/:jid/git/status', authMiddleware, async (c) => {
   if (root.state !== 'ok') return c.json({ ...root, worktree });
   try {
     const status = await readGitStatus(root.root, {
-      baseCommit: storedWorktree?.base_commit ?? null,
+      baseCommit: await resolveBranchReviewBase(
+        root.root,
+        storedWorktree?.base_commit,
+      ),
       scope: reviewScope,
     });
     return c.json({ state: 'ok', root: root.root, worktree, ...status });
@@ -174,7 +178,13 @@ gitReviewRoutes.get('/:jid/git/diff', authMiddleware, async (c) => {
       filePath,
       c.req.query('orig_path') || undefined,
       {
-        baseCommit: storedWorktree?.base_commit ?? null,
+        baseCommit:
+          reviewScope === 'branch'
+            ? await resolveBranchReviewBase(
+                root.root,
+                storedWorktree?.base_commit,
+              )
+            : null,
         scope: reviewScope,
       },
     );
