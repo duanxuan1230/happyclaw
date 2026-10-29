@@ -189,60 +189,55 @@ describe('a prepared batch whose run ended meanwhile', () => {
         },
       ]),
     );
-    const turns = new ledger.AutomationTurnTracker();
-    turns.remember(messages[messages.length - 1].id, messages);
-    const queue = { enqueueMessageCheck: vi.fn() };
     const commitBatch = vi.fn();
     const globals: Record<string, unknown> = {
-      queue,
+      queue: { enqueueMessageCheck: vi.fn() },
+      logger: { warn: vi.fn() },
+      completeOutOfBandMessage: vi.fn(),
       completeOutOfBandMessages: vi.fn(),
       getUncertainChannelOutboxForTurn: () => undefined,
       getFailedChannelOutboxForTurn: () => undefined,
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('settleInterruptedChannelTurn');
-    harness.install('withdrawEndedAutomationInputs');
-    const verdict = (
-      globals.withdrawEndedAutomationInputs as (...args: unknown[]) => unknown
-    )(LANE, messages, runtimes, turns, commitBatch);
-    return { verdict, runtimes, turns, queue, globals, commitBatch };
+    harness.install('runnableBatchInputs');
+    const runnable = (
+      globals.runnableBatchInputs as (...args: unknown[]) => NewMessage[] | null
+    )(LANE, messages, runtimes, commitBatch);
+    return { runnable, runtimes, commitBatch, globals };
   }
 
   test('only ended inputs: every turn is cancelled and the batch is consumed', () => {
     core(new Set());
     const ended = storeInput('r-batch-all');
     const run = prepared([ended], [ended.id]);
-    expect(run.verdict).toBe(true);
+    expect(run.runnable).toBeNull();
     expect(run.commitBatch).toHaveBeenCalledTimes(1);
     expect(run.runtimes.size).toBe(0);
-    expect(run.queue.enqueueMessageCheck).not.toHaveBeenCalled();
   });
 
-  test('mixed: only the ended inputs are consumed; the rest is read again', () => {
+  test('mixed: the earlier user input runs and the batch commits as one', () => {
     core(new Set());
     const user = storeInput(null);
     const ended = storeInput('r-batch-mixed');
-    const userRuntime = 'user-runtime';
-    const run = prepared([user, ended], [userRuntime, ended.id]);
-    expect(run.verdict).toBe(true);
+    const run = prepared([user, ended], [ended.id]);
+    // The prompt is built from these; the batch's turn keeps running and
+    // its normal commit moves the cursor past both inputs.
+    expect(run.runnable).toEqual([user]);
     expect(run.commitBatch).not.toHaveBeenCalled();
-    expect(run.globals.completeOutOfBandMessages).toHaveBeenCalledWith(LANE, [
-      ended,
-    ]);
-    // The user turn goes back to retry and its runtime is released; the
-    // ended one is cancelled. Neither is left open for the finally block.
-    expect(run.runtimes.size).toBe(0);
-    expect(run.queue.enqueueMessageCheck).toHaveBeenCalledWith(LANE);
-    expect(run.turns.runOf(ended.id)).toBeNull();
+    expect(run.runtimes.size).toBe(1);
+    // Nothing moves the pull cursor on its own, so U1 is never skipped.
+    expect(run.globals.completeOutOfBandMessage).not.toHaveBeenCalled();
+    expect(run.globals.completeOutOfBandMessages).not.toHaveBeenCalled();
   });
 
   test('nothing ended: the batch starts as prepared', () => {
     core(new Set(['r-batch-live']));
     const live = storeInput('r-batch-live');
-    const run = prepared([live], [live.id]);
-    expect(run.verdict).toBe(false);
+    const messages = [live];
+    const run = prepared(messages, [live.id]);
+    expect(run.runnable).toBe(messages);
     expect(run.commitBatch).not.toHaveBeenCalled();
-    expect(run.runtimes.size).toBe(1);
   });
 });
 
@@ -382,6 +377,7 @@ describe('cancelling and checking an automation input', () => {
     for (const name of [
       'isCursorAfter',
       'cancelAutomationLaneInput',
+      'promoteNextDeliveredBatch',
       'isAutomationLaneInputPending',
     ]) {
       harness.install(name);
@@ -398,6 +394,11 @@ describe('cancelling and checking an automation input', () => {
         lane: string,
         id: string,
       ) => boolean,
+      promote: globals.promoteNextDeliveredBatch as (
+        scope: string,
+        lane: string,
+        completed: Array<{ chatJid: string; messageId: string }>,
+      ) => void,
     };
   }
 
@@ -418,54 +419,82 @@ describe('cancelling and checking an automation input', () => {
     expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
   });
 
-  test.each([
-    ['in the batch being prepared or executed', false],
-    ['piped behind the running query', true],
-  ])(
-    'an input %s steers the query away and closes the runner',
-    async (_label, piped) => {
-      const runId = `r-delivered-${piped}`;
-      core(new Set([runId]));
-      const input = storeInput(runId);
-      const lane = laneHarness();
-      const turn = {
+  test("an input in the run's own executing batch is steered away", async () => {
+    core(new Set(['r-executing']));
+    const input = storeInput('r-executing');
+    const lane = laneHarness();
+    lane.registry.startBatch(FOLDER, [
+      {
         chatJid: LANE,
         messageId: input.id,
-        runtimeTurnId: piped ? 'delivery-2' : input.id,
-        automationRunId: runId,
-      };
-      if (piped) {
-        lane.registry.startBatch(FOLDER, [
-          {
-            chatJid: LANE,
-            messageId: 'user-turn',
-            runtimeTurnId: 'user-turn',
-          },
-        ]);
-        lane.registry.enqueueBatch(FOLDER, [turn]);
-      } else {
-        lane.registry.startBatch(FOLDER, [turn]);
-      }
-      await lane.cancel(LANE, input.id);
-      // Steer semantics for the other inputs; the runner exits, so its
-      // undelivered copy returns to the durable cursor and is dropped.
-      expect(lane.queue.interruptQuery).toHaveBeenCalledWith(LANE);
-      expect(lane.queue.closeStdin).toHaveBeenCalledWith(LANE);
-      expect(lane.globals.completeOutOfBandMessage).not.toHaveBeenCalled();
-    },
-  );
+        runtimeTurnId: input.id,
+        automationRunId: 'r-executing',
+      },
+    ]);
+    await lane.cancel(LANE, input.id);
+    expect(lane.queue.interruptQuery).toHaveBeenCalledWith(LANE);
+    expect(lane.queue.closeStdin).not.toHaveBeenCalled();
+  });
 
-  test('an input nobody read yet is consumed without touching the runner', async () => {
-    core(new Set(['r-unread']));
+  test('a run piped behind a user turn waits; once its batch is active it is steered away', async () => {
+    // The scheduler records the run cancelled before it withdraws the input.
+    const live = new Set<string>();
+    const settled = core(live);
+    const input = storeInput('r-piped');
+    const lane = laneHarness();
+    lane.registry.startBatch(FOLDER, [
+      { chatJid: LANE, messageId: 'user-turn', runtimeTurnId: 'user-turn' },
+    ]);
+    lane.registry.enqueueBatch(FOLDER, [
+      {
+        chatJid: LANE,
+        messageId: input.id,
+        runtimeTurnId: 'delivery-2',
+        automationRunId: 'r-piped',
+      },
+    ]);
+    await lane.cancel(LANE, input.id);
+    // The user's turn keeps running.
+    expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
+    expect(lane.queue.closeStdin).not.toHaveBeenCalled();
+
+    // The user's turn settles; the run's batch becomes the active one.
+    lane.promote(FOLDER, LANE, [{ chatJid: LANE, messageId: 'user-turn' }]);
+    expect(lane.queue.interruptQuery).toHaveBeenCalledTimes(1);
+    expect(lane.queue.interruptQuery).toHaveBeenCalledWith(LANE);
+    expect(lane.registry.activeBatch(FOLDER).map((t) => t.messageId)).toEqual([
+      input.id,
+    ]);
+    // The run stays cancelled: nothing here settled it again.
+    expect(settled).toEqual([]);
+    expect(ledger.isAutomationRunLive('r-piped')).toBe(false);
+  });
+
+  test('a live piped batch becoming active is not interrupted', () => {
+    core(new Set(['r-piped-live']));
+    const lane = laneHarness();
+    lane.registry.startBatch(FOLDER, [
+      { chatJid: LANE, messageId: 'user-turn', runtimeTurnId: 'user-turn' },
+    ]);
+    lane.registry.enqueueBatch(FOLDER, [
+      {
+        chatJid: LANE,
+        messageId: 'automation-run-r-piped-live',
+        runtimeTurnId: 'delivery-2',
+        automationRunId: 'r-piped-live',
+      },
+    ]);
+    lane.promote(FOLDER, LANE, [{ chatJid: LANE, messageId: 'user-turn' }]);
+    expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
+  });
+
+  test('an input nobody read yet is left to the next read, which drops it', async () => {
+    core(new Set());
     const input = storeInput('r-unread');
     const lane = laneHarness();
     await lane.cancel(LANE, input.id);
     expect(lane.queue.interruptQuery).not.toHaveBeenCalled();
     expect(lane.queue.closeStdin).not.toHaveBeenCalled();
-    expect(lane.globals.completeOutOfBandMessage).toHaveBeenCalledWith(
-      LANE,
-      expect.objectContaining({ id: input.id }),
-    );
   });
 
   test('pending is one row read against the committed cursor', () => {

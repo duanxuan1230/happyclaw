@@ -351,10 +351,11 @@ export class AgentBuilderTurnRegistry {
     this.queued.set(folder, queued);
   }
 
+  /** Returns the batch promoted to active by this call (a copy), else []. */
   clearCompleted(
     folder: string,
     completed: Array<{ chatJid: string; messageId: string }>,
-  ): void {
+  ): AgentBuilderTurnContext[] {
     const key = (item: { chatJid: string; messageId: string }) =>
       `${item.chatJid}\u0000${item.messageId}`;
     const completedKeys = new Set(completed.map(key));
@@ -365,7 +366,7 @@ export class AgentBuilderTurnRegistry {
       queued.some((batch) =>
         batch.some((turn) => completedKeys.has(key(turn))),
       );
-    if (!recognized) return;
+    if (!recognized) return [];
 
     this.active.delete(folder);
     const remaining = queued
@@ -375,6 +376,7 @@ export class AgentBuilderTurnRegistry {
     if (next) this.active.set(folder, next);
     if (remaining.length > 0) this.queued.set(folder, remaining);
     else this.queued.delete(folder);
+    return (next ?? []).map((turn) => ({ ...turn }));
   }
 
   delete(folder: string): void {
@@ -401,13 +403,6 @@ export class AgentBuilderTurnRegistry {
       .slice(0, through + 1)
       .flat()
       .map((turn) => ({ ...turn }));
-  }
-
-  /** The message was handed to this scope's runner (active or piped). */
-  hasDeliveredMessage(folder: string, messageId: string): boolean {
-    return this.deliveredBatches(folder).some((batch) =>
-      batch.some((turn) => turn.messageId === messageId),
-    );
   }
 
   private deliveredBatches(folder: string): AgentBuilderTurnContext[][] {
