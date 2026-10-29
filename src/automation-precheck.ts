@@ -181,6 +181,8 @@ export interface PreRunCheckInput extends AutomationCommandIdentity {
   timeoutMs?: number | null;
   firedAt: string;
   lastFinishedAt: string | null;
+  /** Kills the check's process group (cancel, delete, shutdown). */
+  signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -205,6 +207,7 @@ export async function runPreRunCheck(
     timeoutMs: input.timeoutMs ?? AUTOMATION_LIMITS.preRunCheckDefaultTimeoutMs,
     resetTimeoutOnOutput: false,
     outputMax: AUTOMATION_LIMITS.preRunCheckOutputMax,
+    signal: input.signal,
   });
   const exitCode = result.timedOut ? null : result.exitCode;
   return {

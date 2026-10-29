@@ -24,6 +24,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const db = await import('../src/db.js');
+const { logger } = await import('../src/logger.js');
 const store = await import('../src/automation-store.js');
 
 afterAll(() => {
@@ -100,6 +101,7 @@ interface LegacyTask {
   chatJid?: string;
   route?: string | null;
   lastRun?: string | null;
+  createdBy?: string | null;
 }
 
 /** A current database rewound to the v84 shape with legacy task rows. */
@@ -138,7 +140,7 @@ function buildV84Database(tasks: LegacyTask[]): void {
       created_by, deleted_at, delivery_route_jid, last_run, updated_at
     ) VALUES (
       @id, @folder, @chatJid, @prompt, @type, @value, @context, @execution,
-      @script, @status, '2026-02-01T00:00:00.000Z', 'owner-a', @deletedAt,
+      @script, @status, '2026-02-01T00:00:00.000Z', @createdBy, @deletedAt,
       @route, @lastRun, '2026-02-02T00:00:00.000Z'
     )`);
   for (const task of tasks) {
@@ -152,6 +154,7 @@ function buildV84Database(tasks: LegacyTask[]): void {
       chatJid: 'web:alpha',
       route: null,
       lastRun: null,
+      createdBy: 'owner-a',
       ...task,
     });
   }
@@ -252,6 +255,20 @@ describe('v84 → v85', () => {
         status: 'completed',
       },
       {
+        id: 'foreign-creator',
+        prompt: '别人建的',
+        type: 'cron',
+        value: '0 * * * *',
+        createdBy: 'member-b',
+      },
+      {
+        id: 'no-creator',
+        prompt: '老任务',
+        type: 'cron',
+        value: '0 * * * *',
+        createdBy: null,
+      },
+      {
         id: 'orphan-folder',
         prompt: '没有工作区',
         type: 'cron',
@@ -271,13 +288,24 @@ describe('v84 → v85', () => {
         .listAutomations({})
         .map((automation) => [automation.id, automation]),
     );
-    expect([...byId.keys()].sort()).toEqual([
-      'group-cron',
-      'isolated-interval',
-      'once-local',
-      'paused-task',
-      'script-task',
-    ]);
+    expect([...byId.keys()].sort()).toEqual(
+      [
+        'foreign-creator',
+        'group-cron',
+        'isolated-interval',
+        'no-creator',
+        'once-local',
+        'paused-task',
+        'script-task',
+      ].sort(),
+    );
+    // Every automation belongs to the workspace owner.
+    expect(byId.get('foreign-creator')?.createdBy).toBe('owner-a');
+    expect(byId.get('no-creator')?.createdBy).toBe('owner-a');
+    expect(logger.warn).toHaveBeenCalledWith(
+      { taskId: 'foreign-creator', from: 'member-b', to: 'owner-a' },
+      expect.stringContaining('not the workspace owner'),
+    );
     expect(byId.get('group-cron')).toMatchObject({
       workspaceJid: 'web:alpha',
       workspaceFolder: 'alpha',

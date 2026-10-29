@@ -50,7 +50,6 @@ import {
   getLiveAutomationRun,
   inAutomationTransaction,
   insertAutomation,
-  listAutomationRunSessions,
   listAutomationRuns,
   listAutomations,
   listAutomationsTargeting,
@@ -395,6 +394,13 @@ export function createAutomationCore(
             current.workspaceJid,
           )
         : current.targetSessionJid;
+    // The creating turn's route belonged to the old target; the new one
+    // answers wherever its own IM binding points.
+    const deliveryRouteJid =
+      draft.sessionMode !== current.sessionMode ||
+      targetSessionJid !== current.targetSessionJid
+        ? null
+        : current.deliveryRouteJid;
 
     const nowDate = now();
     const next: Automation = {
@@ -405,6 +411,7 @@ export function createAutomationCore(
         : current.schedule,
       sessionMode: draft.sessionMode,
       targetSessionJid,
+      deliveryRouteJid,
       revision: current.revision + 1,
       updatedAt: nowDate.toISOString(),
     };
@@ -460,21 +467,9 @@ export function createAutomationCore(
     return next;
   }
 
-  async function cancelLiveRun(run: AutomationRun, error: string) {
-    if (run.inputMessageId && run.sessionJid) {
-      try {
-        await deps.cancelAutomationInput({
-          sessionJid: run.sessionJid,
-          inputMessageId: run.inputMessageId,
-        });
-      } catch (err) {
-        logger.warn(
-          { err, runId: run.id },
-          'Cancelling an automation input failed',
-        );
-      }
-    }
-    engine.cancelRun(run.id, error);
+  /** A user stop or delete also interrupts a turn already running it. */
+  function cancelLiveRun(run: AutomationRun, error: string) {
+    return engine.cancelRun(run.id, error, { interrupt: true });
   }
 
   // ─── Service ───────────────────────────────────────────────────────────
@@ -625,7 +620,7 @@ export function createAutomationCore(
         }
       }
       for (const run of listRunsInSession(sessionJid)) {
-        engine.cancelRun(run.id, '会话已删除');
+        void engine.cancelRun(run.id, '会话已删除');
       }
     },
 
@@ -645,9 +640,7 @@ export function createAutomationCore(
       const paused: string[] = [];
       for (const automation of listAutomations({ workspaceJid })) {
         const live = getLiveAutomationRun(automation.id);
-        if (live) {
-          engine.cancelRun(live.id, SUSPENDED_REASON);
-        }
+        if (live) void engine.cancelRun(live.id, SUSPENDED_REASON);
         if (
           automation.status === 'active' &&
           engine.pauseAutomation(automation.id, SUSPENDED_REASON)
@@ -694,7 +687,12 @@ export function createAutomationCore(
   ): Promise<void> {
     // A bound automation borrows the user's session; it is never touched.
     if (disposal === 'keep' || automation.sessionMode === 'bound') return;
-    const sessions = new Set(listAutomationRunSessions(automation.id));
+    const sessions = new Set(
+      deps
+        .listAutomationSessions(automation.id)
+        .filter((session) => disposal === 'delete' || !session.archived)
+        .map((session) => session.sessionJid),
+    );
     if (automation.targetSessionJid) sessions.add(automation.targetSessionJid);
     // A run deleting its own automation keeps the session it is talking in.
     if (actor.kind === 'automation_run') sessions.delete(actor.sessionJid);

@@ -18,7 +18,11 @@ export interface FakeRuntime {
   sessions: Set<string>;
   pendingInputs: Set<string>;
   injected: Array<InjectAutomationInputRequest & { inputMessageId: string }>;
-  created: Array<{ sessionJid: string; title: string }>;
+  created: Array<{
+    sessionJid: string;
+    title: string;
+    automationId: string;
+  }>;
   archived: string[];
   deleted: string[];
   cancelled: Array<{ sessionJid: string; inputMessageId: string }>;
@@ -54,10 +58,23 @@ export function createFakeRuntime(
     async createAutomationSession({ automation, title }) {
       const sessionJid = `${automation.workspaceJid}#agent:s${++seq}`;
       runtime.sessions.add(sessionJid);
-      runtime.created.push({ sessionJid, title });
+      runtime.created.push({ sessionJid, title, automationId: automation.id });
       return { sessionJid };
     },
     sessionExists: (jid) => runtime.sessions.has(jid),
+    listAutomationSessions: (automationId) =>
+      runtime.created
+        .filter(
+          (c) =>
+            c.automationId === automationId &&
+            runtime.sessions.has(c.sessionJid),
+        )
+        .reverse()
+        .map((c) => ({
+          sessionJid: c.sessionJid,
+          archived: runtime.archived.includes(c.sessionJid),
+        })),
+    resolveDeliveryRoute: ({ preferredRouteJid }) => preferredRouteJid,
     async archiveAutomationSession(jid) {
       runtime.archived.push(jid);
     },

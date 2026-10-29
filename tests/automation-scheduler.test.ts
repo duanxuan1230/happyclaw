@@ -845,3 +845,216 @@ describe('host commands', () => {
     expect(runtime.scripts).toHaveLength(0);
   });
 });
+
+describe('run lifecycle fixes', () => {
+  test('a cancelled pre-run check is killed at once and creates no session', async () => {
+    const { engine, service, runtime } = setup();
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({
+        schedule: { kind: 'manual' },
+        preRunCheck: { command: 'sleep 30', timeoutMs: 600_000 },
+      }),
+    });
+    const run = await service.runNow(web, a.id);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const started = Date.now();
+    await service.cancelRun(web, a.id, run.id);
+    await engine.idle();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(store.getAutomationRun(run.id)?.status).toBe('cancelled');
+    expect(runtime.created).toHaveLength(0);
+    expect(runtime.injected).toHaveLength(0);
+  });
+
+  test('stop() is not held up by a running pre-run check', async () => {
+    const { engine, service } = setup();
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({
+        schedule: { kind: 'manual' },
+        preRunCheck: { command: 'sleep 30', timeoutMs: 600_000 },
+      }),
+    });
+    engine.start();
+    await service.runNow(web, a.id);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const started = Date.now();
+    await engine.stop();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test('the pre-run check runs in the workspace before any session exists', async () => {
+    const workdirs: Array<string | null> = [];
+    const { engine, service, runtime } = setup('2026-10-30T00:00:00Z', {
+      resolveWorkdir: (_automation, sessionJid) => {
+        workdirs.push(sessionJid);
+        return os.tmpdir();
+      },
+    });
+    const skip = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({
+        schedule: { kind: 'manual' },
+        preRunCheck: { command: 'exit 2' },
+      }),
+    });
+    const go = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({
+        name: 'go',
+        schedule: { kind: 'manual' },
+        preRunCheck: { command: 'true' },
+      }),
+    });
+    await service.runNow(web, skip.id);
+    await engine.idle();
+    expect(runtime.created).toHaveLength(0);
+    await service.runNow(web, go.id);
+    await engine.idle();
+    expect(workdirs).toEqual([null, null]);
+    expect(runtime.created).toHaveLength(1);
+    expect(runtime.injected).toHaveLength(1);
+  });
+
+  test('a billing denial creates no session', async () => {
+    const { engine, service, runtime } = setup('2026-10-30T00:00:00Z', {
+      checkBilling: () => ({ ok: false, reason: '余额不足' }),
+    });
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    await service.runNow(web, a.id);
+    await engine.idle();
+    expect(runtime.created).toHaveLength(0);
+  });
+
+  test('old fresh sessions are archived only after a successful hand-off, awaited', async () => {
+    let failInject = false;
+    let seq = 0;
+    const { engine, service, runtime, clock } = setup('2026-10-30T00:00:00Z', {
+      injectAutomationInput: async () => {
+        if (failInject) throw new Error('queue down');
+        return { inputMessageId: `in-${++seq}` };
+      },
+      archiveAutomationSession: async (jid) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        runtime.archived.push(jid);
+      },
+    });
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    const runOnce = async () => {
+      clock.advance(60_000);
+      const run = await service.runNow(web, a.id);
+      await engine.idle();
+      service.runSink.onRunInputSettled(run.id, {
+        status: 'success',
+        resultText: null,
+      });
+    };
+    for (let i = 0; i < 20; i += 1) await runOnce();
+    expect(runtime.archived).toEqual([]);
+    failInject = true;
+    await runOnce();
+    // The 21st session exists but its hand-off failed: nothing archived.
+    expect(runtime.archived).toEqual([]);
+    failInject = false;
+    await runOnce();
+    // Awaited inside the run: done by the time the run is idle.
+    expect(runtime.archived.sort()).toEqual(
+      runtime.created
+        .slice(0, 2)
+        .map((c) => c.sessionJid)
+        .sort(),
+    );
+  });
+
+  test('isRunLive follows the run row', async () => {
+    const { engine, service } = setup();
+    const a = service.create(web, {
+      workspaceJid: WS,
+      ...harness.draft({ schedule: { kind: 'manual' } }),
+    });
+    const run = await service.runNow(web, a.id);
+    await engine.idle();
+    expect(service.runSink.isRunLive(run.id)).toBe(true);
+    service.runSink.onRunInputSettled(run.id, {
+      status: 'success',
+      resultText: null,
+    });
+    expect(service.runSink.isRunLive(run.id)).toBe(false);
+    expect(service.runSink.isRunLive('unknown')).toBe(false);
+  });
+
+  test('the delivery route is resolved at fire time and for every notice', async () => {
+    const calls: Array<{
+      sessionJid: string | null;
+      preferred: string | null;
+    }> = [];
+    let resolved: string | null = 'feishu:oc_new';
+    const { engine, service, runtime, clock } = setup('2026-10-30T00:00:00Z', {
+      resolveDeliveryRoute: ({ sessionJid, preferredRouteJid }) => {
+        calls.push({ sessionJid, preferred: preferredRouteJid });
+        return resolved;
+      },
+    });
+    const owner: AutomationActor = {
+      kind: 'owner_turn',
+      userId: OWNER,
+      isAdmin: true,
+      workspaceJid: WS,
+      sessionJid: WS,
+      sourceRouteJid: 'feishu:oc_old',
+    };
+    const bound = service.create(owner, {
+      workspaceJid: WS,
+      ...harness.draft({ sessionMode: 'bound', schedule: { kind: 'manual' } }),
+      targetSessionJid: WS,
+    });
+    const run = await service.runNow(web, bound.id);
+    await engine.idle();
+    expect(runtime.injected[0].deliveryRouteJid).toBe('feishu:oc_new');
+    expect(calls[0]).toEqual({ sessionJid: WS, preferred: 'feishu:oc_old' });
+    service.runSink.onRunInputSettled(run.id, {
+      status: 'failed',
+      error: 'boom',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runtime.notices.at(-1)?.routeJid).toBe('feishu:oc_new');
+
+    // Unbound meanwhile: the notice falls back into the session.
+    resolved = null;
+    const fresh = service.create(owner, {
+      workspaceJid: WS,
+      ...harness.draft({ name: 'f', schedule: { kind: 'manual' } }),
+    });
+    clock.advance(60_000);
+    const freshRun = await service.runNow(web, fresh.id);
+    await engine.idle();
+    service.runSink.onRunInputSettled(freshRun.id, {
+      status: 'failed',
+      error: 'boom',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runtime.notices.at(-1)?.routeJid).toBe(
+      store.getAutomationRun(freshRun.id)?.sessionJid,
+    );
+    // No IM route: a fresh success sends no result notice.
+    const before = runtime.notices.length;
+    clock.advance(60_000);
+    const ok = await service.runNow(web, fresh.id);
+    await engine.idle();
+    service.runSink.onRunInputSettled(ok.id, {
+      status: 'success',
+      resultText: 'done',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(runtime.notices.slice(before).map((n) => n.text)).toEqual([
+      '自动化「f」已恢复正常',
+    ]);
+  });
+});

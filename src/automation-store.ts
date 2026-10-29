@@ -483,22 +483,6 @@ export function listRunsInSession(sessionJid: string): AutomationRun[] {
   ).map(toRun);
 }
 
-/** Distinct run sessions, newest first. */
-export function listAutomationRunSessions(
-  automationId: string,
-  page: { offset?: number; limit?: number } = {},
-): string[] {
-  return (
-    stmt(
-      `SELECT session_jid, MAX(created_at) AS last_at FROM automation_runs
-       WHERE automation_id = ? AND session_jid IS NOT NULL
-       GROUP BY session_jid ORDER BY last_at DESC LIMIT ? OFFSET ?`,
-    ).all(automationId, page.limit ?? -1, page.offset ?? 0) as Array<{
-      session_jid: string;
-    }>
-  ).map((row) => row.session_jid);
-}
-
 export function countUnreadAutomationRuns(automationId: string): number {
   const row = stmt(
     `SELECT COUNT(*) AS count FROM automation_runs
@@ -696,6 +680,8 @@ function legacyName(prompt: string, scriptCommand: string | null): string {
 interface LegacyTaskMigrationResult {
   converted: number;
   skipped: Array<{ taskId: string; reason: string }>;
+  /** Tasks created by someone other than the workspace owner. */
+  reassigned: Array<{ taskId: string; from: string; to: string }>;
 }
 
 /**
@@ -709,7 +695,11 @@ export function migrateLegacyScheduledTasks(options: {
   timezone: string;
 }): LegacyTaskMigrationResult {
   const db = requireDatabase();
-  const result: LegacyTaskMigrationResult = { converted: 0, skipped: [] };
+  const result: LegacyTaskMigrationResult = {
+    converted: 0,
+    skipped: [],
+    reassigned: [],
+  };
   const columns = new Set(
     (
       db.prepare('PRAGMA table_info(scheduled_tasks)').all() as Array<{
@@ -744,11 +734,16 @@ export function migrateLegacyScheduledTasks(options: {
       skip('no web workspace for the task folder');
       continue;
     }
-    const createdBy = col(row, 'created_by') ?? workspace.created_by;
+    // An automation belongs to its workspace's owner: REST isolation and
+    // owner turns are keyed on it.
+    const taskCreator = col(row, 'created_by');
+    const createdBy = workspace.created_by ?? taskCreator;
     if (!createdBy) {
       skip('no owner');
       continue;
     }
+    if (taskCreator && taskCreator !== createdBy)
+      result.reassigned.push({ taskId, from: taskCreator, to: createdBy });
     const execution: Automation['execution'] =
       col(row, 'execution_type') === 'script' ? 'script' : 'agent';
     const prompt = String(row.prompt ?? '');
