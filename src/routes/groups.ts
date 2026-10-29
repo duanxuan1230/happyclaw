@@ -652,20 +652,45 @@ class DirtyWorktreesError extends Error {
 }
 
 /**
- * Deleting or rebuilding a workspace removes its sessions' worktrees. Until
- * the caller confirms with `force_worktrees=true`, uncommitted changes in
- * any of them refuse the operation with 409.
+ * The sessions whose at-risk worktrees the caller saw in a 409 and confirmed
+ * dropping: `force_worktrees=true&confirmed_worktrees=<id>,<id>`.
+ */
+function confirmedWorktreeSessions(
+  c: Context<{ Variables: Variables }>,
+): ReadonlySet<string> {
+  if (c.req.query('force_worktrees') !== 'true') return new Set();
+  return new Set(
+    (c.req.query('confirmed_worktrees') ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+}
+
+/** At-risk worktrees, all of them, when any was not confirmed. */
+async function unconfirmedDirtyWorktrees(
+  folder: string,
+  confirmed: ReadonlySet<string>,
+): Promise<DirtyWorktree[]> {
+  const records = listSessionWorktreesByFolder(folder);
+  if (records.length === 0) return [];
+  const dirty = await findDirtySessionWorktrees(records);
+  return dirty.some((item) => !confirmed.has(item.agentId)) ? dirty : [];
+}
+
+/**
+ * Deleting or rebuilding a workspace removes its sessions' worktrees. Work a
+ * worktree could lose refuses the operation with 409 until the caller
+ * confirms that session; the check runs again once the runners have stopped,
+ * so a worktree that became at risk after the caller looked refuses it again.
  */
 async function workspaceWorktreeBlock(
   c: Context<{ Variables: Variables }>,
   folder: string,
-  force: boolean,
+  confirmed: ReadonlySet<string>,
 ): Promise<Response | null> {
-  if (force) return null;
-  const records = listSessionWorktreesByFolder(folder);
-  if (records.length === 0) return null;
   try {
-    const dirty = await findDirtySessionWorktrees(records);
+    const dirty = await unconfirmedDirtyWorktrees(folder, confirmed);
     return dirty.length > 0 ? c.json(dirtyWorktreesConflict(dirty), 409) : null;
   } catch (error) {
     logger.error({ err: error, folder }, 'Failed to inspect session worktrees');
@@ -1989,11 +2014,11 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
       409,
     );
   }
-  const forceWorktrees = c.req.query('force_worktrees') === 'true';
+  const confirmedWorktrees = confirmedWorktreeSessions(c);
   const initialWorktreeBlock = await workspaceWorktreeBlock(
     c,
     existing.folder,
-    forceWorktrees,
+    confirmedWorktrees,
   );
   if (initialWorktreeBlock) return initialWorktreeBlock;
 
@@ -2061,7 +2086,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
     const freshWorktreeBlock = await workspaceWorktreeBlock(
       c,
       freshExisting.folder,
-      forceWorktrees,
+      confirmedWorktrees,
     );
     if (freshWorktreeBlock) return freshWorktreeBlock;
 
@@ -2768,11 +2793,11 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     );
   }
 
-  const forceWorktrees = c.req.query('force_worktrees') === 'true';
+  const confirmedWorktrees = confirmedWorktreeSessions(c);
   const worktreeBlock = await workspaceWorktreeBlock(
     c,
     group.folder,
-    forceWorktrees,
+    confirmedWorktrees,
   );
   if (worktreeBlock) return worktreeBlock;
 
@@ -2833,12 +2858,11 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       );
     }
     // Runners were still writing during the first check.
-    if (!forceWorktrees) {
-      const dirty = await findDirtySessionWorktrees(
-        listSessionWorktreesByFolder(group.folder),
-      );
-      if (dirty.length > 0) throw new DirtyWorktreesError(dirty);
-    }
+    const dirty = await unconfirmedDirtyWorktrees(
+      group.folder,
+      confirmedWorktrees,
+    );
+    if (dirty.length > 0) throw new DirtyWorktreesError(dirty);
 
     // Files are moved aside rather than deleted. The SQLite transaction below
     // either commits the whole rebuild or leaves the database untouched, in

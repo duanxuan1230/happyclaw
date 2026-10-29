@@ -517,17 +517,34 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
   未复制的路径，前两种原因下为空），完整复制时为 `null`（`GET` 列表不带该字段）。Web 在
   新建会话后据此弹出不阻塞的提示。
 - 删除带 worktree 的会话会移除 worktree 目录、保留分支。可能丢失内容时返回 409
-  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules", "embedded_repos"}]}`：
-  有未提交改动（含未跟踪文件）；目录还在但状态读不出（`.git` 丢失或 git 失败，按有改动
-  处理）；初始化过子模块（子模块的本地提交存放在 worktree 的管理目录，会随之删除）；或
-  索引里的 gitlink 在 worktree 中有自己的 `.git` 目录（嵌入的 git 仓库，其中的提交和改动
-  只存在 worktree 里）。嵌入的仓库或子模块指向的提交有变化（已暂存或未暂存）计为改动；
-  检查只读索引和文件系统，不会在嵌入的仓库中启动 git。被 `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。worktree 被
-  标为 `broken` 后，目录恢复时（下次运行或列出会话时重新检查）回到 `active`。删除工作区和 `clear-history` 同理（409 相同），
-  确认参数为 `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
-  （409 `WORKTREE_SESSIONS_EXIST`）。最后一个 worktree 移除后，空的
-  `data/worktrees/{folder}` 一并删除；启动时删除没有任何 worktree 记录的空目录，有内容的
-  目录不动。
+  `{"code": "WORKTREE_DIRTY", "error", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules", "embedded_repos", "detached_commits", "operation_in_progress", "hidden_changes"}]}`，
+  `error` 逐条写明原因：
+  - `changed_files`：未提交改动（含未跟踪文件）；嵌入的仓库或子模块指向的提交有变化也计入。
+  - `unreadable`：目录还在但状态读不出（`.git` 丢失、找不到管理目录、git 失败，或嵌套仓库
+    扫描超过 50 万个条目 / 10 秒），按有改动处理。
+  - `submodules`：初始化过子模块（本地提交存放在 worktree 的管理目录，会随之删除）。
+  - `embedded_repos`：worktree 内任意位置（包括被 `.gitignore`、`info/exclude` 或全局
+    excludesFile 忽略的目录）有另一个仓库的 `.git`：目录、符号链接，或指向本 worktree
+    管理目录 `modules/` 以外的 `.git` 文件；其中的提交和改动只存在 worktree 里。
+  - `detached_commits`：HEAD 不在分支上，且 HEAD 提交不能从任何分支或标签到达（在
+    detached HEAD 上提交、rebase 停在 edit 等），删除后这些提交不可达。
+  - `operation_in_progress`：`"rebase"` | `"merge"` | `"cherry-pick"` | `"revert"` |
+    `"bisect"` 进行中时为对应值，否则为 `null`。
+  - `hidden_changes`：有 assume-unchanged 的文件，或磁盘上存在的 skip-worktree 文件，
+    它们的改动不会出现在状态里（稀疏检出中不在磁盘上的文件不算）。
+
+  检查只读索引、管理目录和文件系统（遍历不跟随符号链接），不会在嵌入的仓库中启动 git；
+  其他被 `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。git
+  无法移除 worktree 时只删除它自己的管理目录（`gitdir` 指向该 worktree），不会清理同一
+  仓库的其他 worktree。worktree 被标为 `broken` 后，目录恢复时（下次运行或列出会话时重新
+  检查）回到 `active`。删除工作区和 `clear-history` 同理（409 相同），确认参数为
+  `?force_worktrees=true&confirmed_worktrees=<session_id>,…`，列出调用方在 409 里看到并确认
+  的会话；停止 runner 之后会再检查一次，出现列表之外的可能丢失内容的 worktree 时再次返回
+  409（列出全部这类 worktree），只带 `force_worktrees=true` 不确认任何 worktree。工作区有
+  worktree 会话时 `PATCH` 不能切换到 Docker 执行（409 `WORKTREE_SESSIONS_EXIST`）。最后一个
+  worktree 移除后，空的 `data/worktrees/{folder}` 一并删除；启动时删除没有任何 worktree
+  记录的空目录，有内容的目录不动。
+
 - 工作区绑定只接受原生话题群（飞书话题群或 Telegram Forum）。
 - Runtime Session 绑定接受私聊和普通群，`sessionId=main` 表示该 Workspace 的主会话。
 - 话题群使用 `thread_map`，每个原生话题映射独立 Session；普通群的 @ 策略不改变绑定层级。

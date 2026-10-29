@@ -29,6 +29,7 @@ describe('discarding worktree changes', () => {
     });
     expect(dirty).toEqual([
       {
+        sessionId: 's1',
         branch: 'happyclaw/s1',
         changedFiles: 0,
         unreadable: true,
@@ -60,12 +61,23 @@ describe('embedded repositories', () => {
             unreadable: false,
             submodules: false,
             embedded_repos: true,
+            detached_commits: true,
+            operation_in_progress: 'rebase',
+            hidden_changes: true,
           },
         ],
       },
     });
     expect(dirty).toEqual([
-      { branch: 'happyclaw/s2', changedFiles: 0, embeddedRepos: true },
+      {
+        sessionId: 's2',
+        branch: 'happyclaw/s2',
+        changedFiles: 0,
+        embeddedRepos: true,
+        detachedCommits: true,
+        operationInProgress: 'rebase',
+        hiddenChanges: true,
+      },
     ]);
     await confirmDiscardWorktreeChanges(dirty!, '丢弃并删除');
     const { message } = (
@@ -74,6 +86,9 @@ describe('embedded repositories', () => {
     expect(message).toContain(
       '包含嵌入的 git 仓库，删除会一并删除其中的提交和改动',
     );
+    expect(message).toContain('HEAD 不在任何分支上');
+    expect(message).toContain('有进行中的 rebase');
+    expect(message).toContain('skip-worktree 或 assume-unchanged');
   });
 });
 

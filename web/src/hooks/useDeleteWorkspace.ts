@@ -87,21 +87,26 @@ export function useDeleteWorkspace(
       // The user has confirmed that deletion may clean up channel bindings.
       // Always send the flag so a binding created after preflight is handled
       // consistently instead of turning this into another manual retry loop.
-      try {
-        await deleteFlow(deletedJid, { unbindChannels: true });
-      } catch (error) {
-        // Session worktrees hold uncommitted work the deletion would remove.
-        const dirty = dirtyWorktreesFromError(error);
-        if (!dirty) throw error;
-        const discard = await confirmDiscardWorktreeChanges(
-          dirty,
-          '丢弃并删除',
-        );
-        if (!discard) return;
-        await deleteFlow(deletedJid, {
-          unbindChannels: true,
-          forceWorktrees: true,
-        });
+      let confirmedWorktrees: string[] | undefined;
+      for (;;) {
+        try {
+          await deleteFlow(deletedJid, {
+            unbindChannels: true,
+            confirmedWorktrees,
+          });
+          break;
+        } catch (error) {
+          // Session worktrees hold work the deletion would remove. The server
+          // checks again after stopping runners and asks about anything new.
+          const dirty = dirtyWorktreesFromError(error);
+          if (!dirty) throw error;
+          const discard = await confirmDiscardWorktreeChanges(
+            dirty,
+            '丢弃并删除',
+          );
+          if (!discard) return;
+          confirmedWorktrees = dirty.map((item) => item.sessionId);
+        }
       }
       inspectionSequence.current += 1;
       setDeleteState(EMPTY_STATE);

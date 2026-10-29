@@ -694,10 +694,19 @@ describe('deleting worktree sessions', () => {
       ],
     });
     expect(db.getRegisteredGroup(jid)).toBeDefined();
+    // Forcing without naming what was confirmed confirms nothing.
+    const unnamed = await call(
+      groupRoutes,
+      `/${enc(jid)}?force_worktrees=true`,
+      {
+        method: 'DELETE',
+      },
+    );
+    expect(unnamed.status).toBe(409);
 
     const forced = await call(
       groupRoutes,
-      `/${enc(jid)}?force_worktrees=true`,
+      `/${enc(jid)}?force_worktrees=true&confirmed_worktrees=${sessionId}`,
       { method: 'DELETE' },
     );
     expect(forced.status).toBe(200);
@@ -730,7 +739,7 @@ describe('deleting worktree sessions', () => {
 
     const forced = await call(
       groupRoutes,
-      `/${enc(jid)}/clear-history?force_worktrees=true`,
+      `/${enc(jid)}/clear-history?force_worktrees=true&confirmed_worktrees=${sessionId}`,
       { method: 'POST' },
     );
     expect(forced.status).toBe(200);
@@ -744,6 +753,51 @@ describe('deleting worktree sessions', () => {
       'hello\n',
     );
   });
+
+  test.each([
+    ['deleting', (jid: string) => `/${enc(jid)}`, 'DELETE'],
+    ['rebuilding', (jid: string) => `/${enc(jid)}/clear-history`, 'POST'],
+  ] as const)(
+    '%s the workspace: work that appears while runners stop asks again',
+    async (_label, route, method) => {
+      const repo = makeRepo();
+      const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+      const confirmed = (await createSession(jid, { worktree: true })).body
+        .session.id as string;
+      const late = (await createSession(jid, { worktree: true })).body.session
+        .id as string;
+      const lateWorktree = store.getSessionWorktree(late)!;
+      fs.writeFileSync(
+        path.join(store.getSessionWorktree(confirmed)!.worktree_path, 'wip'),
+        'wip\n',
+      );
+      // The session's runner writes its last file while it is being stopped.
+      stopGroup.mockImplementationOnce(async () => {
+        fs.writeFileSync(path.join(lateWorktree.worktree_path, 'late'), 'x\n');
+      });
+
+      const again = await call(
+        groupRoutes,
+        `${route(jid)}?force_worktrees=true&confirmed_worktrees=${confirmed}`,
+        { method },
+      );
+      expect(again.status).toBe(409);
+      expect(
+        again.body.dirty_worktrees.map((item: any) => item.session_id).sort(),
+      ).toEqual([confirmed, late].sort());
+      expect(fs.existsSync(path.join(lateWorktree.worktree_path, 'late'))).toBe(
+        true,
+      );
+
+      const both = await call(
+        groupRoutes,
+        `${route(jid)}?force_worktrees=true&confirmed_worktrees=${confirmed},${late}`,
+        { method },
+      );
+      expect(both.status).toBe(200);
+      expect(fs.existsSync(lateWorktree.worktree_path)).toBe(false);
+    },
+  );
 });
 
 describe('workspace settings', () => {

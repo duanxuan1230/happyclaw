@@ -152,7 +152,9 @@ describe('session worktrees in the chat store', () => {
     await expect(
       useChatStore.getState().deleteAgentAction(JID, 's1'),
     ).resolves.toEqual({
-      worktreesDirty: [{ branch: 'happyclaw/s1', changedFiles: 3 }],
+      worktreesDirty: [
+        { sessionId: 's1', branch: 'happyclaw/s1', changedFiles: 3 },
+      ],
     });
     expect(useChatStore.getState().error).toBeNull();
 
@@ -176,16 +178,20 @@ describe('session worktrees in the chat store', () => {
       }),
     );
     await expect(useChatStore.getState().clearHistory(JID)).resolves.toEqual({
-      worktreesDirty: [{ branch: 'happyclaw/s1', changedFiles: 2 }],
+      worktreesDirty: [
+        { sessionId: 's1', branch: 'happyclaw/s1', changedFiles: 2 },
+      ],
     });
     expect(useChatStore.getState().clearing[JID]).toBeUndefined();
 
     api.post.mockRejectedValueOnce({ status: 500, message: 'boom' });
     await expect(
-      useChatStore.getState().clearHistory(JID, { forceWorktrees: true }),
+      useChatStore
+        .getState()
+        .clearHistory(JID, { confirmedWorktrees: ['s1', 's2'] }),
     ).resolves.toBe(false);
     expect(api.post).toHaveBeenLastCalledWith(
-      `/api/groups/${encodeURIComponent(JID)}/clear-history?force_worktrees=true`,
+      `/api/groups/${encodeURIComponent(JID)}/clear-history?force_worktrees=true&confirmed_worktrees=s1%2Cs2`,
     );
   });
 });

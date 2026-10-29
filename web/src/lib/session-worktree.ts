@@ -4,6 +4,8 @@ import type { WorktreeIncludeIncomplete } from '../types';
 
 /** What removing a session's worktree would lose (409 WORKTREE_DIRTY). */
 export interface WorktreeDirtyInfo {
+  /** The session whose worktree it is: what a confirmation names. */
+  sessionId: string;
   branch: string;
   changedFiles: number;
   /** Its status could not be read; changes may remain. */
@@ -12,6 +14,12 @@ export interface WorktreeDirtyInfo {
   submodules?: boolean;
   /** It holds an embedded git repository whose commits go with it. */
   embeddedRepos?: boolean;
+  /** HEAD is detached at commits no branch or tag contains. */
+  detachedCommits?: boolean;
+  /** A rebase, merge, cherry-pick, revert or bisect is under way. */
+  operationInProgress?: string;
+  /** Files marked skip-worktree or assume-unchanged hide their edits. */
+  hiddenChanges?: boolean;
 }
 
 /** Said wherever a worktree is about to be removed. */
@@ -36,24 +44,49 @@ export function dirtyWorktreesFromError(
   }
   return dirty.map(
     (item: {
+      session_id?: unknown;
       branch?: unknown;
       changed_files?: unknown;
       unreadable?: unknown;
       submodules?: unknown;
       embedded_repos?: unknown;
+      detached_commits?: unknown;
+      operation_in_progress?: unknown;
+      hidden_changes?: unknown;
     }) => ({
+      sessionId: String(item.session_id ?? ''),
       branch: String(item.branch ?? ''),
       changedFiles: Number(item.changed_files ?? 0),
       ...(item.unreadable === true ? { unreadable: true } : {}),
       ...(item.submodules === true ? { submodules: true } : {}),
       ...(item.embedded_repos === true ? { embeddedRepos: true } : {}),
+      ...(item.detached_commits === true ? { detachedCommits: true } : {}),
+      ...(typeof item.operation_in_progress === 'string'
+        ? { operationInProgress: item.operation_in_progress }
+        : {}),
+      ...(item.hidden_changes === true ? { hiddenChanges: true } : {}),
     }),
   );
 }
 
 /**
- * Ask whether to discard what the worktrees would lose; the caller retries
- * with the force flag when this resolves true.
+ * Query of a workspace delete or rebuild naming the sessions whose at-risk
+ * worktrees the user confirmed; empty when there are none.
+ */
+export function worktreeConfirmationParams(
+  sessionIds: readonly string[] | undefined,
+): URLSearchParams {
+  const params = new URLSearchParams();
+  if (sessionIds?.length) {
+    params.set('force_worktrees', 'true');
+    params.set('confirmed_worktrees', sessionIds.join(','));
+  }
+  return params;
+}
+
+/**
+ * Ask whether to discard what the worktrees would lose; the caller retries,
+ * naming the confirmed sessions, when this resolves true.
  */
 export function confirmDiscardWorktreeChanges(
   dirty: WorktreeDirtyInfo[],
@@ -72,6 +105,23 @@ export function confirmDiscardWorktreeChanges(
       : []),
     ...(dirty.some((item) => item.embeddedRepos)
       ? ['包含嵌入的 git 仓库，删除会一并删除其中的提交和改动']
+      : []),
+    ...(dirty.some((item) => item.detachedCommits)
+      ? ['HEAD 不在任何分支上，当前提交无法从分支或标签到达，删除后会丢失']
+      : []),
+    ...[
+      ...new Set(
+        dirty.flatMap((item) =>
+          item.operationInProgress ? [item.operationInProgress] : [],
+        ),
+      ),
+    ].map(
+      (operation) => `有进行中的 ${operation}，删除会丢失其状态和未完成的提交`,
+    ),
+    ...(dirty.some((item) => item.hiddenChanges)
+      ? [
+          '有标记为 skip-worktree 或 assume-unchanged 的文件，它们的改动不会显示在状态里',
+        ]
       : []),
   ];
   return confirmDialog({
