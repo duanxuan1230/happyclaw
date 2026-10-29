@@ -241,6 +241,7 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       },
     );
     const announceTurnTrace = vi.fn();
+    const excludeMessageFromHistoryRecovery = vi.fn();
     const globals: Record<string, unknown> = {
       turnTraces,
       chatJid: CHAT_JID,
@@ -251,6 +252,7 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       announceTurnTrace,
       sendMessage,
       proactiveClosingNote,
+      excludeMessageFromHistoryRecovery,
       logger: { warn: vi.fn() },
       // No attempt follows: each ending here is the turn's last.
       queue: { willRetryAfterFailure: () => false },
@@ -262,7 +264,14 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       inputId: string,
       ending: 'stopped' | 'steered' | 'failed',
     ) => Promise<void>;
-    return { turnTraces, stored, sendMessage, announceTurnTrace, keep };
+    return {
+      turnTraces,
+      stored,
+      sendMessage,
+      announceTurnTrace,
+      excludeMessageFromHistoryRecovery,
+      keep,
+    };
   }
   const progress = (turnTraces: TurnTraceTracker, inputId: string) =>
     turnTraces.observeProgress(inputId, {
@@ -300,6 +309,11 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
         expect.objectContaining({ progress: true, text: '先看日志' }),
       ]);
       expect(lane.turnTraces.inputsWithProgress()).toEqual([]);
+      // Written for the reader: never replayed to the model as its words.
+      expect(lane.excludeMessageFromHistoryRecovery).toHaveBeenCalledWith(
+        CHAT_JID,
+        'note-1',
+      );
     }
   });
 
@@ -339,6 +353,7 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
     });
     const storeMessageDirect = vi.fn(() => 'note-s');
     const broadcastNewMessage = vi.fn();
+    const excludeMessageFromHistoryRecovery = vi.fn();
     const globals: Record<string, unknown> = {
       turnTraces,
       virtualChatJid: `${CHAT_JID}#agent:${AGENT_ID}`,
@@ -349,6 +364,7 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       ensureChatExists: vi.fn(),
       storeMessageDirect,
       broadcastNewMessage,
+      excludeMessageFromHistoryRecovery,
       proactiveClosingNote,
       logger: { warn: vi.fn() },
       ASSISTANT_NAME: 'HappyClaw',
@@ -378,6 +394,10 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       AGENT_ID,
     );
     expect(stored).toHaveLength(1);
+    expect(excludeMessageFromHistoryRecovery).toHaveBeenCalledWith(
+      `${CHAT_JID}#agent:${AGENT_ID}`,
+      'note-s',
+    );
   });
 });
 
@@ -417,6 +437,7 @@ describe('a proactive turn refused for lack of a final, and run again', () => {
       getLastAgentMessageIdForTurn: (_jid: string, turnId: string) =>
         messages.filter((m) => m.turnId === turnId).at(-1)?.id,
       announceTurnTrace: vi.fn(),
+      excludeMessageFromHistoryRecovery: vi.fn(),
       proactiveClosingNote,
       sendMessage: async (
         jid: string,
@@ -540,6 +561,7 @@ test('a session turn refused and retried, then given up, gets one closing note',
       ensureChatExists: vi.fn(),
       storeMessageDirect,
       broadcastNewMessage: vi.fn(),
+      excludeMessageFromHistoryRecovery: vi.fn(),
       proactiveClosingNote,
       logger: { warn: vi.fn() },
       ASSISTANT_NAME: 'HappyClaw',

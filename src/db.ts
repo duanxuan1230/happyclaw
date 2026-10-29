@@ -13439,6 +13439,20 @@ export function getMessagesForTurn(
 }
 
 /**
+ * Keep one message out of the history replayed into a fresh model session:
+ * a note written for the reader, not words the model said.
+ */
+export function excludeMessageFromHistoryRecovery(
+  chatJid: string,
+  messageId: string,
+): void {
+  if (!isDatabaseInitialized()) return;
+  prepareCached(
+    'UPDATE messages SET history_recovery_allowed = 0 WHERE chat_jid = ? AND id = ?',
+  ).run(chatJid, messageId);
+}
+
+/**
  * Recent persisted messages that are safe to replay into a fresh model
  * session. Privacy migrations leave the Web transcript untouched and fence
  * only legacy mixed-history rows. Current cold-run messages are excluded in

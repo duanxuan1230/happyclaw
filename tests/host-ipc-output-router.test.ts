@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { channelTurnScope } from '../src/channel-turn-registry.js';
 import {
+  NATIVE_ROUTE_UNAVAILABLE_ERROR,
   resolveHostIpcLogicalChatJid,
   routeHostIpcOutput,
 } from '../src/host-ipc-output-router.js';
@@ -353,6 +354,12 @@ describe('host IPC primary output routing', () => {
       reason: 'native_route_unavailable',
     });
     expect(projectedProgress).not.toHaveBeenCalled();
+    // What the Agent is told: nothing went out, and trying again is no use,
+    // for the final either (it takes the same route).
+    expect(NATIVE_ROUTE_UNAVAILABLE_ERROR).toContain('Do not retry it.');
+    expect(NATIVE_ROUTE_UNAVAILABLE_ERROR).toContain(
+      'the final uses the same route, so if it fails as well, do not retry it either',
+    );
   });
 
   test('the source a turn was bound with is the one routing reads', () => {
