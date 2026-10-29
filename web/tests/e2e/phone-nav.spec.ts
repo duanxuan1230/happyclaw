@@ -220,7 +220,7 @@ test.describe('phone', () => {
     const pages = [
       ['智能体', '/agent-profiles'],
       ['能力库', '/capabilities'],
-      ['任务', '/tasks'],
+      ['自动化', '/automations'],
       ['用量', '/usage'],
       ['记忆', '/memory'],
       ['账单', '/billing'],
@@ -242,7 +242,7 @@ test.describe('phone', () => {
   test('the drawer holds search, new conversation and the account', async ({
     page,
   }) => {
-    await openShell(page, '/tasks');
+    await openShell(page, '/automations');
     await page.getByRole('button', { name: '打开菜单' }).click();
     const drawer = page.getByTestId('nav-drawer');
     const nav = drawer.getByRole('navigation', { name: '主导航' });
@@ -251,12 +251,12 @@ test.describe('phone', () => {
       '工作台',
       '智能体',
       '能力库',
-      '任务',
+      '自动化',
       '用量',
       '记忆',
       '设置',
     ]);
-    await expect(nav.getByRole('link', { name: '任务' })).toHaveAttribute(
+    await expect(nav.getByRole('link', { name: '自动化' })).toHaveAttribute(
       'aria-current',
       'page',
     );
@@ -286,12 +286,12 @@ test.describe('phone', () => {
   test('pages put the hamburger in a top bar; Settings keeps one bar', async ({
     page,
   }) => {
-    await openShell(page, '/tasks');
+    await openShell(page, '/automations');
     const bar = page.getByTestId('phone-top-bar');
     await expect(bar.getByRole('button', { name: '打开菜单' })).toBeVisible();
     // The page's own heading names it, right under the bar.
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(
-      '页面 /tasks',
+      '页面 /automations',
     );
 
     await openShell(page, '/settings?tab=profile');
@@ -386,7 +386,7 @@ test.describe('desktop', () => {
       '工作台',
       '智能体',
       '能力库',
-      '任务',
+      '自动化',
       '设置',
     ]);
     await expect(page.getByRole('button', { name: '打开菜单' })).toHaveCount(0);

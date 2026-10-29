@@ -1192,6 +1192,7 @@ test.describe('touch composer', () => {
     await expect(sheet.getByRole('button')).toHaveText([
       '工作区设置',
       '渠道绑定',
+      '从此会话创建自动化…',
       '终端',
       '清除上下文',
     ]);
