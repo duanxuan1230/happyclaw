@@ -4,7 +4,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const ALLOWED_ADVISORIES = new Set();
+// GHSA-rmxm-3fg6-px4f affects @hono/node-server <2.1.3 (`serveStatic` double
+// path decoding bypassing path-based middleware on static routes). HappyClaw
+// only mounts `serveStatic` on public frontend assets (`web/dist`) after all
+// authenticated `/api/*` routes, and agent-runner does not run an HTTP server.
+const ALLOWED_ADVISORIES = new Set(['GHSA-rmxm-3fg6-px4f']);
 
 const workspaces = [
   { label: 'root', cwd: root },
