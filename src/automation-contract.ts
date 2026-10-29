@@ -170,6 +170,13 @@ export interface AutomationRunSink {
   onRunInputSettled(runId: string, outcome: AutomationRunOutcome): void;
   /** Quiet run that has not escalated: hold IM delivery, Web only. */
   isRunSilenced(runId: string): boolean;
+  /**
+   * The run is still queued or running in the database. An input whose run
+   * is not live (settled, cancelled, interrupted, deleted, unknown) is
+   * history: the runtime consumes it instead of executing it, including
+   * after a restart.
+   */
+  isRunLive(runId: string): boolean;
 }
 
 export interface AutomationCreateInput extends AutomationDraft {
