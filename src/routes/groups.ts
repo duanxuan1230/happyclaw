@@ -2174,7 +2174,7 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
     return c.json({ error: 'Only the workspace owner can interrupt it' }, 403);
   }
 
-  const interrupted = deps.queue.interruptQuery(jid);
+  const interrupted = deps.queue.interruptQuery(jid, undefined, 'stop');
   if (interrupted) {
     // ── 立即 abort 飞书流式卡片 ──
     const session = getStreamingSession(jid);

@@ -455,9 +455,11 @@ describe('Feishu runtime /clear and /fresh (P1-3, P1-4)', () => {
     await expect(
       l.breakRun({ sourceJid: unknownDm, senderImId: OWNER }),
     ).resolves.toBe('Current task stopped.');
+    // An explicit stop, not a steer.
     expect(l.globals.queue.interruptQuery).toHaveBeenCalledWith(
       'web:ws#agent:session-dm',
       'run-active',
+      'stop',
     );
   });
 
@@ -602,6 +604,7 @@ describe('a recalled Feishu message is withdrawn (prod P2-4)', () => {
     expect(l.queue.interruptQuery).toHaveBeenCalledWith(
       'web:ws#agent:s1',
       'run-1',
+      'stop',
     );
     // The run is told it was a recall stop (it settles the input and leaves
     // no card), the card is closed without a "已停止" note, and the input is

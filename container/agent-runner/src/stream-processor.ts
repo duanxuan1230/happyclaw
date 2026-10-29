@@ -42,6 +42,14 @@ const SDK_TERMINAL_TASK_STATUSES = new Set([
   'aborted',
 ]);
 
+// SDK task types that are not sub-agents: backgrounded Bash, monitors and MCP
+// tasks. The host and the Web leave the same types out of their Agent views.
+const NON_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_bash',
+  'monitor',
+  'mcp_task',
+]);
+
 // Tool calls remembered by id so a result can be matched to its tool's name.
 const MAX_TRACKED_TOOL_CALLS = 512;
 
@@ -2524,9 +2532,17 @@ export class StreamEventProcessor {
     return this.pendingSdkTasks.size;
   }
 
-  /** Active SDK task IDs (`task_id` keys in `pendingSdkTasks`) for stopTask on interrupt. */
-  getActiveSdkTaskIds(): string[] {
-    return [...this.pendingSdkTasks.keys()];
+  /**
+   * Unsettled sub-agent tasks (Task/Agent, workflows): what an explicit stop
+   * waits on before it closes the query. Shells, monitors and MCP tasks are
+   * never among them.
+   */
+  getActiveSubAgentTaskIds(): string[] {
+    return [...this.pendingSdkTasks]
+      .filter(
+        ([, pending]) => !NON_AGENT_TASK_TYPES.has(pending.taskType ?? ''),
+      )
+      .map(([taskId]) => taskId);
   }
 
   /** Tasks which still make replay unsafe. A detached local bash command has

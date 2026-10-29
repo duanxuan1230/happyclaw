@@ -123,6 +123,22 @@ export type QueryFinishReason =
   | 'runner_exit'
   | 'stopped';
 
+/**
+ * Why a query is interrupted: `stop` (`/break`, a stop button, a recall) or
+ * `steer` (`/steer`, 「发送」). Both interrupt the turn; after a stop the
+ * runner also closes the query if a sub-agent outlasts the interrupt.
+ */
+export type InterruptReason = 'stop' | 'steer';
+
+/**
+ * Companion of `_interrupt` for an explicit stop, written just before it as
+ * `{"queryId":"<the _interrupt content>","reason":"stop"}`. `_interrupt`
+ * itself keeps its content so runners that predate the reason still read it;
+ * a runner treats an interrupt without this file as a steer. The runner's
+ * `turn-interrupt.ts` reads it under the same name.
+ */
+const INTERRUPT_REASON_SENTINEL = '_interrupt_reason';
+
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 const RETRY_JITTER_RATIO = 0.2;
@@ -172,6 +188,8 @@ interface GroupState {
   announcedQueryId: string | null;
   /** Query that requested an interrupt before its IPC directory existed. */
   pendingInterruptQueryId: string | null;
+  /** Why that deferred interrupt was requested; a stop outranks a steer. */
+  pendingInterruptReason: InterruptReason;
   /** Host callback when a deferred cold-boot interrupt cannot be published. */
   deferredInterruptFailure?: (queryId: string) => void;
   pendingMessages: boolean;
@@ -337,6 +355,7 @@ export class GroupQueue {
         queryStartedAt: null,
         announcedQueryId: null,
         pendingInterruptQueryId: null,
+        pendingInterruptReason: 'steer',
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -1913,7 +1932,13 @@ export class GroupQueue {
       // as soon as registration creates a stable path; a later query can never
       // inherit it because every query boundary clears the pending identity.
       state.pendingInterruptQueryId = null;
-      if (!this.interruptQuery(groupJid, pendingInterruptQueryId)) {
+      if (
+        !this.interruptQuery(
+          groupJid,
+          pendingInterruptQueryId,
+          state.pendingInterruptReason,
+        )
+      ) {
         state.deferredInterruptFailure?.(pendingInterruptQueryId);
         logger.warn(
           { groupJid, pendingInterruptQueryId },
@@ -2267,7 +2292,12 @@ export class GroupQueue {
       : agentId
         ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
         : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
-    for (const name of ['_drain', '_close', '_interrupt']) {
+    for (const name of [
+      '_drain',
+      '_close',
+      '_interrupt',
+      INTERRUPT_REASON_SENTINEL,
+    ]) {
       try {
         fs.unlinkSync(path.join(inputDir, name));
       } catch {
@@ -2575,8 +2605,14 @@ export class GroupQueue {
    *
    * Writes a _interrupt sentinel that agent-runner detects and calls
    * query.interrupt(). The container stays alive and accepts new messages.
+   * An explicit `stop` also writes the reason; without it the runner treats
+   * the interrupt as a steer.
    */
-  interruptQuery(groupJid: string, expectedQueryId?: string): boolean {
+  interruptQuery(
+    groupJid: string,
+    expectedQueryId?: string,
+    reason: InterruptReason = 'steer',
+  ): boolean {
     // During cold boot the exact JID is active before registerProcess supplies
     // groupFolder. Prefer it so a provider companion cannot miss the brief
     // pre-IPC interrupt window; registered sibling JIDs still resolve through
@@ -2595,7 +2631,11 @@ export class GroupQueue {
 
     if (!state.groupFolder) {
       if (!state.queryId) return false;
+      const stopPending =
+        state.pendingInterruptQueryId === state.queryId &&
+        state.pendingInterruptReason === 'stop';
       state.pendingInterruptQueryId = state.queryId;
+      state.pendingInterruptReason = stopPending ? 'stop' : reason;
       logger.info(
         { groupJid, queryId: state.queryId },
         'Deferred query interrupt until runner registration',
@@ -2615,8 +2655,17 @@ export class GroupQueue {
       // Bind the sentinel to this exact host query. The runner may start after
       // a long cold-image delay, while an old file can survive a host crash;
       // query identity—not mtime—distinguishes those cases safely.
-      fs.writeFileSync(path.join(inputDir, '_interrupt'), state.queryId ?? '');
-      logger.info({ groupJid, inputDir }, 'Interrupt sentinel written');
+      const queryId = state.queryId ?? '';
+      if (reason === 'stop') {
+        // Before `_interrupt`: the runner reads the reason once it sees it.
+        // A steer leaves a stop not yet consumed for this query in place.
+        fs.writeFileSync(
+          path.join(inputDir, INTERRUPT_REASON_SENTINEL),
+          JSON.stringify({ queryId, reason }),
+        );
+      }
+      fs.writeFileSync(path.join(inputDir, '_interrupt'), queryId);
+      logger.info({ groupJid, inputDir, reason }, 'Interrupt sentinel written');
       return true;
     } catch (err) {
       logger.warn(
