@@ -170,12 +170,14 @@ Web UI 约定：
   顺序一起进入下一轮；之后才到达的普通消息不会被吞并，留到再下一轮合批。
 - 普通消息与定时任务使用明确的队列状态；失败采用有界指数退避。
 - 中断分两类。显式停止（`/break`、Web 与飞书卡片的停止按钮、飞书撤回）在 `_interrupt`
-  之外再写 `_interrupt_reason`（`{"queryId","reason":"stop"}`）；`/steer`、「发送」、没有
-  原因的旧信号，以及撞额度、换模型、模型上限、子代理 provider 错误、关停等内部中断只
-  调用 `interrupt()`。CLI 的 `interrupt()` 本身就会停掉运行中的子 Agent；Runner 从不调用
-  `stopTask`，因为它会把停止通知排成新的隐藏计费轮次，并一直等后台 shell 退出。显式停止
-  后 3 秒仍有真子 Agent 未结清时 `close()` 兜底，`local_bash`、`monitor`、`mcp_task` 不计入；
-  CLI 里已排队后续输入时立即 `close()`。
+  之外再写 `_interrupt_reason`（`{"queryId","reason":"stop"}`，两个文件都以临时文件加
+  rename 写入）；`/steer`、「发送」、没有原因的旧信号，以及撞额度、换模型、模型上限、子代理
+  provider 错误、关停等内部中断只调用 `interrupt()`。CLI 的 `interrupt()` 本身就会停掉运行
+  中的子 Agent；Runner 从不调用 `stopTask`，因为它会把停止通知排成新的隐藏计费轮次，并一直
+  等后台 shell 退出。显式停止后（包括先 steer 再停止）3 秒仍有主 Agent 直接启动的子 Agent
+  （任务类型 `local_agent`、`remote_agent`、`in_process_teammate`、`local_workflow`）未结清时
+  `close()` 兜底；shell、监视器、MCP 任务、未知类型和嵌套子 Agent 不计入。CLI 里已排队后续
+  输入时立即 `close()`。
 - `CONTAINER_TIMEOUT` 是 Runner 的无输出看门狗：每次有输出都重新计时，超过它（再加 15 秒
   关闭宽限）仍没有任何输出才判定超时，不是单次运行的总时长上限；`IDLE_TIMEOUT` 控制暖
   Runner 的空闲保留时间。
