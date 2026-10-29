@@ -7,9 +7,19 @@ import {
 } from './runtime-state-store.js';
 
 /**
+ * Any standalone number, or, matched first and so kept whole, a number that
+ * names the kind of failure: an HTTP status (`HTTP 429`, `HTTP/1.1 503`,
+ * `status 401`), an exit code (`code 403`, `exit code 1`, `exited with code
+ * 137`, `退出码: 2`) or a signal number.
+ */
+const NUMBER_OR_FAILURE_CODE =
+  /((?:\b(?:https?(?:\/\d(?:\.\d)?)?|status|code|signal)|退出码)\s*[:=]?\s*\d{1,3}\b)|\b\d+(?:\.\d+)?\b/gi;
+
+/**
  * Reduce an error to what stays the same when a task keeps failing for the
- * same reason: durations, counts, ids, timestamps and paths with numbers
- * change on every run and must not make the same failure look new.
+ * same reason: durations, counts (`37/50`), ids, timestamps and paths with
+ * numbers change on every run and must not make the same failure look new;
+ * HTTP statuses, exit codes and signal numbers tell failures apart.
  */
 export function normalizeTaskFailureError(error: string): string {
   return error
@@ -22,12 +32,14 @@ export function normalizeTaskFailureError(error: string): string {
       /\b\d{4}-\d{2}-\d{2}(?:[t\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?)?\b/gi,
       '#',
     )
-    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, '#')
     .replace(
       /\b\d+(?:\.\d+)?\s*(?:ns|us|µs|ms|s|sec|seconds?|m|min|minutes?|h|hr|hours?)\b/gi,
       '#',
     )
-    .replace(/\b\d{4,}\b/g, '#')
+    .replace(
+      NUMBER_OR_FAILURE_CODE,
+      (_match, code: string | undefined) => code ?? '#',
+    )
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase()
