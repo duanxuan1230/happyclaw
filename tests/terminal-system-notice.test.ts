@@ -346,6 +346,7 @@ describe('processGroupMessages deterministic failure settlement', () => {
       resolveIpcOutputWorkspaceJid: () => null,
       getLastAgentMessageIdForTurn: () => undefined,
       announceTurnTrace: vi.fn(),
+      excludeMessageFromHistoryRecovery: vi.fn(),
       activeSessionId: 'sdk-session',
       proactiveClosingNote,
       // The queue would retry, but this failure is settled for good.

@@ -66,6 +66,7 @@ import {
 import { preserveUnacknowledgedProactiveFinal } from './proactive-final-recovery.js';
 import {
   resolveHostIpcLogicalChatJid,
+  NATIVE_ROUTE_UNAVAILABLE_ERROR,
   routeHostIpcOutput,
 } from './host-ipc-output-router.js';
 import { resolveBoundWorkspaceJid } from './workspace-attribution.js';
@@ -151,6 +152,7 @@ import {
   deleteExpiredSessions,
   getExpiredSessionIds,
   ensureChatExists,
+  excludeMessageFromHistoryRecovery,
   ensureUserHomeGroup,
   getAllChats,
   getAllChatJids,
@@ -8323,7 +8325,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         turnTraces.discard(inputId);
         return;
       }
-      await sendMessage(chatJid, proactiveClosingNote(ending), {
+      const noteId = await sendMessage(chatJid, proactiveClosingNote(ending), {
         sendToIM: false,
         turnTrace: { tracker: turnTraces, inputId },
         messageMeta: {
@@ -8333,6 +8335,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           finalizationReason: ending === 'failed' ? 'error' : 'interrupted',
         },
       });
+      // The note is written for the reader: it is no history to replay.
+      if (noteId) excludeMessageFromHistoryRecovery(chatJid, noteId);
       turnTraces.discard(inputId);
     } catch (err) {
       logger.warn(
@@ -13098,7 +13102,7 @@ function startIpcWatcher(): void {
                   hostOutputRoute.reason === 'conflicting_final'
                     ? 'A different final has already sealed this input turn; the second final was not sent.'
                     : hostOutputRoute.reason === 'native_route_unavailable'
-                      ? 'Message could not be delivered: this session is bound to a native channel whose route is currently unavailable.'
+                      ? NATIVE_ROUTE_UNAVAILABLE_ERROR
                       : 'Unauthorized message target.';
                 logger.warn(
                   {
@@ -18040,6 +18044,8 @@ async function processAgentConversation(
         },
       },
     );
+    // The note is written for the reader: it is no history to replay.
+    excludeMessageFromHistoryRecovery(virtualChatJid, id);
     broadcastNewMessage(
       virtualChatJid,
       {

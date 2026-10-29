@@ -1103,6 +1103,21 @@ describe('stored traces and the messages that carry them', () => {
     expect(presentTurnTrace(db.getTurnTrace(JID, 'hid-2')!, hidden)).toBeNull();
   });
 
+  test('a closing note is kept out of the history a fresh session replays', () => {
+    storeMessage('hist-user', 'hist-1', { fromMe: false });
+    storeMessage('hist-note', 'hist-1');
+    db.excludeMessageFromHistoryRecovery(JID, 'hist-note');
+    const replayed = db
+      .getConversationHistoryMessagesPage(JID, new Set(), 200)
+      .map((m) => m.id);
+    expect(replayed).toContain('hist-user');
+    expect(replayed).not.toContain('hist-note');
+    // The chat still lists it.
+    expect(
+      db.getMessagesPage(JID, undefined, 200).some((m) => m.id === 'hist-note'),
+    ).toBe(true);
+  });
+
   test('a trace stored at a higher level shows only its progress once hidden', () => {
     const real = new TurnTraceTracker({
       mode: 'proactive',
