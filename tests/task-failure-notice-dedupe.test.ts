@@ -200,6 +200,51 @@ describe('scheduled task failure notice de-duplication', () => {
     ).toEqual({ kind: 'notify_failure' });
   });
 
+  test('progress and counts merge; statuses, exit codes and signals do not', () => {
+    const progressTask = 'decision-progress-task';
+    const progress = (done: number) =>
+      decideTaskRunNotice({
+        taskId: progressTask,
+        error: `同步中断：已处理 ${done}/50 条，第 ${done + 1} 条请求失败 (HTTP 429 Too Many Requests)`,
+      });
+    expect(progress(37)).toEqual({ kind: 'notify_failure' });
+    expect(progress(38)).toEqual({ kind: 'suppress_failure', failureCount: 2 });
+    expect(progress(3)).toEqual({ kind: 'suppress_failure', failureCount: 3 });
+    // Same progress, another status: a new failure.
+    expect(
+      decideTaskRunNotice({
+        taskId: progressTask,
+        error:
+          '同步中断：已处理 3/50 条，第 4 条请求失败 (HTTP 401 Unauthorized)',
+      }),
+    ).toEqual({ kind: 'notify_failure' });
+
+    const distinct = [
+      ['status 401', 'status 403'],
+      ['request failed with code 403', 'request failed with code 404'],
+      [
+        'Host agent exited with code 1: boom',
+        'Host agent exited with code 137: boom',
+      ],
+      ['退出码: 1', '退出码: 2'],
+      ['killed by signal 9', 'killed by signal 15'],
+      ['HTTP/1.1 502 Bad Gateway', 'HTTP/1.1 503 Bad Gateway'],
+    ];
+    for (const [a, b] of distinct) {
+      expect(normalizeTaskFailureError(a)).not.toBe(
+        normalizeTaskFailureError(b),
+      );
+    }
+    const same = [
+      ['retry 3 of 5 failed', 'retry 4 of 5 failed'],
+      ['wrote 512 of 900 rows', 'wrote 640 of 900 rows'],
+      ['error code 23505 at row 12', 'error code 23514 at row 40'],
+    ];
+    for (const [a, b] of same) {
+      expect(normalizeTaskFailureError(a)).toBe(normalizeTaskFailureError(b));
+    }
+  });
+
   test('notifies once per streak, again on a new error, and once on recovery', () => {
     const id = 'decision-task';
     expect(decideTaskRunNotice({ taskId: id, error: 'boom after 3s' })).toEqual(

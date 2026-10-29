@@ -112,6 +112,30 @@ export function createRuntimeSourceHarness(
       installNode(name, call.arguments[index]);
     },
     /**
+     * Install `owner`'s top-level statements from the unique `if (condition)`
+     * to the end of its body as a function returning what they return: the
+     * verdict a run reaches once that state is set.
+     */
+    installTail(name: string, owner: string, condition: string): void {
+      const fn = named(owner, source) as ts.FunctionDeclaration;
+      const statement = unique(
+        fn,
+        (node) =>
+          ts.isIfStatement(node) &&
+          node.parent === fn.body &&
+          node.expression.getText(source) === condition,
+      );
+      const statements = fn.body!.statements;
+      const tail = statements.slice(
+        statements.indexOf(statement as ts.Statement),
+      );
+      installNode(
+        name,
+        statement,
+        () => `() => {\n${tail.map((s) => s.getText(source)).join('\n')}\n}`,
+      );
+    },
+    /**
      * Install the `finally` block of `owner`'s top-level try statement as an
      * async function, so its cleanup runs against the provided state.
      */

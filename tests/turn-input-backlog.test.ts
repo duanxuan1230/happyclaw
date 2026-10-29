@@ -1,13 +1,7 @@
 import fs from 'node:fs';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 
-import * as interactionRuntime from '../src/workspace-interaction-runtime.js';
-import * as channelInteraction from '../src/channel-interaction-mode.js';
-import { channelConversationJid } from '../src/channel-address.js';
-import { selectChannelReplyBatch } from '../src/channel-reply-source.js';
-import { resolveScheduledGroupDeliveryContract } from '../src/reply-delivery.js';
-import { agentBuilderTurnScope } from '../src/agent-builder-turn-auth.js';
-import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
+import { createConversationLoop } from './helpers/conversation-loop.js';
 import type { NewMessage } from '../src/types.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
@@ -36,8 +30,6 @@ const chatJid = 'web:backlog-main';
 const agentId = 'agent-backlog';
 const agentJid = `${chatJid}#agent:${agentId}`;
 const BACKLOG = 1_234;
-/** Thrown by the admission stub: everything after it is the agent turn. */
-const STOP = Symbol('stop-before-agent-turn');
 
 function seedBacklog(jid: string): void {
   db.ensureChatExists(jid);
@@ -84,54 +76,27 @@ afterAll(() => {
  * then settled with that function's own commitCursor for the batch.
  */
 function createLane(kind: 'main' | 'agent') {
-  const group = { folder: 'backlog-main', name: 'Backlog' };
-  const queue = { enqueueMessageCheck: vi.fn(), enqueueTask: vi.fn() };
-  const owner =
-    kind === 'main' ? 'processGroupMessages' : 'processAgentConversation';
-  const globals: Record<string, any> = {
-    ...interactionRuntime,
-    ...channelInteraction,
-    channelConversationJid,
-    selectChannelReplyBatch,
-    resolveScheduledGroupDeliveryContract,
-    agentBuilderTurnScope,
-    getMessagesSinceBounded: db.getMessagesSinceBounded,
-    // No lane here waits for a usage-limit reset.
-    releaseUsageLimitWaitForNewInput: () => false,
-    getMessagesSince: db.getMessagesSince,
-    resolveMessageCursorSequence: db.resolveMessageCursorSequence,
-    registeredGroups: { [chatJid]: group },
-    lastAgentTimestamp: {},
-    lastCommittedCursor: {},
-    EMPTY_CURSOR: { timestamp: '', id: '', sequence: 0 },
-    resolveEffectiveGroup: (g: unknown) => ({ effectiveGroup: g }),
-    getAgent: (id: string) =>
-      id === agentId
-        ? { id, kind: 'conversation', status: 'idle', name: 'Backlog agent' }
-        : undefined,
-    resolveTerminalScheduledGroupPromptRun: () => null,
-    getTaskRunById: () => undefined,
-    getRegisteredGroup: () => undefined,
-    getWorkspaceInteractionMode: () => 'assistant',
-    getChannelMount: () => undefined,
-    resolveScheduledGroupPromptInteractionMode: () => null,
-    queue,
-    routerCursorPersistence: { markDirty: vi.fn() },
-    saveState: vi.fn(),
-    flushAcknowledgedIpcForJid: vi.fn(),
+  const loop = createConversationLoop({
+    kind,
     chatJid,
-    virtualChatJid: agentJid,
-    createIpcDeliveryTarget: (_jid: string, messages: NewMessage[]) => {
-      globals.admittedBatch = messages;
-      throw STOP;
+    agentId,
+    folder: 'backlog-main',
+    globals: {
+      getMessagesSinceBounded: db.getMessagesSinceBounded,
+      // No lane here waits for a usage-limit reset.
+      releaseUsageLimitWaitForNewInput: () => false,
+      getUsageLimitWait: () => null,
+      getMessagesSince: db.getMessagesSince,
+      resolveMessageCursorSequence: db.resolveMessageCursorSequence,
+      routerCursorPersistence: { markDirty: vi.fn() },
+      saveState: vi.fn(),
+      flushAcknowledgedIpcForJid: vi.fn(),
+      chatJid,
+      virtualChatJid: agentJid,
     },
-  };
-  const harness = createRuntimeSourceHarness(globals);
-  harness.install('isCursorAfter');
+  });
+  const { globals, harness, queue, owner } = loop;
   harness.install('advanceCursors');
-  harness.install('resolveTrustedInteractionMode');
-  harness.install('selectRuntimeInteractionBatch');
-  harness.install(owner);
   if (kind === 'agent') harness.install('isCursorCommitted', owner);
   harness.install('commitCursor', owner);
 
@@ -146,15 +111,7 @@ function createLane(kind: 'main' | 'agent') {
 
   /** One scheduler round: the batch the turn would take, or null. */
   async function round(): Promise<NewMessage[] | null> {
-    globals.admittedBatch = null;
-    try {
-      await (kind === 'main'
-        ? globals.processGroupMessages(chatJid)
-        : globals.processAgentConversation(chatJid, agentId));
-    } catch (err) {
-      if (err !== STOP) throw err;
-    }
-    const batch = globals.admittedBatch as NewMessage[] | null;
+    const batch = await loop.round();
     if (batch) {
       // The turn succeeded for this batch (lastProcessed is its last input).
       const lastProcessed = batch[batch.length - 1];

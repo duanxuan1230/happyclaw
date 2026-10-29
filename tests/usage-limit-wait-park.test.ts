@@ -1,22 +1,47 @@
+/**
+ * Waiting out a usage limit, run from index.ts against the real database:
+ * parking a failed input with the backlog behind it, both conversation loops
+ * keeping a waiting lane parked until new input arrives, and every way out
+ * of a wait (break, cancel, send now, a discarded lane, a restart, and the
+ * stale retry_wait sweep).
+ */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+  vi,
+} from 'vitest';
 
+import { parseChannelAddress } from '../src/channel-address.js';
+import { resolveContainerOutputInputTurnId } from '../src/channel-output-correlation.js';
+import { getChannelType } from '../src/im-channel.js';
+import { createConversationLoop } from './helpers/conversation-loop.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-wait-park-'));
-fs.mkdirSync(path.join(tmp, 'db'), { recursive: true });
-fs.mkdirSync(path.join(tmp, 'groups'), { recursive: true });
-
-vi.mock('../src/config.js', async (importOriginal) => ({
-  ...((await importOriginal()) as Record<string, unknown>),
-  DATA_DIR: tmp,
-  STORE_DIR: path.join(tmp, 'db'),
-  GROUPS_DIR: path.join(tmp, 'groups'),
-}));
+// The static imports above load config, so the data root is made in the
+// hoisted mock factory rather than at module top level.
+const paths = vi.hoisted(() => ({ root: '' }));
+vi.mock('../src/config.js', async (importOriginal) => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  paths.root = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-wait-park-'));
+  for (const dir of ['db', 'groups']) {
+    fs.mkdirSync(path.join(paths.root, dir), { recursive: true });
+  }
+  return {
+    ...(await importOriginal<Record<string, unknown>>()),
+    DATA_DIR: paths.root,
+    STORE_DIR: path.join(paths.root, 'db'),
+    GROUPS_DIR: path.join(paths.root, 'groups'),
+  };
+});
 vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
@@ -28,7 +53,7 @@ const wait = await import('../src/usage-limit-wait.js');
 beforeAll(() => db.initDatabase());
 afterAll(() => {
   db.closeDatabase();
-  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(paths.root, { recursive: true, force: true });
 });
 
 const LANE = 'web:park-lane';
@@ -47,8 +72,9 @@ function inbound(id: string, minute: number): void {
   );
 }
 
-function harness() {
-  const globals: Record<string, any> = {
+/** What parking and releasing a lane's inputs read from index.ts scope. */
+function parkGlobals(): Record<string, any> {
+  return {
     crypto,
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
     EMPTY_CURSOR,
@@ -69,21 +95,25 @@ function harness() {
     withdrawQueuedInputsOutsideAudience: vi.fn(),
     enqueueReleasedFollowUp: vi.fn(),
   };
+}
+
+const PARK_FUNCTIONS = [
+  'usageLimitParkedMessageIds',
+  'parkInputForUsageLimitWait',
+  'releaseQueuedFollowUpsToColdReader',
+  'releaseUsageLimitWaitForNewInput',
+];
+
+function harness() {
+  const globals = parkGlobals();
   const runtime = createRuntimeSourceHarness(globals);
-  for (const name of [
-    'usageLimitParkedMessageIds',
-    'parkInputForUsageLimitWait',
-    'releaseQueuedFollowUpsToColdReader',
-    'releaseUsageLimitWaitForNewInput',
-  ]) {
-    runtime.install(name);
-  }
-  return globals;
+  for (const name of PARK_FUNCTIONS) runtime.install(name);
+  return { g: globals, runtime };
 }
 
 describe('parking an input that waits for a usage-limit reset', () => {
   test('the failed batch and the backlog behind it wait in the durable queue; new input brings them back', () => {
-    const g = harness();
+    const { g } = harness();
     inbound('m1', 1);
     inbound('m2', 2);
     inbound('m3', 3);
@@ -157,7 +187,7 @@ describe('parking an input that waits for a usage-limit reset', () => {
   });
 
   test('a Web input gets no channel notice', () => {
-    const g = harness();
+    const { g } = harness();
     const lane = LANE;
     inbound('w1', 20);
     g.lastCommittedCursor[lane] = EMPTY_CURSOR;
@@ -181,65 +211,414 @@ describe('parking an input that waits for a usage-limit reset', () => {
   });
 });
 
-describe('usage-limit wait wiring in the conversation loops', () => {
-  const source = fs.readFileSync('src/index.ts', 'utf8');
-  const slice = (start: string, end: string) =>
-    source.slice(source.indexOf(start), source.indexOf(end));
-  const main = slice(
-    'async function processGroupMessages(',
-    'async function runTerminalWarmup(',
-  );
-  const agent = slice(
-    'async function processAgentConversation(',
-    'async function startMessageLoop(',
-  );
+/** Lanes whose parked inputs these tests read back; one per test. */
+let laneSeq = 0;
+let clock = Date.parse('2026-10-29T10:00:00.000Z');
+const LATER = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-  test('both loops park a waiting failure and end the wait for new input', () => {
-    for (const [body, lane] of [
-      [main, 'chatJid'],
-      [agent, 'virtualChatJid'],
-    ] as const) {
-      expect(body).toMatch(
-        /providerUsageLimitResumeAt !== undefined\) \{[\s\S]{0,200}?parkInputForUsageLimitWait\(\{/,
+/**
+ * One lane run from index.ts against the real database: the main or a
+ * Session conversation loop from its group lookup to the batch it admits,
+ * plus the helpers that park and release that lane's inputs.
+ */
+function lane(kind: 'main' | 'agent') {
+  const chatJid = `web:wait-lane-${++laneSeq}`;
+  const agentId = 'wait-session';
+  const jid = kind === 'main' ? chatJid : `${chatJid}#agent:${agentId}`;
+  const loop = createConversationLoop({
+    kind,
+    chatJid,
+    agentId,
+    folder: `wait-lane-${laneSeq}`,
+    globals: {
+      ...parkGlobals(),
+      getMessagesSinceBounded: db.getMessagesSinceBounded,
+    },
+  });
+  const { globals: g, harness: runtime } = loop;
+  for (const name of PARK_FUNCTIONS) runtime.install(name);
+
+  const store_ = (id: string, meta?: Record<string, unknown>) => {
+    db.ensureChatExists(jid);
+    clock += 60_000;
+    db.storeMessageDirect(
+      id,
+      jid,
+      'owner',
+      'Owner',
+      `message ${id}`,
+      new Date(clock).toISOString(),
+      false,
+      meta ? { meta } : undefined,
+    );
+  };
+  return {
+    g,
+    runtime,
+    jid,
+    chatJid,
+    agentId: kind === 'main' ? null : agentId,
+    inbound: (id: string) => store_(id),
+    scheduledPrompt: (id: string) =>
+      store_(id, { sourceKind: 'scheduled_task_prompt', taskId: 'task-1' }),
+    /** The input `id` and everything before it were answered. */
+    answeredThrough(id: string) {
+      const cursor = db.getMessageCursor(jid, id);
+      g.lastAgentTimestamp[jid] = cursor;
+      g.lastCommittedCursor[jid] = cursor;
+    },
+    /** `inputId` hit a usage wall the run decided to wait out. */
+    park(inputId: string) {
+      store.reserveUsageLimitWait({
+        scopeKey: jid,
+        inputKey: inputId,
+        resetAt: LATER(),
+        resumeAt: LATER(),
+        maxWaits: 3,
+      });
+      return g.parkInputForUsageLimitWait({
+        laneJid: jid,
+        agentId: kind === 'main' ? null : agentId,
+        inputId,
+        messageIds: g.usageLimitParkedMessageIds(jid, {}, [{ id: inputId }]),
+        replySourceImJid: null,
+        turnScope: 'wait-scope',
+        presentation: 'default',
+      });
+    },
+    queued: () =>
+      db
+        .listQueuedFollowUps(jid)
+        .map((item) => [item.id, item.delivery_run_id]),
+    /** One scheduler round: the ids the turn would take, or null. */
+    async round(): Promise<string[] | null> {
+      const batch = await loop.round();
+      return batch ? batch.map((message) => message.id) : null;
+    },
+  };
+}
+
+afterEach(() => wait.bindUsageLimitWaitHost(null));
+
+describe('both conversation loops honour a waiting lane', () => {
+  test.each(['main', 'agent'] as const)(
+    '%s: parked input stays put; a scheduled prompt joins it; new input brings all back in one batch',
+    async (kind) => {
+      const l = lane(kind);
+      l.inbound('m1');
+      l.inbound('m2');
+      l.inbound('m3');
+      l.answeredThrough('m1');
+      l.park('m2');
+      // The retry after the failed run finds nothing to run.
+      expect(await l.round()).toBeNull();
+
+      l.scheduledPrompt('t1');
+      expect(await l.round()).toBeNull();
+      expect(l.queued()).toEqual([
+        ['m2', 'usage-limit:m2'],
+        ['m3', 'usage-limit:m2'],
+        ['t1', 'usage-limit:m2'],
+      ]);
+      expect(l.g.broadcastFollowUpUpdate).toHaveBeenCalledWith(l.jid);
+      expect(store.getUsageLimitWait(l.jid)?.state).toBe('waiting');
+
+      l.inbound('m4');
+      const batch = await l.round();
+      expect(batch?.slice(0, 2)).toEqual(['m2', 'm3']);
+      expect(batch).toContain('m4');
+      expect(l.queued()).toEqual([]);
+      expect(store.getUsageLimitWait(l.jid)).toMatchObject({
+        state: 'resumed',
+        waitCount: 1,
+      });
+    },
+  );
+});
+
+describe('a provider failure that waits parks the input in both loops', () => {
+  function outputRuntime(kind: 'main' | 'agent') {
+    const l = lane(kind);
+    l.inbound('m1');
+    l.inbound('m2');
+    l.inbound('m3');
+    l.answeredThrough('m1');
+    const missedMessages = db.getMessagesSince(
+      l.jid,
+      l.g.lastCommittedCursor[l.jid],
+    );
+    Object.assign(l.g, {
+      chatJid: l.chatJid,
+      virtualChatJid: l.jid,
+      virtualJid: l.jid,
+      agentId: l.agentId,
+      group: { name: 'Wait lane' },
+      effectiveGroup: { folder: 'wait-lane' },
+      lastProcessed: missedMessages[0],
+      missedMessages,
+      interactionMode: 'assistant',
+      replySourceImJid: null,
+      steeringTransitions: { shouldSuppressOutput: () => false },
+      takeRecallStop: () => undefined,
+      mainRecallSuppression: false,
+      agentRecallSuppression: false,
+      mainRecalledInputIds: new Set(),
+      agentRecalledInputIds: new Set(),
+      rememberScheduledGroupRuns: vi.fn(),
+      activateMainProjectionForInput: vi.fn(async () => {}),
+      activateAgentProjectionForInput: vi.fn(async () => {}),
+      resolveContainerOutputInputTurnId,
+      isProviderQuotaControlOutput: () => false,
+      bindRunnerActiveIpcCoverage: vi.fn(),
+      resolveProviderFailureClass: () => 'quota',
+      rollbackIdleMainCardReservation: vi.fn(),
+      rollbackIdleAgentCardReservation: vi.fn(),
+      admittedWarmMainInputs: new Map(),
+      admittedWarmAgentInputs: new Map(),
+      clearProcessingIndicatorForInput: vi.fn(async () => {}),
+      clearAgentProcessingIndicatorForInput: vi.fn(async () => {}),
+      channelTurnScope: (folder: string, agentId?: string) =>
+        `${folder}:${agentId ?? ''}`,
+      resetIdleTimer: vi.fn(),
+      providerFailoverPending: false,
+      agentProviderFailoverPending: false,
+      retryUnfinishedTurn: true,
+      parkedForUsageLimitWait: false,
+      usageLimitWaitNote: null,
+      agentUsageLimitWaitNote: null,
+    });
+    l.g.queue.markRunnerActivity = vi.fn();
+    if (kind === 'main') l.runtime.installMainOutput();
+    else l.runtime.install('handleAgentOutput', 'processAgentConversation');
+    const emit =
+      l.g[kind === 'main' ? 'handleMainOutput' : 'handleAgentOutput'];
+    return { ...l, emit };
+  }
+
+  test.each(['main', 'agent'] as const)(
+    '%s: the failed input and the backlog behind it wait; the run ends without a retry',
+    async (kind) => {
+      const run = outputRuntime(kind);
+      store.reserveUsageLimitWait({
+        scopeKey: run.jid,
+        inputKey: 'm2',
+        resetAt: LATER(),
+        resumeAt: LATER(),
+        maxWaits: 3,
+      });
+      await run.emit({
+        status: 'error',
+        result: null,
+        error: 'usage limit',
+        inputTurnId: 'm2',
+        providerFailure: true,
+        providerFailureTerminal: false,
+        providerUsageLimitResumeAt: Date.parse(LATER()),
+      });
+
+      expect(run.queued()).toEqual([
+        ['m2', 'usage-limit:m2'],
+        ['m3', 'usage-limit:m2'],
+      ]);
+      expect(run.g.parkedForUsageLimitWait).toBe(true);
+      expect(
+        run.g[
+          kind === 'main' ? 'usageLimitWaitNote' : 'agentUsageLimitWaitNote'
+        ],
+      ).toMatch(/自动继续$/);
+      expect(run.g.armUsageLimitResume).toHaveBeenCalledWith(
+        expect.objectContaining({ scopeKey: run.jid }),
       );
-      expect(body).toMatch(
-        new RegExp(
-          `pendingWindow\\.messages\\.some\\([\\s\\S]{0,120}?\\) &&\\s*releaseUsageLimitWaitForNewInput\\(${lane}\\)[\\s\\S]{0,120}?pendingWindow = getMessagesSinceBounded\\(`,
-        ),
-      );
+      expect(
+        run.g[
+          kind === 'main'
+            ? 'clearProcessingIndicatorForInput'
+            : 'clearAgentProcessingIndicatorForInput'
+        ],
+      ).toHaveBeenCalledWith('m2');
+
+      // The loop's verdict once its runner exits: settled, not retried, even
+      // when the turn itself was left unfinished.
+      const owner =
+        kind === 'main' ? 'processGroupMessages' : 'processAgentConversation';
+      Object.assign(run.g, {
+        recoveryGroups: new Set([run.chatJid]),
+        output: { status: 'error' },
+        retryUnfinishedTurn: true,
+      });
+      run.runtime.installTail('runVerdict', owner, 'parkedForUsageLimitWait');
+      expect(run.g.runVerdict()).toBe(true);
+      expect(run.g.recoveryGroups.has(run.chatJid)).toBe(kind !== 'main');
+      // Without the park the same run asks to be retried.
+      Object.assign(run.g, {
+        parkedForUsageLimitWait: false,
+        retryUnfinishedTurn: true,
+      });
+      expect(run.g.runVerdict()).toBe(false);
+    },
+  );
+});
+
+describe('every way out of a wait reaches it', () => {
+  /** Globals a cancelled queued input settles through. */
+  function cancelling(l: ReturnType<typeof lane>) {
+    Object.assign(l.g, {
+      getChannelType,
+      parseChannelAddress,
+      registeredGroups: {},
+      cancelQueuedFollowUp: db.cancelQueuedFollowUp,
+      cancelQueuedFollowUpsAtCutoff: db.cancelQueuedFollowUpsAtCutoff,
+      listQueuedFollowUps: db.listQueuedFollowUps,
+    });
+    for (const name of [
+      'channelTurnScopeForInput',
+      'closeRetryWaitTurnsForWithdrawnInputs',
+      'settleCancelledFollowUp',
+      'cancelFollowUp',
+      'cancelQueuedInputsOfLane',
+    ]) {
+      l.runtime.install(name);
     }
-    expect(main).toContain('if (parkedForUsageLimitWait) {');
-    expect(agent).toContain('if (parkedForUsageLimitWait) {');
+  }
+
+  function parkedLane() {
+    const l = lane('agent');
+    l.inbound('m1');
+    l.inbound('m2');
+    l.answeredThrough('m1');
+    l.inbound('m3');
+    l.park('m2');
+    expect(l.queued().map(([id]) => id)).toEqual(['m2', 'm3']);
+    return l;
+  }
+
+  test('/break cancels the parked inputs and forgets the wait', async () => {
+    const l = parkedLane();
+    cancelling(l);
+    Object.assign(l.g, {
+      learnFeishuDirectChat: vi.fn(),
+      resolveRuntimeControlTarget: () => l.jid,
+      interruptActiveSessionRun: () => ({
+        activeRunId: null,
+        interrupted: false,
+      }),
+    });
+    l.runtime.install('handleSessionBreak');
+    await expect(
+      l.g.handleSessionBreak({
+        sourceJid: 'feishu:oc_break',
+        senderImId: 'ou_owner',
+      }),
+    ).resolves.toBe('Current task stopped.');
+    expect(l.queued()).toEqual([]);
+    expect(store.getUsageLimitWait(l.jid)).toBeNull();
   });
 
-  test('break, cancel, send-now, stop and restart all reach the wait', () => {
-    expect(
-      slice(
-        'async function handleSessionBreak(',
-        'async function handleFeishuSessionClear(',
-      ),
-    ).toContain("endUsageLimitWait(targetJid, 'cancelled');");
-    expect(
-      slice('function settleCancelledFollowUp(', 'function editFollowUp('),
-    ).toMatch(
-      /listQueuedFollowUps\(chatJid\)\.length === 0\) \{\s*endUsageLimitWait\(chatJid, 'cancelled'\);/,
+  test('cancelling the parked inputs one by one ends the wait with the last', () => {
+    const l = parkedLane();
+    cancelling(l);
+    expect(l.g.cancelFollowUp(l.jid, 'm2')).toMatchObject({ ok: true });
+    expect(store.getUsageLimitWait(l.jid)?.state).toBe('waiting');
+    expect(l.g.cancelFollowUp(l.jid, 'm3')).toMatchObject({ ok: true });
+    expect(store.getUsageLimitWait(l.jid)).toBeNull();
+  });
+
+  test('send now ends the wait and hands the lane to the cold reader', () => {
+    const l = parkedLane();
+    Object.assign(l.g, {
+      queue: { getActiveQueryId: () => null },
+      prioritizeQueuedFollowUp: db.prioritizeQueuedFollowUp,
+      dispatchQueuedFollowUpFamily: vi.fn(),
+    });
+    l.runtime.install('promoteFollowUp');
+    expect(l.g.promoteFollowUp(l.jid, 'm3', 'usage-limit:m2')).toMatchObject({
+      ok: true,
+      message: '已结束等待，正在重新发送。',
+    });
+    expect(l.queued()).toEqual([]);
+    expect(store.getUsageLimitWait(l.jid)?.state).toBe('resumed');
+    expect(l.g.enqueueReleasedFollowUp).toHaveBeenCalledWith(
+      expect.objectContaining({ chat_jid: l.jid }),
     );
-    expect(
-      slice('function promoteFollowUp(', 'function cancelFollowUp('),
-    ).toMatch(
-      /endUsageLimitWait\(chatJid, 'new_input'\)\) \{[\s\S]{0,120}releaseQueuedFollowUpsToColdReader\(chatJid\);/,
+    expect(l.g.dispatchQueuedFollowUpFamily).not.toHaveBeenCalled();
+  });
+
+  test('a discarded lane takes its parked inputs along', () => {
+    const l = parkedLane();
+    cancelling(l);
+    // main() binds the wait host and the queue's discard hook.
+    l.runtime.installCallArgument(
+      'usageLimitWaitHost',
+      'main',
+      'bindUsageLimitWaitHost',
+      0,
     );
-    expect(source).toMatch(
-      /queue\.setOnLaneDiscarded\(\(jid\) => \{\s*endUsageLimitWait\(jid, 'discarded'\);/,
+    l.runtime.installCallArgument(
+      'onLaneDiscarded',
+      'main',
+      'queue.setOnLaneDiscarded',
+      0,
     );
-    expect(source).toContain(
-      'recoverDurableFollowUps(new Set(rearmUsageLimitWaitsAfterRestart()));',
+    wait.bindUsageLimitWaitHost(l.g.usageLimitWaitHost);
+    l.g.onLaneDiscarded(l.jid);
+    expect(l.queued()).toEqual([]);
+    expect(store.getUsageLimitWait(l.jid)).toBeNull();
+    expect(l.g.broadcastUsageLimitWait).toHaveBeenCalledWith(l.jid, null);
+  });
+
+  test('a restart re-arms waiting lanes and releases every other queue', () => {
+    const waiting = parkedLane();
+    const other = lane('main');
+    other.inbound('o1');
+    db.setMessageFollowUp(other.jid, 'o1', { mode: 'queue', status: 'queued' });
+    const g = waiting.g;
+    g.getQueuedFollowUpChatJids = db.getQueuedFollowUpChatJids;
+    g.rearmUsageLimitWaitsAfterRestart = wait.rearmUsageLimitWaitsAfterRestart;
+    waiting.runtime.install('recoverDurableFollowUps');
+    // The exact set main() hands over, computed now.
+    waiting.runtime.installCallArgument(
+      'restartWaitingLanes',
+      'main',
+      'recoverDurableFollowUps',
+      0,
     );
-    expect(
-      slice('function recoverDurableFollowUps(', '// ── Usage-limit waits'),
-    ).toContain('if (waitingLanes.has(chatJid)) continue;');
-    expect(source).toMatch(
-      /keepCorrelationIds: \[\s*\.\.\.new Set\(\s*listPendingUsageLimitWaits\(\)\.flatMap\(/,
+    expect(g.restartWaitingLanes.has(waiting.jid)).toBe(true);
+    g.recoverDurableFollowUps(g.restartWaitingLanes);
+    expect(waiting.queued().map(([id]) => id)).toEqual(['m2', 'm3']);
+    expect(db.listQueuedFollowUps(other.jid)).toEqual([]);
+    expect(g.enqueueReleasedFollowUp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'o1' }),
     );
+  });
+
+  test('the stale retry_wait sweep keeps every input a wait still holds', () => {
+    // Ids of their own: other lanes in this file still wait with m2 and m3.
+    const l = lane('agent');
+    l.inbound('s1');
+    l.inbound('s2');
+    l.answeredThrough('s1');
+    l.inbound('s3');
+    l.park('s2');
+    l.inbound('s4'); // arrived during the wait, not read yet
+    const unrelated = lane('main');
+    unrelated.inbound('u1');
+    const cancelStaleRetryWaitChannelTurns = vi.fn(() => 0);
+    Object.assign(l.g, {
+      cancelStaleRetryWaitChannelTurns,
+      listPendingUsageLimitWaits: wait.listPendingUsageLimitWaits,
+      listQueuedFollowUps: db.listQueuedFollowUps,
+    });
+    l.runtime.install('CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS');
+    l.runtime.install('runStaleRetryWaitTurnSweep', 'main');
+    l.g.runStaleRetryWaitTurnSweep();
+    const [{ keepCorrelationIds }] = cancelStaleRetryWaitChannelTurns.mock
+      .calls[0] as unknown as [{ keepCorrelationIds: string[] }];
+    // The parked input, the backlog parked with it, and input not read yet.
+    expect(keepCorrelationIds).toEqual(
+      expect.arrayContaining(['s2', 's3', 's4']),
+    );
+    // Answered input and lanes that wait for nothing are swept as before.
+    expect(keepCorrelationIds).not.toContain('s1');
+    expect(keepCorrelationIds).not.toContain('u1');
   });
 });

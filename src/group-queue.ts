@@ -1029,19 +1029,26 @@ export class GroupQueue {
     if (!globalAtLimit && !userAtLimit) {
       return false;
     }
-    const waitingUserId =
-      userAtLimit && blockedJid ? this.getUserId(blockedJid) : null;
+    const waitingUserId = userAtLimit ? (userLimitCheck?.userId ?? null) : null;
+    // getUserId runs the whole per-user limit check, which walks every
+    // workspace; resolve each lane once, not in every loop and comparison.
+    const sameUser = new Map<string, boolean>();
+    const ownedByWaitingUser = (jid: string): boolean => {
+      let same = sameUser.get(jid);
+      if (same === undefined) {
+        same = this.getUserId(jid) === waitingUserId;
+        sameUser.set(jid, same);
+      }
+      return same;
+    };
+    // A runner or lane that competes for the slot the waiting work needs.
+    const competes = (jid: string): boolean =>
+      globalAtLimit || !waitingUserId || ownedByWaitingUser(jid);
     let closing = 0;
     const idle: Array<{ jid: string; state: GroupState }> = [];
     for (const [jid, state] of this.groups) {
-      if (state.active && state.closing === 'reclaim') {
-        if (
-          globalAtLimit ||
-          !waitingUserId ||
-          this.getUserId(jid) === waitingUserId
-        ) {
-          closing++;
-        }
+      if (state.active && state.closing === 'reclaim' && competes(jid)) {
+        closing++;
       }
       if (this.isIdleContainerRunner(jid, state)) idle.push({ jid, state });
     }
@@ -1061,9 +1068,7 @@ export class GroupQueue {
         !runnerKeys.has(this.getSerializationKey(jid)) &&
         !this.isHostMode(jid) &&
         !this.isMutationPaused(jid) &&
-        (globalAtLimit ||
-          !waitingUserId ||
-          this.getUserId(jid) === waitingUserId)
+        competes(jid)
       ) {
         demand++;
       }
@@ -1072,18 +1077,15 @@ export class GroupQueue {
     // Longest idle first; the costlier checks run only until one passes.
     idle.sort((a, b) => {
       if (waitingUserId) {
-        const aSameUser = this.getUserId(a.jid) === waitingUserId ? 0 : 1;
-        const bSameUser = this.getUserId(b.jid) === waitingUserId ? 0 : 1;
+        const aSameUser = ownedByWaitingUser(a.jid) ? 0 : 1;
+        const bSameUser = ownedByWaitingUser(b.jid) ? 0 : 1;
         if (aSameUser !== bSameUser) return aSameUser - bSameUser;
       }
       return (a.state.idleSince ?? 0) - (b.state.idleSince ?? 0);
     });
     const victim = idle.find(
       ({ jid, state }) =>
-        (globalAtLimit ||
-          !waitingUserId ||
-          this.getUserId(jid) === waitingUserId) &&
-        this.owesNoWorkOutsideQueue(jid, state),
+        competes(jid) && this.owesNoWorkOutsideQueue(jid, state),
     );
     if (!victim) return false;
     victim.state.closing = 'reclaim';

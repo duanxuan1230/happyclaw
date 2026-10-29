@@ -8,6 +8,7 @@
  * tables directly.
  */
 import type { UsageQueryFilters } from './db.js';
+import { keyPrefixRange } from './sql-key-prefix.js';
 
 interface SqliteRunResult {
   changes: number;
@@ -392,8 +393,9 @@ export function clearFolderRuntimeState(
   ).run(groupFolder);
   if (chatJid) {
     stmt(
-      'DELETE FROM usage_limit_waits WHERE scope_key = ? OR scope_key LIKE ?',
-    ).run(chatJid, `${chatJid}#agent:%`);
+      `DELETE FROM usage_limit_waits
+       WHERE scope_key = @chatJid OR (scope_key >= @from AND scope_key < @to)`,
+    ).run({ chatJid, ...keyPrefixRange(`${chatJid}#agent:`) });
   }
 }
 

@@ -189,6 +189,44 @@ describe('reclaiming idle warm container runners', () => {
     expect(started).toContain('web:u1-idle');
   });
 
+  test('picking a runner for a user at their limit checks each lane’s owner once', async () => {
+    settings.maxConcurrentContainers = 20;
+    const { queue, closed } = harness();
+    const userOf = (jid: string) => (jid.startsWith('web:u1-') ? 'u1' : 'u2');
+    const active = { u1: 0 };
+    // Like the real checker, every call walks all workspaces of the owner.
+    const calls = new Map<string, number>();
+    queue.setUserConcurrentLimitChecker((jid) => {
+      calls.set(jid, (calls.get(jid) ?? 0) + 1);
+      const userId = userOf(jid);
+      return { allowed: userId === 'u2' || active.u1 < 2, userId };
+    });
+    const now = vi.spyOn(Date, 'now');
+    const idleJids = [
+      'web:u2-a',
+      'web:u1-old',
+      'web:u2-b',
+      'web:u2-c',
+      'web:u1-new',
+      'web:u2-d',
+      'web:u2-e',
+    ];
+    for (const [index, jid] of idleJids.entries()) {
+      now.mockReturnValue(1_000 * (index + 1));
+      await idleRunner(queue, jid);
+      if (userOf(jid) === 'u1') active.u1++;
+    }
+    now.mockRestore();
+    calls.clear();
+
+    queue.enqueueMessageCheck('web:u1-next');
+
+    expect(closed.mock.calls.map(([jid]) => jid)).toEqual(['web:u1-old']);
+    for (const jid of idleJids) {
+      expect(calls.get(jid) ?? 0, jid).toBeLessThanOrEqual(1);
+    }
+  });
+
   test('hasActiveMainRunnerForMessage returns false while a runner is closing', async () => {
     settings.maxConcurrentContainers = 1;
     const { queue, closed } = harness();

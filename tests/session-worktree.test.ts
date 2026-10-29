@@ -30,6 +30,7 @@ vi.mock('../src/logger.js', () => ({
 const db = await import('../src/db.js');
 const store = await import('../src/session-worktree-store.js');
 const worktrees = await import('../src/session-worktree.js');
+const { logger } = await import('../src/logger.js');
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(
@@ -329,6 +330,55 @@ describe('session worktree lifecycle', () => {
       false,
     );
     expect(fs.existsSync(path.join(record.worktree_path, '.env.symlink'))).toBe(
+      false,
+    );
+  });
+
+  test('.worktreeinclude reports and logs what its caps left out', async () => {
+    const repo = makeRepo('repo-include-caps', {
+      '.gitignore': 'big/\nhuge.bin\n',
+      '.worktreeinclude': 'big/\nhuge.bin\n',
+    });
+    const longName = 'n'.repeat(200);
+    fs.mkdirSync(path.join(repo, 'big', longName), { recursive: true });
+    // 1300 paths of ~210 bytes: the matched list outgrows its 256 KB cap.
+    for (let i = 0; i < 1300; i++) {
+      fs.writeFileSync(path.join(repo, 'big', longName, String(i)), '');
+    }
+    const warn = vi.mocked(logger.warn);
+    warn.mockClear();
+
+    const truncated = await worktrees.createSessionWorktree({
+      group: hostGroup('ws-include-caps', repo),
+      chatJid: 'web:ws-include-caps',
+      agentId: '13131313-0000-0000-0000-000000000000',
+    });
+    expect(truncated.include_incomplete).toEqual({
+      reason: 'list_truncated',
+      copied_files: 0,
+    });
+    expect(fs.existsSync(path.join(truncated.worktree_path, 'big'))).toBe(
+      false,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'list_truncated', copiedFiles: 0 }),
+      expect.stringContaining('.worktreeinclude'),
+    );
+
+    fs.rmSync(path.join(repo, 'big'), { recursive: true });
+    // Sized, never written: the cap reads the size only.
+    fs.writeFileSync(path.join(repo, 'huge.bin'), '');
+    fs.truncateSync(path.join(repo, 'huge.bin'), 10 * 1024 * 1024 + 1);
+    const oversized = await worktrees.createSessionWorktree({
+      group: hostGroup('ws-include-caps', repo),
+      chatJid: 'web:ws-include-caps',
+      agentId: '14141414-0000-0000-0000-000000000000',
+    });
+    expect(oversized.include_incomplete).toEqual({
+      reason: 'size_limit',
+      copied_files: 0,
+    });
+    expect(fs.existsSync(path.join(oversized.worktree_path, 'huge.bin'))).toBe(
       false,
     );
   });

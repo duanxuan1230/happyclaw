@@ -900,6 +900,17 @@ export interface SessionWorktreeInfo {
   base_commit: string;
   status: 'active' | 'broken';
   broken_reason: string | null;
+  /** Creation response only: what `.worktreeinclude` could not copy. */
+  include_incomplete?: WorktreeIncludeIncomplete | null;
+}
+
+/**
+ * `.worktreeinclude` matched more than its caps let through: the matched list
+ * outgrew 256 KB (nothing copied), or the 100-file or size caps stopped it.
+ */
+export interface WorktreeIncludeIncomplete {
+  reason: 'list_truncated' | 'file_limit' | 'size_limit';
+  copied_files: number;
 }
 
 export interface ImContextBinding {
