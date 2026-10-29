@@ -36,7 +36,11 @@ import {
   markSessionWorktreeBroken,
   type SessionWorktree,
 } from './session-worktree-store.js';
-import type { RegisteredGroup, SessionWorktreeInfo } from './types.js';
+import type {
+  RegisteredGroup,
+  SessionWorktreeInfo,
+  WorktreeIncludeIncomplete,
+} from './types.js';
 import { isRealpathInside, realpathBestEffort } from './utils.js';
 
 export const WORKTREES_DIR = path.join(DATA_DIR, 'worktrees');
@@ -238,17 +242,24 @@ const WORKTREE_INCLUDE_MAX_FILES = 100;
 const WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const WORKTREE_INCLUDE_TOTAL_MAX_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Copy the untracked ignored files `.worktreeinclude` names (`.env` and the
+ * like) into a new worktree within fixed caps. Returns, and logs, what the
+ * caps left out; null when everything matched was copied.
+ */
 async function copyWorktreeIncludeFiles(
   repoRoot: string,
   worktreePath: string,
-): Promise<void> {
+): Promise<WorktreeIncludeIncomplete | null> {
+  let shortfall: WorktreeIncludeIncomplete['reason'] | null = null;
+  let copiedCount = 0;
   try {
     const includeFile = path.join(repoRoot, '.worktreeinclude');
     let includeStat: fs.Stats;
     try {
       includeStat = fs.lstatSync(includeFile);
     } catch {
-      return;
+      return null;
     }
     if (
       !includeStat.isFile() ||
@@ -256,7 +267,7 @@ async function copyWorktreeIncludeFiles(
       includeStat.size > WORKTREE_INCLUDE_FILE_MAX_BYTES ||
       !isRealpathInside(includeFile, repoRoot)
     ) {
-      return;
+      return null;
     }
     const lsResult = await runGit(
       repoRoot,
@@ -269,12 +280,17 @@ async function copyWorktreeIncludeFiles(
       ],
       { maxBytes: 256 * 1024 },
     );
-    if (lsResult.truncated) return;
-    const matched = lsResult.stdout.split('\0').filter(Boolean);
-    let copiedCount = 0;
+    // A cut list may end mid-path; copy nothing rather than a guessed subset.
+    if (lsResult.truncated) shortfall = 'list_truncated';
+    const matched = lsResult.truncated
+      ? []
+      : lsResult.stdout.split('\0').filter(Boolean);
     let totalBytes = 0;
     for (const relPath of matched) {
-      if (copiedCount >= WORKTREE_INCLUDE_MAX_FILES) break;
+      if (copiedCount >= WORKTREE_INCLUDE_MAX_FILES) {
+        shortfall = 'file_limit';
+        break;
+      }
       if (
         !relPath ||
         path.isAbsolute(relPath) ||
@@ -298,12 +314,12 @@ async function copyWorktreeIncludeFiles(
       } catch {
         continue;
       }
+      if (!srcStat.isFile()) continue;
       if (
-        !srcStat.isFile() ||
-        srcStat.isSymbolicLink() ||
         srcStat.size > WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES ||
         totalBytes + srcStat.size > WORKTREE_INCLUDE_TOTAL_MAX_BYTES
       ) {
+        shortfall = 'size_limit';
         continue;
       }
       try {
@@ -325,6 +341,12 @@ async function copyWorktreeIncludeFiles(
       'Failed to copy .worktreeinclude files into session worktree',
     );
   }
+  if (!shortfall) return null;
+  logger.warn(
+    { repoRoot, worktreePath, reason: shortfall, copiedFiles: copiedCount },
+    '.worktreeinclude matched more files than were copied into the worktree',
+  );
+  return { reason: shortfall, copied_files: copiedCount };
 }
 
 function worktreePathFor(folder: string, agentId: string): string {
@@ -377,6 +399,11 @@ async function pickBranchName(
   throw new Error(`branch ${BRANCH_PREFIX}${compact} already exists`);
 }
 
+/** A new worktree's record and what `.worktreeinclude` could not copy. */
+export type CreatedSessionWorktree = SessionWorktree & {
+  include_incomplete: WorktreeIncludeIncomplete | null;
+};
+
 /**
  * Add a worktree for a new session on a fresh branch at the repository's
  * current HEAD and record it. Throws WorktreeUnavailableError when the
@@ -386,7 +413,7 @@ export async function createSessionWorktree(input: {
   group: WorkspaceLike;
   chatJid: string;
   agentId: string;
-}): Promise<SessionWorktree> {
+}): Promise<CreatedSessionWorktree> {
   const support = await getWorktreeSupport(input.group);
   if (!support.available) throw new WorktreeUnavailableError(support.reason);
   const worktreePath = worktreePathFor(input.group.folder, input.agentId);
@@ -419,9 +446,12 @@ export async function createSessionWorktree(input: {
         : `git worktree add exited with ${addResult.exitCode}`,
     );
   }
-  await copyWorktreeIncludeFiles(support.repoRoot, worktreePath);
+  const includeIncomplete = await copyWorktreeIncludeFiles(
+    support.repoRoot,
+    worktreePath,
+  );
   try {
-    return insertSessionWorktree({
+    const record = insertSessionWorktree({
       agent_id: input.agentId,
       group_folder: input.group.folder,
       chat_jid: input.chatJid,
@@ -432,6 +462,7 @@ export async function createSessionWorktree(input: {
       base_commit: support.baseCommit,
       created_at: new Date().toISOString(),
     });
+    return { ...record, include_incomplete: includeIncomplete };
   } catch (error) {
     await detachWorktreeDirectory(support.repoRoot, worktreePath, branch);
     throw error;
@@ -528,7 +559,11 @@ export async function countWorktreeChanges(
       '--porcelain=v1',
       '-z',
       '--untracked-files=normal',
-      '--ignore-submodules=all',
+      // `dirty` still reports a staged or moved gitlink (an embedded
+      // repository, a submodule on a new commit) by reading its HEAD, and,
+      // unlike `none` or `untracked`, never starts git inside it, where that
+      // repository's own config would decide what runs.
+      '--ignore-submodules=dirty',
     ],
     {
       maxBytes: 2 * 1024 * 1024,
@@ -591,6 +626,21 @@ async function detachWorktreeDirectory(
     } catch {
       /* branch was never created or already removed */
     }
+  }
+  removeEmptyManagedDir(path.dirname(worktreePath));
+}
+
+/**
+ * Remove a directory below data/worktrees only if it is empty. rmdir refuses
+ * a non-empty directory, so a folder that still holds anything stays.
+ */
+function removeEmptyManagedDir(dir: string): boolean {
+  if (!isManagedWorktreePath(dir)) return false;
+  try {
+    fs.rmdirSync(dir);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -764,11 +814,17 @@ export async function findDirtySessionWorktrees(
 /**
  * Startup reconciliation: worktrees whose directory is gone or damaged become
  * broken, so their sessions fail clearly instead of running somewhere else;
- * ones that are back become active.
+ * ones that are back become active. Empty data/worktrees/<folder> directories
+ * no record lives in are removed; anything with content stays.
  */
-export function reconcileSessionWorktrees(): { broken: number } {
+export function reconcileSessionWorktrees(): {
+  broken: number;
+  emptyFoldersRemoved: number;
+} {
   let broken = 0;
+  const recordFolders = new Set<string>();
   for (const record of listAllSessionWorktrees()) {
+    recordFolders.add(path.resolve(path.dirname(record.worktree_path)));
     const refreshed = refreshSessionWorktreeStatus(record);
     if (refreshed.status === 'broken' && record.status !== 'broken') {
       broken++;
@@ -777,12 +833,36 @@ export function reconcileSessionWorktrees(): { broken: number } {
   if (broken > 0) {
     logger.warn({ broken }, 'Marked missing session worktrees as broken');
   }
-  return { broken };
+  let emptyFoldersRemoved = 0;
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(WORKTREES_DIR, { withFileTypes: true });
+  } catch {
+    /* no worktree has been created yet */
+  }
+  for (const entry of entries) {
+    const dir = path.resolve(WORKTREES_DIR, entry.name);
+    if (!entry.isDirectory() || recordFolders.has(dir)) continue;
+    if (removeEmptyManagedDir(dir)) emptyFoldersRemoved++;
+  }
+  if (emptyFoldersRemoved > 0) {
+    logger.info(
+      { emptyFoldersRemoved },
+      'Removed empty worktree folders without sessions',
+    );
+  }
+  return { broken, emptyFoldersRemoved };
 }
 
-/** Public shape of a session's worktree in API responses. */
+/**
+ * Public shape of a session's worktree in API responses. Only the creation
+ * response carries `include_incomplete`.
+ */
 export function toSessionWorktreePayload(
-  record: SessionWorktree | undefined,
+  record:
+    | (SessionWorktree &
+        Partial<Pick<CreatedSessionWorktree, 'include_incomplete'>>)
+    | undefined,
 ): SessionWorktreeInfo | null {
   if (!record) return null;
   return {
@@ -790,5 +870,6 @@ export function toSessionWorktreePayload(
     base_commit: record.base_commit,
     status: record.status,
     broken_reason: record.broken_reason,
+    include_incomplete: record.include_incomplete,
   };
 }

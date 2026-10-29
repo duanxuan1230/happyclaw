@@ -240,6 +240,39 @@ describe('creating a session with its own worktree', () => {
     expect(plain.body.session.worktree).toBeNull();
   });
 
+  test('says when .worktreeinclude copied fewer files than it matched', async () => {
+    const repo = makeRepo();
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'env/\n');
+    fs.writeFileSync(path.join(repo, '.worktreeinclude'), 'env/\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'include');
+    fs.mkdirSync(path.join(repo, 'env'));
+    for (let i = 0; i < 101; i++) {
+      fs.writeFileSync(path.join(repo, 'env', `${i}.env`), `${i}\n`);
+    }
+    const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+
+    const created = await createSession(jid, { worktree: true });
+    expect(created.status).toBe(200);
+    expect(created.body.session.worktree.include_incomplete).toEqual({
+      reason: 'file_limit',
+      copied_files: 100,
+    });
+    const record = store.getSessionWorktree(created.body.session.id)!;
+    expect(fs.readdirSync(path.join(record.worktree_path, 'env'))).toHaveLength(
+      100,
+    );
+    // Only the creation response carries it.
+    const listed = await call(agentRoutes, `/${enc(jid)}/sessions`);
+    expect(
+      listed.body.sessions.find((s: any) => s.id === record.agent_id).worktree,
+    ).not.toHaveProperty('include_incomplete');
+
+    fs.rmSync(path.join(repo, 'env', '100.env'));
+    const complete = await createSession(jid, { worktree: true });
+    expect(complete.body.session.worktree.include_incomplete).toBeNull();
+  });
+
   test('refuses container and non-git workspaces without creating a session', async () => {
     const container = seedWorkspace({ executionMode: 'container' });
     const refused = await createSession(container.jid, { worktree: true });
@@ -569,6 +602,41 @@ describe('deleting worktree sessions', () => {
     expect(git(repo, 'status', '--porcelain')).toBe('');
   });
 
+  test('an embedded repository, staged or not, needs confirmation', async () => {
+    const repo = makeRepo();
+    const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+    const sessionId = (await createSession(jid, { worktree: true })).body
+      .session.id as string;
+    const worktree = store.getSessionWorktree(sessionId)!;
+    const nested = path.join(worktree.worktree_path, 'nested');
+    fs.mkdirSync(nested);
+    git(nested, 'init', '-q', '-b', 'main');
+    git(nested, 'commit', '-q', '--allow-empty', '-m', 'nested');
+    const deleteSession = () =>
+      call(agentRoutes, `/${enc(jid)}/sessions/${sessionId}`, {
+        method: 'DELETE',
+      });
+
+    git(worktree.worktree_path, 'add', 'nested');
+    const staged = await deleteSession();
+    expect(staged.status).toBe(409);
+    expect(staged.body).toMatchObject({
+      code: 'WORKTREE_DIRTY',
+      dirty_worktrees: [{ session_id: sessionId, changed_files: 1 }],
+    });
+
+    // Committed gitlink, then a commit that exists only in the nested repo.
+    git(worktree.worktree_path, 'commit', '-qm', 'embed');
+    git(nested, 'commit', '-q', '--allow-empty', '-m', 'local only');
+    const unstaged = await deleteSession();
+    expect(unstaged.status).toBe(409);
+    expect(unstaged.body.dirty_worktrees).toMatchObject([
+      { session_id: sessionId, changed_files: 1 },
+    ]);
+    expect(db.getAgent(sessionId)).toBeDefined();
+    expect(fs.existsSync(path.join(nested, '.git'))).toBe(true);
+  });
+
   test('a clean worktree goes with the legacy /agents delete', async () => {
     const repo = makeRepo();
     const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
@@ -619,6 +687,7 @@ describe('deleting worktree sessions', () => {
     expect(db.getRegisteredGroup(jid)).toBeUndefined();
     expect(store.getSessionWorktree(sessionId)).toBeUndefined();
     expect(fs.existsSync(worktree.worktree_path)).toBe(false);
+    expect(fs.existsSync(path.dirname(worktree.worktree_path))).toBe(false);
     expect(git(repo, 'branch', '--list', worktree.branch)).toContain(
       worktree.branch,
     );

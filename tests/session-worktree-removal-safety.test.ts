@@ -61,11 +61,15 @@ function makeRepo(files: Record<string, string>): string {
   return fs.realpathSync(dir);
 }
 
-async function worktreeFor(repo: string, customCwd = repo) {
+async function worktreeFor(
+  repo: string,
+  customCwd = repo,
+  folder = `ws-${seq + 1}`,
+) {
   const id = `${String(++seq).padStart(8, '0')}-0000-0000-0000-000000000000`;
   return worktrees.createSessionWorktree({
-    group: { folder: `ws-${seq}`, executionMode: 'host', customCwd },
-    chatJid: `web:ws-${seq}`,
+    group: { folder, executionMode: 'host', customCwd },
+    chatJid: `web:${folder}`,
     agentId: id,
   });
 }
@@ -215,5 +219,117 @@ describe('a broken worktree that is back becomes active', () => {
     fs.renameSync(aside, record.worktree_path);
     worktrees.reconcileSessionWorktrees();
     expect(store.getSessionWorktree(record.agent_id)?.status).toBe('active');
+  });
+});
+
+describe('an embedded repository counts as a change', () => {
+  // `git add` of a repository inside the checkout records only a gitlink;
+  // the nested repository's history lives in its own .git inside the
+  // worktree and goes with it.
+  function embeddedRepo(worktreePath: string): string {
+    const nested = path.join(worktreePath, 'nested');
+    fs.mkdirSync(nested);
+    git(nested, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(nested, 'n.txt'), 'n\n');
+    git(nested, 'add', '.');
+    git(nested, 'commit', '-qm', 'nested');
+    return nested;
+  }
+
+  async function expectRefused(agentId: string) {
+    await expect(
+      worktrees.removeSessionWorktree(agentId),
+    ).resolves.toMatchObject({
+      removed: false,
+      risk: { dirtyFiles: 1, unreadable: false },
+    });
+    expect(
+      fs.existsSync(store.getSessionWorktree(agentId)!.worktree_path),
+    ).toBe(true);
+  }
+
+  test('untracked, staged, and moved to a new commit', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const record = await worktreeFor(repo);
+    const nested = embeddedRepo(record.worktree_path);
+    await expectRefused(record.agent_id);
+
+    git(record.worktree_path, 'add', 'nested');
+    expect(git(record.worktree_path, 'status', '--porcelain')).toBe(
+      'A  nested',
+    );
+    await expectRefused(record.agent_id);
+
+    // Committed, then the nested repository moves on: an unstaged gitlink.
+    git(record.worktree_path, 'commit', '-qm', 'embed');
+    await expect(
+      worktrees.countWorktreeChanges(record.worktree_path),
+    ).resolves.toBe(0);
+    git(nested, 'commit', '-q', '--allow-empty', '-m', 'local only');
+    await expectRefused(record.agent_id);
+
+    await expect(
+      worktrees.removeSessionWorktree(record.agent_id, { force: true }),
+    ).resolves.toMatchObject({ removed: true });
+  });
+});
+
+describe('data/worktrees keeps no empty folders', () => {
+  const worktreesDir = path.join(dataDir, 'worktrees');
+
+  test('the folder goes with the last worktree in it', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const first = await worktreeFor(repo);
+    const folderDir = path.dirname(first.worktree_path);
+    const second = await worktreeFor(repo, repo, first.group_folder);
+    expect(path.dirname(second.worktree_path)).toBe(folderDir);
+
+    await worktrees.removeSessionWorktree(first.agent_id);
+    expect(fs.readdirSync(folderDir)).toEqual([second.agent_id]);
+    await worktrees.removeSessionWorktree(second.agent_id);
+    expect(fs.existsSync(folderDir)).toBe(false);
+    expect(fs.existsSync(worktreesDir)).toBe(true);
+  });
+
+  test('a failed worktree add leaves no folder behind', async () => {
+    const repo = makeRepo({
+      '.gitattributes': '*.txt filter=fail\n',
+      'a.txt': 'a\n',
+    });
+    git(repo, 'config', 'filter.fail.smudge', 'false');
+    git(repo, 'config', 'filter.fail.required', 'true');
+    await expect(worktreeFor(repo)).rejects.toMatchObject({
+      code: 'GIT_WORKTREE_ADD_FAILED',
+    });
+    expect(fs.existsSync(path.join(worktreesDir, `ws-${seq}`))).toBe(false);
+  });
+
+  test('startup removes empty folders no record lives in, and nothing else', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const kept = await worktreeFor(repo);
+    // A record whose checkout vanished keeps its (now empty) folder.
+    const vanished = await worktreeFor(repo);
+    fs.rmSync(vanished.worktree_path, { recursive: true, force: true });
+    const stale = path.join(worktreesDir, 'stale-empty');
+    fs.mkdirSync(stale, { recursive: true });
+    const content = path.join(worktreesDir, 'stale-with-content');
+    fs.mkdirSync(path.join(content, 'leftover'), { recursive: true });
+    fs.writeFileSync(path.join(content, 'leftover', 'keep.txt'), 'keep\n');
+    const nestedEmpty = path.join(worktreesDir, 'stale-nested', 'empty');
+    fs.mkdirSync(nestedEmpty, { recursive: true });
+    fs.writeFileSync(path.join(worktreesDir, 'stray-file'), 'x\n');
+
+    expect(worktrees.reconcileSessionWorktrees()).toMatchObject({
+      emptyFoldersRemoved: 1,
+    });
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(
+      fs.readFileSync(path.join(content, 'leftover', 'keep.txt'), 'utf8'),
+    ).toBe('keep\n');
+    expect(fs.existsSync(nestedEmpty)).toBe(true);
+    expect(fs.existsSync(path.join(worktreesDir, 'stray-file'))).toBe(true);
+    expect(fs.existsSync(path.dirname(vanished.worktree_path))).toBe(true);
+    expect(fs.existsSync(kept.worktree_path)).toBe(true);
+    expect(worktrees.reconcileSessionWorktrees().emptyFoldersRemoved).toBe(0);
   });
 });

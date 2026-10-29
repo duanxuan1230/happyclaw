@@ -111,6 +111,46 @@ describe('host git reads with a hostile repository config', () => {
     expect(ran()).toEqual([]);
   });
 
+  test('the dirty check counts an embedded repository without running its config', async () => {
+    const outer = path.join(root, 'repo-outer');
+    const nested = path.join(outer, 'nested');
+    fs.mkdirSync(nested, { recursive: true });
+    git('-C', outer, 'init', '-q', '-b', 'main');
+    git('-C', nested, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(nested, '.gitattributes'), '*.txt filter=sub\n');
+    fs.writeFileSync(path.join(nested, 'n.txt'), 'n\n');
+    git('-C', nested, '-c', 'filter.sub.clean=cat', 'add', '.');
+    git('-C', nested, 'commit', '-qm', 'nested');
+    git('-C', outer, 'add', 'nested');
+    git('-C', outer, 'commit', '-qm', 'embed');
+    // The embedded repository moves on and has dirty content its own config
+    // would filter: only a git started inside it would run these.
+    git('-C', nested, 'commit', '-q', '--allow-empty', '-m', 'local only');
+    git(
+      '-C',
+      nested,
+      'config',
+      'core.fsmonitor',
+      planted('nested-fsmonitor', ''),
+    );
+    git(
+      '-C',
+      nested,
+      'config',
+      'filter.sub.clean',
+      planted('nested-clean', 'cat'),
+    );
+    // Same size, so status must hash the file through the filter.
+    fs.writeFileSync(path.join(nested, 'n.txt'), 'm\n');
+
+    await expect(countWorktreeChanges(outer)).resolves.toBe(1);
+    expect(
+      ['nested-fsmonitor', 'nested-clean'].filter((name) =>
+        fs.existsSync(path.join(markers, name)),
+      ),
+    ).toEqual([]);
+  });
+
   test('neutralizes filter subsections containing "=" and numeric prefixes', async () => {
     const eqRepo = path.join(root, 'repo-eq');
     fs.mkdirSync(eqRepo, { recursive: true });
