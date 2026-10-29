@@ -79,6 +79,8 @@ function automationDefaults(): Record<string, unknown> {
 const AUTOMATION_SOURCE_HELPERS = [
   'isUnattendedInput',
   'dropNonReplayableInputs',
+  'withdrawQueuedInput',
+  'withdrawQueuedInputsOfEndedRuns',
   'automationRunIdForInput',
   'createReplyStreamingSession',
 ];
@@ -170,11 +172,10 @@ export function createRuntimeSourceHarness(
       const tail = statements.slice(
         statements.indexOf(statement as ts.Statement),
       );
-      installNode(
-        name,
-        statement,
-        () => `() => {\n${tail.map((s) => s.getText(source)).join('\n')}\n}`,
-      );
+      const body = tail.map((s) => s.getText(source)).join('\n');
+      // A tail that awaits installs as an async function.
+      const arrow = /\bawait\b/.test(body) ? 'async () =>' : '() =>';
+      installNode(name, statement, () => `${arrow} {\n${body}\n}`);
     },
     /**
      * Install the `finally` block of `owner`'s top-level try statement as an

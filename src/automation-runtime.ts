@@ -19,11 +19,12 @@
  *   the automation was edited. Image readers ignore non-image items; the Web
  *   message API strips the item and exposes `automation: {id, name, runId}`.
  */
-import type {
-  AutomationActor,
-  AutomationRuntimeDeps,
-  AutomationWsEvent,
-  InjectAutomationInputRequest,
+import {
+  AutomationError,
+  type AutomationActor,
+  type AutomationRuntimeDeps,
+  type AutomationWsEvent,
+  type InjectAutomationInputRequest,
 } from './automation-contract.js';
 import type {
   AutomationIpcRequest,
@@ -50,6 +51,7 @@ import {
   ensureChatExists,
   getAgent,
   getUserById,
+  listAgentsByAutomationId,
   storeMessageDirect,
 } from './db.js';
 import { resolveInputChannelReplySource } from './channel-reply-source.js';
@@ -165,6 +167,9 @@ export async function handleAutomationIpc(
   try {
     return await service.handleIpc(resolveActor(), request);
   } catch (err) {
+    if (err instanceof AutomationError) {
+      return { requestId, success: false, error: err.message };
+    }
     logger.error(
       { err, type: request.type },
       'Automation IPC request failed unexpectedly',
@@ -200,6 +205,13 @@ export interface AutomationRuntimeHooks {
   /** Start processing an idle Main or Runtime Session. */
   wake(session: ResolvedAutomationSession): void;
   broadcastNewMessage(laneJid: string, message: NewMessage): void;
+  /**
+   * The session an IM route currently delivers to (`web:<ws>` or
+   * `web:<ws>#agent:<id>`), following topic bindings, or null.
+   */
+  routeSessionOf(routeJid: string): string | null;
+  /** IM chats bound to the session as a whole (not per-topic routes). */
+  listSessionImRoutes(sessionJid: string): string[];
   /** True while the input waits in the queue or has not been consumed. */
   isInputPending(laneJid: string, messageId: string): boolean;
   /** Withdraw a queued input or stop the turn running it. */
@@ -351,8 +363,31 @@ export function createAutomationRuntimeDeps(
       return true;
     },
 
+    resolveDeliveryRoute({ automation, sessionJid, preferredRouteJid }) {
+      // Resolved at fire time: after an unbind or rebind the old chat no
+      // longer routes here and is never used again.
+      if (preferredRouteJid && getChannelType(preferredRouteJid)) {
+        const routed = hooks.routeSessionOf(preferredRouteJid);
+        const stillRoutesHere = sessionJid
+          ? routed === sessionJid
+          : !!routed &&
+            stripVirtualJidSuffix(routed) === automation.workspaceJid;
+        if (stillRoutesHere) return preferredRouteJid;
+      }
+      if (!sessionJid) return null;
+      const routes = hooks.listSessionImRoutes(sessionJid);
+      return routes.length === 1 ? routes[0] : null;
+    },
+
     sessionExists(sessionJid) {
       return resolveAutomationSession(sessionJid, hooks.getGroup) !== null;
+    },
+
+    listAutomationSessions(automationId) {
+      return listAgentsByAutomationId(automationId).map((agent) => ({
+        sessionJid: `${agent.chat_jid}#agent:${agent.id}`,
+        archived: agent.status === 'completed',
+      }));
     },
 
     async archiveAutomationSession(sessionJid) {

@@ -3625,6 +3625,19 @@ export function listQueuedChannelFollowUps(chatJid: string): QueuedFollowUp[] {
   return rows.map(normalizeQueuedFollowUpRow);
 }
 
+/** Queued automation inputs of a lane, for withdrawing ended runs. */
+export function listQueuedAutomationFollowUps(
+  chatJid: string,
+): QueuedFollowUp[] {
+  const rows = prepareCached(`${FOLLOW_UP_SELECT}
+       WHERE chat_jid = ? AND delivery_status = 'queued'
+         AND automation_run_id IS NOT NULL
+       ORDER BY delivery_priority ASC, ingest_sequence ASC`).all(
+    chatJid,
+  ) as Array<Record<string, unknown>>;
+  return rows.map(normalizeQueuedFollowUpRow);
+}
+
 export function getQueuedFollowUp(
   chatJid: string,
   messageId: string,
@@ -11075,6 +11088,14 @@ export function createAgent(agent: SubAgent): void {
   );
 }
 
+/** The run sessions of an automation, archived ones included, newest first. */
+export function listAgentsByAutomationId(automationId: string): SubAgent[] {
+  const rows = prepareCached(
+    'SELECT * FROM agents WHERE automation_id = ? ORDER BY created_at DESC, id DESC',
+  ).all(automationId) as Array<Record<string, unknown>>;
+  return rows.map(mapAgentRow);
+}
+
 /** Status of every session row, for retiring on-disk IPC namespaces. */
 export function getAgentStatusMap(): Map<string, string> {
   const rows = prepareCached('SELECT id, status FROM agents').all() as Array<{
@@ -11565,10 +11586,11 @@ export function getAgentBuilderInputMessage(
   automation_run_id: string | null;
   sender_name: string | null;
   attachments: string | null;
+  delivery_status: string | null;
 } | null {
   const row =
     prepareCached(`SELECT id, chat_jid, content, sender, source_jid, is_from_me, source_kind, task_id, automation_run_id,
-              sender_name, attachments
+              sender_name, attachments, delivery_status
        FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1`).get(
       messageId,
       chatJid,
@@ -11585,6 +11607,7 @@ export function getAgentBuilderInputMessage(
           automation_run_id: string | null;
           sender_name: string | null;
           attachments: string | null;
+          delivery_status: string | null;
         }
       | undefined;
   return row
