@@ -4,7 +4,7 @@ import Database from './sqlite-compat.js';
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR, GROUPS_DIR } from './config.js';
+import { STORE_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { normalizeAgentEffort } from './agent-effort.js';
 import { logger } from './logger.js';
 import { isValidWorkspaceFolderName } from './workspace-folder.js';
@@ -114,6 +114,11 @@ import {
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
 import { initSessionWorktreeStore } from './session-worktree-store.js';
+import {
+  deleteWorkspaceAutomations,
+  initAutomationStore,
+  migrateLegacyScheduledTasks,
+} from './automation-store.js';
 import { keyPrefixRange } from './sql-key-prefix.js';
 import {
   clearAgentSessionHistoryReinjections,
@@ -765,90 +770,6 @@ export function initDatabase(
     );
     CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(chat_jid, timestamp);
-
-    CREATE TABLE IF NOT EXISTS scheduled_tasks (
-      id TEXT PRIMARY KEY,
-      group_folder TEXT NOT NULL,
-      chat_jid TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      schedule_type TEXT NOT NULL,
-      schedule_value TEXT NOT NULL,
-      context_mode TEXT DEFAULT 'isolated',
-      execution_type TEXT DEFAULT 'agent',
-      script_command TEXT,
-      next_run TEXT,
-      last_run TEXT,
-      last_result TEXT,
-      status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL,
-      created_by TEXT,
-      notify_channels TEXT,
-      running_until TEXT,
-      runner_id TEXT,
-      revision INTEGER NOT NULL DEFAULT 1,
-      updated_at TEXT NOT NULL DEFAULT '',
-      deleted_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
-    CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
-
-    CREATE TABLE IF NOT EXISTS task_run_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      task_id TEXT NOT NULL,
-      run_at TEXT NOT NULL,
-      duration_ms INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      result TEXT,
-      error TEXT,
-      FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
-
-    CREATE TABLE IF NOT EXISTS task_runs (
-      id TEXT PRIMARY KEY,
-      task_id TEXT NOT NULL,
-      occurrence_key TEXT NOT NULL UNIQUE,
-      trigger_type TEXT NOT NULL,
-      idempotency_key TEXT,
-      scheduled_for TEXT NOT NULL,
-      definition_revision INTEGER NOT NULL,
-      definition_snapshot TEXT NOT NULL,
-      status TEXT NOT NULL,
-      attempt INTEGER NOT NULL DEFAULT 0,
-      available_at TEXT NOT NULL,
-      lease_owner TEXT,
-      lease_token INTEGER NOT NULL DEFAULT 0,
-      lease_expires_at TEXT,
-      started_at TEXT,
-      completed_at TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      duration_ms INTEGER NOT NULL DEFAULT 0,
-      result TEXT,
-      error TEXT,
-      notification_status TEXT NOT NULL DEFAULT 'pending',
-      notification_error TEXT,
-      notification_summary TEXT,
-      notification_payload TEXT,
-      notification_attempt INTEGER NOT NULL DEFAULT 0,
-      notification_available_at TEXT,
-      notification_lease_owner TEXT,
-      notification_lease_token INTEGER NOT NULL DEFAULT 0,
-      notification_lease_expires_at TEXT,
-      notification_lease_payload TEXT,
-      notification_generation INTEGER NOT NULL DEFAULT 0,
-      FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id)
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_manual_idempotency
-      ON task_runs(task_id, idempotency_key)
-      WHERE idempotency_key IS NOT NULL;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_one_nonterminal
-      ON task_runs(task_id)
-      WHERE status IN ('queued', 'running', 'retry_wait');
-    CREATE INDEX IF NOT EXISTS idx_task_runs_due
-      ON task_runs(status, available_at, lease_expires_at);
-    CREATE INDEX IF NOT EXISTS idx_task_runs_task_created
-      ON task_runs(task_id, created_at DESC);
   `);
 
   // State tables (replacing JSON files)
@@ -1559,53 +1480,6 @@ export function initDatabase(
     'default_require_mention',
     'INTEGER NOT NULL DEFAULT 0',
   );
-  ensureColumn('scheduled_tasks', 'created_by', 'TEXT');
-  ensureColumn('scheduled_tasks', 'execution_type', "TEXT DEFAULT 'agent'");
-  ensureColumn('scheduled_tasks', 'script_command', 'TEXT');
-  ensureColumn('scheduled_tasks', 'notify_channels', 'TEXT');
-  ensureColumn('scheduled_tasks', 'execution_mode', 'TEXT');
-  ensureColumn('scheduled_tasks', 'workspace_jid', 'TEXT');
-  ensureColumn('scheduled_tasks', 'workspace_folder', 'TEXT');
-  ensureColumn('scheduled_tasks', 'running_until', 'TEXT');
-  ensureColumn('scheduled_tasks', 'runner_id', 'TEXT');
-  ensureColumn('scheduled_tasks', 'revision', 'INTEGER NOT NULL DEFAULT 1');
-  ensureColumn('scheduled_tasks', 'updated_at', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('scheduled_tasks', 'deleted_at', 'TEXT');
-  // v62 -> v63: a task stored only the workspace-level `chat_jid`, so execution
-  // had to re-derive its target and fell back to "any group in this folder,
-  // preferring web:". Capture the concrete delivery route instead — HappyClaw's
-  // JID already encodes provider, external chat, channel account and Feishu
-  // thread/root, so one column carries the whole binding. Existing rows are
-  // backfilled from `chat_jid`, which is exactly the route they used before.
-  ensureColumn('scheduled_tasks', 'delivery_route_jid', 'TEXT');
-  prepareCached(`UPDATE scheduled_tasks
-     SET delivery_route_jid = chat_jid
-     WHERE delivery_route_jid IS NULL AND chat_jid IS NOT NULL`).run();
-  ensureColumn('task_runs', 'notification_summary', 'TEXT');
-  ensureColumn('task_runs', 'notification_payload', 'TEXT');
-  ensureColumn(
-    'task_runs',
-    'notification_attempt',
-    'INTEGER NOT NULL DEFAULT 0',
-  );
-  ensureColumn('task_runs', 'notification_available_at', 'TEXT');
-  ensureColumn('task_runs', 'notification_lease_owner', 'TEXT');
-  ensureColumn(
-    'task_runs',
-    'notification_lease_token',
-    'INTEGER NOT NULL DEFAULT 0',
-  );
-  ensureColumn('task_runs', 'notification_lease_expires_at', 'TEXT');
-  ensureColumn('task_runs', 'notification_lease_payload', 'TEXT');
-  ensureColumn(
-    'task_runs',
-    'notification_generation',
-    'INTEGER NOT NULL DEFAULT 0',
-  );
-  // Old rows predate updated_at; created_at is the least-surprising baseline.
-  prepareCached(
-    "UPDATE scheduled_tasks SET updated_at = created_at WHERE updated_at = '' OR updated_at IS NULL",
-  ).run();
   ensureColumn('registered_groups', 'selected_skills', 'TEXT');
   ensureColumn('sessions', 'agent_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('agents', 'kind', "TEXT NOT NULL DEFAULT 'task'");
@@ -1807,24 +1681,6 @@ export function initDatabase(
     'attachments',
     'token_usage',
     'channel_context',
-  ]);
-  assertSchema('scheduled_tasks', [
-    'id',
-    'group_folder',
-    'chat_jid',
-    'prompt',
-    'schedule_type',
-    'schedule_value',
-    'context_mode',
-    'next_run',
-    'last_run',
-    'last_result',
-    'status',
-    'created_at',
-    'created_by',
-    'revision',
-    'updated_at',
-    'deleted_at',
   ]);
   assertSchema(
     'registered_groups',
@@ -2675,6 +2531,7 @@ export function initDatabase(
   createChannelReliabilitySchema(db);
   bindChannelReliabilityDatabase(db);
   initRuntimeStateStore(db);
+  initAutomationStore(db);
 
   // v63 -> v64: early Feishu reply enrichment embedded quoted ancestors in
   // messages.content, leaking prompt scaffolding into Web history and then
@@ -2827,6 +2684,39 @@ export function initDatabase(
   db.exec('DROP TABLE IF EXISTS agent_profile_prompt_versions');
   // v83 -> v84: host Skills become an explicit per-Agent grant.
   pinAgentProfileHostSkillPolicies();
+
+  // v84 -> v85: scheduled tasks become automations. Live tasks are
+  // converted, then the task tables and their usage-limit waits go; the
+  // pre-migration backup keeps the old rows. Old task messages stay in the
+  // transcript.
+  if (
+    (rawSchemaVersionBeforeInit === null ||
+      Number(rawSchemaVersionBeforeInit) < 85) &&
+    tableExists('scheduled_tasks')
+  ) {
+    db.transaction(() => {
+      const { converted, skipped } = migrateLegacyScheduledTasks({
+        timezone: TIMEZONE,
+      });
+      for (const { taskId, reason } of skipped) {
+        logger.warn(
+          { taskId, reason },
+          'Scheduled task not converted to an automation',
+        );
+      }
+      db.exec(`
+        DROP TABLE IF EXISTS task_run_logs;
+        DROP TABLE IF EXISTS task_runs;
+        DROP TABLE IF EXISTS task_failure_notices;
+        DROP TABLE IF EXISTS scheduled_tasks;
+        DELETE FROM usage_limit_waits WHERE scope_key LIKE 'task-run:%';
+      `);
+      logger.info(
+        { converted, skipped: skipped.length },
+        'Converted scheduled tasks to automations',
+      );
+    })();
+  }
 
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
@@ -12292,21 +12182,8 @@ function forceRuntimesToHostForFolderQuery(
        ORDER BY jid`,
     )
     .all(...params) as Array<{ jid: string; folder: string }>;
-  const affectedTasks = db
-    .prepare(
-      `SELECT id, group_folder
-       FROM scheduled_tasks
-       WHERE group_folder IN (${folderQuery})
-         AND COALESCE(execution_mode, 'container') <> 'host'
-       ORDER BY id`,
-    )
-    .all(...params) as Array<{ id: string; group_folder: string }>;
-  const migratedTaskIds = affectedTasks.map((row) => row.id);
   const affectedFolders = Array.from(
-    new Set([
-      ...affectedGroups.map((group) => group.folder),
-      ...affectedTasks.map((task) => task.group_folder),
-    ]),
+    new Set(affectedGroups.map((group) => group.folder)),
   ).sort();
 
   db.prepare(
@@ -12316,17 +12193,9 @@ function forceRuntimesToHostForFolderQuery(
        AND COALESCE(execution_mode, 'container') <> 'host'`,
   ).run(...params);
 
-  if (migratedTaskIds.length > 0) {
-    db.prepare(
-      `UPDATE scheduled_tasks
-       SET execution_mode = 'host',
-           revision = revision + 1,
-           updated_at = ?
-       WHERE group_folder IN (${folderQuery})
-         AND COALESCE(execution_mode, 'container') <> 'host'`,
-    ).run(new Date().toISOString(), ...params);
-  }
-
+  // Automations run in their workspace's mode; there are no task rows with
+  // their own execution mode any more.
+  const migratedTaskIds: string[] = [];
   return { affectedGroups, affectedFolders, migratedTaskIds };
 }
 
@@ -13150,7 +13019,7 @@ export function rebuildWorkspacePersistentState(input: {
 /**
  * Delete an IM group's registered_groups entry and all jid-scoped data
  * (messages, chat record, pinned references). Does NOT touch folder-scoped
- * data (sessions, scheduled_tasks) because IM groups typically
+ * data (sessions, automations) because IM groups typically
  * share their folder with the owner's home workspace.
  *
  * Used when an IM group is detected as dead (bot removed, group disbanded,
@@ -13198,9 +13067,6 @@ export function deleteImGroupRecord(jid: string): void {
     prepareCached('DELETE FROM subagent_checkpoints WHERE chat_jid = ?').run(
       jid,
     );
-    prepareCached(
-      'UPDATE scheduled_tasks SET workspace_jid = NULL, workspace_folder = NULL WHERE workspace_jid = ?',
-    ).run(jid);
   });
   tx();
 }
@@ -13265,17 +13131,9 @@ export function deleteGroupData(
     prepareCached(
       'DELETE FROM im_context_bindings WHERE workspace_jid = ?',
     ).run(jid);
-    // 1. 删除定时任务运行日志 + 定时任务
+    // 1. 删除工作区的自动化及其运行记录
     clearFolderRuntimeState(folder, jid);
-    prepareCached(
-      'DELETE FROM task_runs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)',
-    ).run(folder);
-    prepareCached(
-      'DELETE FROM task_run_logs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE group_folder = ?)',
-    ).run(folder);
-    prepareCached('DELETE FROM scheduled_tasks WHERE group_folder = ?').run(
-      folder,
-    );
+    deleteWorkspaceAutomations(jid);
     // 2. 删除 workspace -> AgentProfile 归属映射
     prepareCached(
       'DELETE FROM workspace_agent_profiles WHERE group_folder = ?',
@@ -13312,10 +13170,6 @@ export function deleteGroupData(
     );
     // 7. 删除 pin 记录
     prepareCached('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
-    // 8. 清除定时任务的工作区关联（任务本身不删，只断开绑定）
-    prepareCached(
-      'UPDATE scheduled_tasks SET workspace_jid = NULL, workspace_folder = NULL WHERE workspace_jid = ?',
-    ).run(jid);
   });
   tx();
 }
@@ -16516,6 +16370,7 @@ export function closeDatabase(): void {
   bindWorkspaceMemoryDatabase(null);
   bindOwnerProfileDatabase(null);
   initRuntimeStateStore(null);
+  initAutomationStore(null);
   if (db) {
     db.close();
   }

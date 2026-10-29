@@ -959,6 +959,7 @@ export interface UsageLimitWaitSnapshot {
 }
 
 export type WsMessageOut =
+  | import('./automation-contract.js').AutomationWsEvent
   | {
       /**
        * How full a conversation's context is: after each completed turn, and

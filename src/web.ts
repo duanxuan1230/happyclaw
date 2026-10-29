@@ -47,7 +47,9 @@ import authRoutes from './routes/auth.js';
 import groupRoutes from './routes/groups.js';
 import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
+import type { AutomationWsEvent } from './automation-contract.js';
 import tasksRoutes from './routes/tasks.js';
+import automationRoutes from './routes/automations.js';
 import adminRoutes from './routes/admin.js';
 import fileRoutes from './routes/files.js';
 import monitorRoutes, { injectMonitorDeps } from './routes/monitor.js';
@@ -331,6 +333,7 @@ app.route('/api/groups', fileRoutes); // File routes also under /api/groups
 app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
 app.route('/api/tasks', tasksRoutes);
+app.route('/api/automations', automationRoutes);
 app.route('/api/skills', skillsRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/browse', browseRoutes);
@@ -3602,6 +3605,11 @@ export function broadcastBillingUpdate(
   // Send only to the specific user
   const allowedUserIds = new Set([userId]);
   safeBroadcast(msg, false, allowedUserIds);
+}
+
+/** Automation changes go only to the owner's clients. */
+export function broadcastAutomationEvent(event: AutomationWsEvent): void {
+  safeBroadcast(event, false, new Set([event.ownerId]));
 }
 
 export function broadcastWhatsAppStatus(
