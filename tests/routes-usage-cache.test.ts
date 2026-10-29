@@ -47,13 +47,14 @@ function seed(
   userId: string,
   model: string,
   tokens: { input: number; creation: number; read: number },
+  at: { agentId?: string; source?: string } = {},
 ): void {
   db.recordUsageEventBatch({
     eventId,
     userId,
     groupFolder: `workspace-${userId}`,
-    agentId: null,
-    source: 'web',
+    agentId: at.agentId ?? null,
+    source: at.source ?? 'web',
     createdAt: `${today}T12:00:00.000Z`,
     inputTokens: tokens.input,
     outputTokens: 1,
@@ -152,6 +153,38 @@ describe('/api/usage/cache', () => {
         hitRate: 1,
       },
     ]);
+  });
+
+  test('applies exactly the filters /stats applies', async () => {
+    process.env.USAGE_CACHE_USER = 'admin';
+    process.env.USAGE_CACHE_ROLE = 'admin';
+    const tokens = (read: number) => ({ input: 10, creation: 0, read });
+    seed('filter-main-web', 'user-f', 'opus', tokens(30));
+    seed('filter-main-feishu', 'user-f', 'opus', tokens(70), {
+      source: 'feishu',
+    });
+    seed('filter-agent-web', 'user-f', 'opus', tokens(500), {
+      agentId: 'agent-f',
+    });
+    for (const query of [
+      'agentId=__main__',
+      'source=web',
+      'agentId=__main__&source=feishu',
+      'agentId=agent-f&groupFolder=workspace-user-f',
+    ]) {
+      const params = `from=${today}&to=${today}&userId=user-f&${query}`;
+      const stats = await (await usage.request(`/stats?${params}`)).json();
+      const cache = await (await usage.request(`/cache?${params}`)).json();
+      expect([
+        query,
+        cache.summary.inputTokens,
+        cache.summary.cacheReadTokens,
+      ]).toEqual([
+        query,
+        stats.summary.inputTokens,
+        stats.summary.cacheReadTokens,
+      ]);
+    }
   });
 
   test('a window without prompt tokens has no rate', async () => {

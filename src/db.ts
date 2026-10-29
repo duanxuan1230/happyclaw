@@ -4539,7 +4539,7 @@ export interface UsageQueryFilters {
   source?: string;
 }
 
-function buildUsageWhere(filters: UsageQueryFilters): {
+export function buildUsageWhere(filters: UsageQueryFilters): {
   sql: string;
   params: unknown[];
 } {
