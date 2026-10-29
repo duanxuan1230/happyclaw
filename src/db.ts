@@ -114,6 +114,7 @@ import {
   reconcileLegacyOwnerProfileMemory,
 } from './owner-profile-store.js';
 import { initSessionWorktreeStore } from './session-worktree-store.js';
+import { keyPrefixRange } from './sql-key-prefix.js';
 import {
   clearAgentSessionHistoryReinjections,
   clearFolderRuntimeState,
@@ -8438,8 +8439,8 @@ export function getRouterStateByPrefix(
   prefix: string,
 ): Array<{ key: string; value: string }> {
   return prepareCached(
-    'SELECT key, value FROM router_state WHERE key LIKE ?',
-  ).all(`${prefix}%`) as Array<{ key: string; value: string }>;
+    'SELECT key, value FROM router_state WHERE key >= @from AND key < @to',
+  ).all(keyPrefixRange(prefix)) as Array<{ key: string; value: string }>;
 }
 
 // --- Session accessors ---
@@ -9035,14 +9036,12 @@ export function deleteTurnTraceIfOrphan(
 /** The chat and every Runtime Session chat (`{chat}#agent:{id}`) under it. */
 export function deleteTurnTracesForChatTree(chatJid: string): number {
   if (!isDatabaseInitialized()) return 0;
-  const sessionPrefix = `${chatJid}#agent:`;
   return (
     prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid)
       .changes +
-    // substr, not LIKE: a JID may contain the wildcard characters % and _.
     prepareCached(
-      'DELETE FROM turn_traces WHERE substr(chat_jid, 1, ?) = ?',
-    ).run([...sessionPrefix].length, sessionPrefix).changes
+      'DELETE FROM turn_traces WHERE chat_jid >= @from AND chat_jid < @to',
+    ).run(keyPrefixRange(`${chatJid}#agent:`)).changes
   );
 }
 
@@ -9093,9 +9092,9 @@ export function deleteAllSessionsForFolder(groupFolder: string): void {
     prepareCached(
       'DELETE FROM workspace_runtime_sessions WHERE group_folder = ?',
     ).run(groupFolder);
-    prepareCached('DELETE FROM router_state WHERE key LIKE ?').run(
-      `channel_session_owner:${groupFolder}:%`,
-    );
+    prepareCached(
+      'DELETE FROM router_state WHERE key >= @from AND key < @to',
+    ).run(keyPrefixRange(`channel_session_owner:${groupFolder}:`));
   })();
 }
 
@@ -13269,13 +13268,16 @@ export function deleteGroupData(
       'DELETE FROM subagent_checkpoints WHERE group_folder = ? OR chat_jid = ?',
     ).run(folder, jid);
     // 6. 删除聊天记录
+    const sessionChats = keyPrefixRange(`${jid}#agent:`);
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
-    prepareCached('DELETE FROM messages WHERE chat_jid LIKE ?').run(
-      `${jid}#agent:%`,
-    );
+    prepareCached(
+      'DELETE FROM messages WHERE chat_jid >= @from AND chat_jid < @to',
+    ).run(sessionChats);
     deleteTurnTracesForChatTree(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
-    prepareCached('DELETE FROM chats WHERE jid LIKE ?').run(`${jid}#agent:%`);
+    prepareCached('DELETE FROM chats WHERE jid >= @from AND jid < @to').run(
+      sessionChats,
+    );
     // 7. 删除 pin 记录
     prepareCached('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     // 8. 清除定时任务的工作区关联（任务本身不删，只断开绑定）
@@ -14907,9 +14909,11 @@ export function deleteAgent(id: string): void {
     if (existing) {
       clearUsageLimitWait(`${existing.chat_jid}#agent:${id}`);
     }
-    prepareCached('DELETE FROM usage_limit_waits WHERE scope_key LIKE ?').run(
-      `%#agent:${id}`,
-    );
+    // The Session's scope under any chat, compared exactly: LIKE would read
+    // `_` and `%` in the id as wildcards and delete other Sessions' waits.
+    prepareCached(
+      'DELETE FROM usage_limit_waits WHERE substr(scope_key, -length(@suffix)) = @suffix',
+    ).run({ suffix: `#agent:${id}` });
     clearAgentSessionHistoryReinjections(id);
     // A product Session can own an SDK runtime resume row and channel mounts;
     // clear all three projections together so direct DB callers cannot leave
