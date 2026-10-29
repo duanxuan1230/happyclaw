@@ -139,6 +139,22 @@ export type InterruptReason = 'stop' | 'steer';
  */
 const INTERRUPT_REASON_SENTINEL = '_interrupt_reason';
 
+/**
+ * Write an IPC sentinel whole: the runner's directory watch fires as soon as
+ * a file is created, so it must never see one half written.
+ */
+function publishSentinel(dir: string, name: string, content: string): void {
+  const file = path.join(dir, name);
+  const temp = `${file}.tmp`;
+  try {
+    fs.writeFileSync(temp, content);
+    fs.renameSync(temp, file);
+  } catch (err) {
+    fs.rmSync(temp, { force: true });
+    throw err;
+  }
+}
+
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 const RETRY_JITTER_RATIO = 0.2;
@@ -2661,12 +2677,13 @@ export class GroupQueue {
       if (reason === 'stop') {
         // Before `_interrupt`: the runner reads the reason once it sees it.
         // A steer leaves a stop not yet consumed for this query in place.
-        fs.writeFileSync(
-          path.join(inputDir, INTERRUPT_REASON_SENTINEL),
+        publishSentinel(
+          inputDir,
+          INTERRUPT_REASON_SENTINEL,
           JSON.stringify({ queryId, reason }),
         );
       }
-      fs.writeFileSync(path.join(inputDir, '_interrupt'), queryId);
+      publishSentinel(inputDir, '_interrupt', queryId);
       logger.info({ groupJid, inputDir, reason }, 'Interrupt sentinel written');
       return true;
     } catch (err) {

@@ -75,6 +75,7 @@ import { StreamEventProcessor } from './stream-processor.js';
 import {
   ActiveTurnStopper,
   consumeInterruptSentinel,
+  consumeStopAfterSteer,
   discardInterruptSentinel,
   type InterruptReason,
 } from './turn-interrupt.js';
@@ -2389,6 +2390,21 @@ async function runQueryAttempt(
     reason?: InterruptReason,
   ): void =>
     activeTurnStopper.stop(activeQuery, label, turnsQueuedInCli, reason);
+  // IPC polling stops once a steer interrupts the query, so a stop the user
+  // sends while it winds down is watched for on its own.
+  let stopAfterSteerWatcher: { close: () => void } | undefined;
+  const watchForStopAfterSteer = (
+    activeQuery: Pick<Query, 'interrupt' | 'close'>,
+  ): void => {
+    stopAfterSteerWatcher = createIpcWatcher(() => {
+      if (!consumeStopAfterSteer(IPC_INPUT_DIR, activeInterruptQueryRunId)) {
+        return;
+      }
+      stopAfterSteerWatcher?.close();
+      log('Interrupt sentinel (stop) detected after a steer');
+      activeTurnStopper.requireSubAgentsToEnd(activeQuery, 'Stop after steer');
+    });
+  };
 
   const interruptQueryForShutdown = (reason: string) => {
     if (!queryRef) return;
@@ -2468,6 +2484,7 @@ async function runQueryAttempt(
           turnsQueuedInCli,
           interruptReason,
         );
+        if (interruptReason === 'steer') watchForStopAfterSteer(queryRef);
       }
       stream.end();
       ipcPolling = false;
@@ -4504,6 +4521,7 @@ async function runQueryAttempt(
   } finally {
     queryFinished = true;
     activeTurnStopper.dispose();
+    stopAfterSteerWatcher?.close();
     const timingLine = queryTiming?.finish();
     if (timingLine) logInfo(timingLine);
     const cacheLine = queryCache?.finish();

@@ -31,8 +31,15 @@ import {
   ActiveTurnStopper,
   SUB_AGENT_STOP_CLOSE_DELAY_MS,
   consumeInterruptSentinel,
+  consumeStopAfterSteer,
   type InterruptReason,
 } from '../container/agent-runner/src/turn-interrupt.js';
+import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
+
+const RUNNER_SOURCE = new URL(
+  '../container/agent-runner/src/index.ts',
+  import.meta.url,
+);
 
 const dataDir = fs.mkdtempSync(
   path.join(os.tmpdir(), 'happyclaw-turn-interrupt-'),
@@ -76,31 +83,53 @@ function runningLane() {
   return { queue, state, jid, folder, inputDir };
 }
 
-/** A runner turn with one task of every kind the SDK reports. */
-function runnerTurn() {
+/** A processor fed task_started frames as Claude Code 2.1.296 sends them. */
+function processorWithTasks(
+  tasks: Array<[taskId: string, taskType?: string, extra?: object]>,
+) {
   const processor = new StreamEventProcessor(
     () => {},
     () => {},
   );
-  const start = (taskId: string, taskType: string) =>
+  for (const [taskId, taskType, extra] of tasks) {
     processor.processSystemMessage({
       type: 'system',
       subtype: 'task_started',
       task_id: taskId,
       description: taskId,
-      task_type: taskType,
+      ...(taskType ? { task_type: taskType } : {}),
+      ...extra,
     });
-  start('agent-1', 'local_agent');
-  start('workflow-1', 'local_workflow');
-  start('dev-server', 'local_bash');
+  }
+  return processor;
+}
+
+/**
+ * Two sub-agents the main Agent launched, and everything an explicit stop
+ * must not wait on: a dev server, both monitor kinds, an MCP task, a task of
+ * another or of no type, and a sub-agent's own sub-agent.
+ */
+const TURN_TASKS: Array<[string, string?, object?]> = [
+  ['agent-1', 'local_agent'],
+  ['workflow-1', 'local_workflow'],
+  ['dev-server', 'local_bash'],
+  ['mcp-watch', 'monitor_mcp'],
+  ['ws-watch', 'monitor_ws'],
+  ['mcp-job', 'mcp_task'],
+  ['dream-1', 'dream'],
+  ['untyped-1'],
+  ['nested-1', 'local_agent', { parent_task_id: 'agent-1' }],
+];
+
+/** A runner turn with one task of every kind the SDK reports. */
+function runnerTurn() {
+  const processor = processorWithTasks(TURN_TASKS);
   processor.processSystemMessage({
     type: 'system',
     subtype: 'task_updated',
     task_id: 'dev-server',
     patch: { is_backgrounded: true },
   });
-  start('log-watch', 'monitor');
-  start('mcp-job', 'mcp_task');
 
   const calls: string[] = [];
   const query = {
@@ -116,10 +145,11 @@ function runnerTurn() {
     }),
   };
   let queryFinished = false;
+  const logs: string[] = [];
   const stopper = new ActiveTurnStopper({
     activeSubAgentTaskIds: () => processor.getActiveSubAgentTaskIds(),
     isQueryFinished: () => queryFinished,
-    log: () => {},
+    log: (line) => logs.push(line),
   });
   const stop = (label: string, reason?: InterruptReason, queuedInCli = 0) =>
     stopper.stop(query as any, label, queuedInCli, reason);
@@ -134,6 +164,7 @@ function runnerTurn() {
   return {
     processor,
     calls,
+    logs,
     query,
     stopper,
     stop,
@@ -324,10 +355,10 @@ describe('Runner turn stop', () => {
     turn.settle('workflow-1');
     vi.advanceTimersByTime(10 * SUB_AGENT_STOP_CLOSE_DELAY_MS);
     expect(turn.calls).toEqual(['interrupt']);
-    expect(turn.processor.getPendingSdkTaskCount()).toBe(3);
+    expect(turn.processor.getPendingSdkTaskCount()).toBe(TURN_TASKS.length - 2);
   });
 
-  test('a stop with only shells, monitors and MCP tasks running never closes', () => {
+  test('a stop with only shells, monitors, MCP, untyped and nested tasks running never closes', () => {
     const turn = runnerTurn();
     turn.settle('agent-1', 'completed');
     turn.settle('workflow-1', 'completed');
@@ -359,3 +390,223 @@ describe('Runner turn stop', () => {
     }
   });
 });
+
+describe('Sub-agents an explicit stop waits on', () => {
+  test('only the agent types Claude Code groups as agents, launched by the main Agent', () => {
+    const processor = processorWithTasks([
+      ['agent', 'local_agent'],
+      ['remote', 'remote_agent'],
+      ['teammate', 'in_process_teammate'],
+      ['workflow', 'local_workflow'],
+      ['shell', 'local_bash'],
+      ['mcp-monitor', 'monitor_mcp'],
+      ['ws-monitor', 'monitor_ws'],
+      ['mcp', 'mcp_task'],
+      ['dream', 'dream'],
+      ['untyped'],
+      ['child-of-agent', 'local_agent', { parent_task_id: 'agent' }],
+      ['owned', 'local_agent', { owned_by_subagent: true }],
+      ['deep', 'local_agent', { spawn_depth: 2 }],
+    ]);
+    // A level update can be the first frame naming a nested sub-agent.
+    processor.processSystemMessage({
+      type: 'system',
+      subtype: 'background_tasks_changed',
+      tasks: [
+        { task_id: 'agent', task_type: 'local_agent', description: 'agent' },
+        {
+          task_id: 'listed-child',
+          task_type: 'local_agent',
+          description: 'child',
+          parent_task_id: 'agent',
+        },
+      ],
+    });
+    expect(processor.getActiveSubAgentTaskIds()).toEqual([
+      'agent',
+      'remote',
+      'teammate',
+      'workflow',
+    ]);
+  });
+});
+
+describe('Sentinels are never seen half written', () => {
+  test('the Host publishes `_interrupt` and its reason whole', () => {
+    const lane = runningLane();
+    fs.mkdirSync(lane.inputDir, { recursive: true });
+    const realWrite = fs.writeFileSync;
+    const seenEmpty: string[] = [];
+    // A file exists, empty, before its content lands; a watcher may look then.
+    const write = vi.spyOn(fs, 'writeFileSync').mockImplementation(((
+      file: fs.PathOrFileDescriptor,
+      data: string | NodeJS.ArrayBufferView,
+    ) => {
+      realWrite(file, '');
+      for (const name of ['_interrupt', '_interrupt_reason']) {
+        const visible = path.join(lane.inputDir, name);
+        if (fs.existsSync(visible) && fs.readFileSync(visible, 'utf8') === '') {
+          seenEmpty.push(name);
+        }
+      }
+      realWrite(file, data);
+    }) as typeof fs.writeFileSync);
+    try {
+      expect(lane.queue.interruptQuery(lane.jid, 'run-1', 'stop')).toBe(true);
+    } finally {
+      write.mockRestore();
+    }
+    expect(seenEmpty).toEqual([]);
+    expect(fs.readdirSync(lane.inputDir).sort()).toEqual([
+      '_interrupt',
+      '_interrupt_reason',
+    ]);
+    expect(consumeInterruptSentinel(lane.inputDir)?.reason).toBe('stop');
+  });
+
+  test('the runner waits out an empty `_interrupt` instead of taking it without its query', () => {
+    const lane = runningLane();
+    fs.mkdirSync(lane.inputDir, { recursive: true });
+    const sentinel = path.join(lane.inputDir, '_interrupt');
+    fs.writeFileSync(sentinel, '');
+    expect(consumeInterruptSentinel(lane.inputDir)).toBeNull();
+    vi.advanceTimersByTime(500);
+    expect(consumeInterruptSentinel(lane.inputDir)).toBeNull();
+    expect(fs.existsSync(sentinel)).toBe(true);
+    // An older Host finished writing it in place.
+    fs.writeFileSync(sentinel, 'run-1');
+    expect(consumeInterruptSentinel(lane.inputDir)).toEqual({
+      queryRunId: 'run-1',
+      reason: 'steer',
+    });
+
+    // One that stays empty is the legacy interrupt without a query id.
+    fs.writeFileSync(sentinel, '');
+    expect(consumeInterruptSentinel(lane.inputDir)).toBeNull();
+    vi.advanceTimersByTime(1_000);
+    expect(consumeInterruptSentinel(lane.inputDir)).toEqual({
+      queryRunId: '',
+      reason: 'steer',
+    });
+  });
+});
+
+describe('A stop after a steer the runner already acted on', () => {
+  test('is taken while the steered query winds down and gives its sub-agents the deadline', () => {
+    const lane = runningLane();
+    const turn = runnerTurn();
+    lane.queue.interruptQuery(lane.jid, 'run-1');
+    turn.stop(
+      'Interrupt sentinel',
+      consumeInterruptSentinel(lane.inputDir)!.reason,
+    );
+    // Another steer, and a stop meant for the next query, are left alone.
+    lane.queue.interruptQuery(lane.jid, 'run-1');
+    expect(consumeStopAfterSteer(lane.inputDir, 'run-1')).toBe(false);
+    lane.state.queryId = 'run-2';
+    lane.queue.interruptQuery(lane.jid, 'run-2', 'stop');
+    expect(consumeStopAfterSteer(lane.inputDir, 'run-1')).toBe(false);
+
+    lane.state.queryId = 'run-1';
+    lane.queue.interruptQuery(lane.jid, 'run-1', 'stop');
+    expect(consumeStopAfterSteer(lane.inputDir, 'run-1')).toBe(true);
+    expect(fs.readdirSync(lane.inputDir)).toEqual([]);
+    turn.stopper.requireSubAgentsToEnd(turn.query as any, 'Stop after steer');
+    vi.advanceTimersByTime(SUB_AGENT_STOP_CLOSE_DELAY_MS);
+    expect(turn.calls).toEqual(['interrupt', 'close']);
+  });
+
+  test('the runner keeps watching for it after a steer, and only after a steer', async () => {
+    vi.useRealTimers();
+    for (const [first, expectedLog] of [
+      ['steer', 'Stop after steer: 2 sub-agent(s) must end within 3s'],
+      ['stop', 'Interrupt sentinel: 2 sub-agent(s) must end within 3s'],
+    ] as const) {
+      const lane = runningLane();
+      fs.mkdirSync(lane.inputDir, { recursive: true });
+      const turn = runnerTurn();
+      const runner = runnerPollHarness(lane.inputDir, turn);
+      lane.queue.interruptQuery(lane.jid, 'run-1', first);
+      await runner.poll();
+      expect(runner.globals.ipcPolling).toBe(false);
+      lane.queue.interruptQuery(lane.jid, 'run-1', 'stop');
+      // Long enough for the watch to fire (it debounces by 50 ms).
+      const deadline = Date.now() + 2_000;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      while (!turn.logs.includes(expectedLog) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(
+        turn.logs.filter((line) => line.includes('must end within')),
+        first,
+      ).toEqual([expectedLog]);
+      // After an explicit stop the second one is left for the query's end.
+      expect(fs.existsSync(path.join(lane.inputDir, '_interrupt')), first).toBe(
+        first === 'stop',
+      );
+      turn.stopper.dispose();
+      runner.globals.stopAfterSteerWatcher?.close();
+    }
+  }, 10_000);
+});
+
+/**
+ * The runner's own sentinel reader and IPC poll, run from its source against
+ * the turn's real stopper; only the query's surroundings are faked.
+ */
+function runnerPollHarness(
+  inputDir: string,
+  turn: ReturnType<typeof runnerTurn>,
+) {
+  const globals: Record<string, any> = {
+    fs,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    IPC_INPUT_DIR: inputDir,
+    IPC_FALLBACK_POLL_MS: 5_000,
+    log: () => {},
+    consumeInterruptSentinel,
+    consumeStopAfterSteer,
+    activeInterruptQueryRunId: 'run-1',
+    lastInterruptRequestedAt: 0,
+    activeTurnStopper: turn.stopper,
+    queryRef: turn.query,
+    ipcPolling: true,
+    shouldClose: () => false,
+    cancelBackgroundResultCompletion: () => {},
+    clearBackgroundProtocolDebtWatchdog: () => {},
+    interruptedDuringQuery: false,
+    suppressOutputAfterInterrupt: false,
+    cancelledIpcReceipts: [],
+    visibleOutputStarted: true,
+    resultCount: 1,
+    containerInput: { turnId: 'turn-1' },
+    generateTurnId: () => 'turn-x',
+    emitResultUsage: () => {},
+    ipcDeliveryTracker: { laterTurnMessages: [], cancelCurrentTurn: () => [] },
+    stream: { end: () => {} },
+    ipcQueryWatcher: { close: () => {} },
+    stopAfterSteerWatcher: undefined,
+  };
+  const harness = createRuntimeSourceHarness(globals, RUNNER_SOURCE);
+  for (const name of [
+    'markInterruptRequested',
+    'shouldInterrupt',
+    'createIpcWatcher',
+  ]) {
+    harness.install(name);
+  }
+  for (const name of [
+    'stopActiveTurn',
+    'watchForStopAfterSteer',
+    'pollIpcDuringQuery',
+  ]) {
+    harness.install(name, 'runQueryAttempt');
+  }
+  return {
+    globals,
+    poll: () => globals.pollIpcDuringQuery() as Promise<void>,
+  };
+}
