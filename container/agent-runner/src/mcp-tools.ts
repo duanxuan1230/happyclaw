@@ -1321,12 +1321,16 @@ The actual file types and size limit are enforced by the selected provider.`,
     ),
 
     // --- automations ---
-    ...createAutomationTools((request, resultPrefix) =>
-      pollIpcResult(
-        TASKS_DIR,
-        request as unknown as Record<string, unknown> & { requestId: string },
-        resultPrefix,
-      ),
+    ...createAutomationTools(
+      (request, resultPrefix) =>
+        pollIpcResult(
+          TASKS_DIR,
+          request as unknown as Record<string, unknown> & {
+            requestId: string;
+          },
+          resultPrefix,
+        ),
+      () => ctx.currentInputTurnId,
     ),
 
     // --- register_group ---
