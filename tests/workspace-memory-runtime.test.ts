@@ -240,7 +240,7 @@ describe('Workspace Memory runtime boundary', () => {
     ).resolves.toEqual({});
   });
 
-  test('host admits conversation sessions and scheduled runs, and rejects spawn, task, and unknown turns', () => {
+  test('host admits conversation sessions and automation runs, and rejects spawn, task, and unknown turns', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
@@ -250,12 +250,12 @@ describe('Workspace Memory runtime boundary', () => {
         capabilityValid: true,
       }),
     ).toBeNull();
-    // A scheduled run writes only proposals (workspaceMemoryWriteMode), and
+    // An automation run writes only proposals (workspaceMemoryWriteMode), and
     // only with the runner's signed capability.
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: null,
         runtimeAgentKind: null,
         capabilityValid: true,
@@ -264,7 +264,7 @@ describe('Workspace Memory runtime boundary', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: null,
         runtimeAgentKind: null,
         capabilityValid: false,
@@ -302,7 +302,7 @@ describe('Workspace Memory runtime boundary', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'search',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: 'agent-1',
         runtimeAgentKind: 'task',
         capabilityValid: false,
@@ -877,7 +877,7 @@ describe('Workspace Memory runtime boundary', () => {
     ).toBe(false);
     expect(
       ownerTurn(() => {
-        throw new Error('scheduled or non-human');
+        throw new Error('automation or non-human');
       }),
     ).toBe(false);
   });

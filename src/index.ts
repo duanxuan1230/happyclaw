@@ -671,9 +671,9 @@ export function formatMessages(
 }
 
 /**
- * Inputs no person typed: automation runs, and legacy 定时任务 prompts that
- * are only kept for history. They never wake a usage-limit wait or vouch for
- * an IM owner.
+ * Inputs no person typed: automation runs, and prompts of the retired
+ * scheduled tasks that are only kept for history. They never wake a
+ * usage-limit wait or vouch for an IM owner.
  */
 function isUnattendedInput(message: NewMessage): boolean {
   return (
@@ -684,9 +684,9 @@ function isUnattendedInput(message: NewMessage): boolean {
 }
 
 /**
- * Inputs that are history, not work: legacy 定时任务 prompts (never replayed)
- * and automation inputs whose run already ended, e.g. failed after the
- * bounded retries or cancelled. They are consumed so a later input cannot
+ * Inputs that are history, not work: prompts of the retired scheduled tasks
+ * (never replayed) and automation inputs whose run already ended, e.g.
+ * failed after the bounded retries or cancelled. They are consumed so a later input cannot
  * execute them again; the rest is returned in order.
  */
 function dropNonReplayableInputs(
@@ -1295,7 +1295,6 @@ function clearPersistedIpcDeliveriesForChats(chatJids: Set<string>): number {
     for (const entry of entries) {
       const filepath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'tasks-run') continue;
         visit(filepath);
         continue;
       }
@@ -2405,7 +2404,7 @@ function cancelQueuedInputsOfLane(laneJid: string): void {
 // 会被原样再执行一遍，经 IPC watcher 即时送达用户（重复刷消息）。
 //
 // 关键：抑制必须严格限定在「重试重放」窗口，否则会误杀合法的重复内容
-// （周期定时任务每次报告相同文案、用户明确要求重发同一句话）。因此始终记录
+// （周期自动化每次报告相同文案、用户明确要求重发同一句话）。因此始终记录
 // 每条 send 的指纹，但仅当该源 group 当前正处于失败重试轮次（retryCount>0）
 // 时，命中已记录的指纹才抑制——正常首轮永不抑制。
 const ipcSendDedup = createIpcSendDeduplicator({
@@ -6613,20 +6612,14 @@ function loadState(): void {
   // transition. This also makes ADMIN_HOST_ONLY_MODE=true safe on first boot.
   if (getSystemSettings().adminHostOnlyMode) {
     const migration = forceActiveAdminRuntimesToHost();
-    if (
-      migration.affectedGroups.length > 0 ||
-      migration.migratedTaskIds.length > 0
-    ) {
+    if (migration.affectedGroups.length > 0) {
       registeredGroups = getAllRegisteredGroups();
       for (const folder of migration.affectedFolders) {
         delete sessions[folder];
         deleteSession(folder);
       }
       logger.info(
-        {
-          migratedGroups: migration.affectedGroups.length,
-          migratedTasks: migration.migratedTaskIds.length,
-        },
+        { migratedGroups: migration.affectedGroups.length },
         'Repaired administrator runtimes for host-only mode',
       );
     }
@@ -13608,18 +13601,8 @@ function resolveIpcAutomationActor(
 async function processTaskIpc(
   data: {
     type: string;
-    taskId?: string;
-    runId?: string;
     expectedRevision?: number;
     idempotencyKey?: string;
-    isScheduledTask?: boolean;
-    prompt?: string;
-    schedule_type?: string;
-    schedule_value?: string;
-    context_mode?: string;
-    execution_type?: string;
-    execution_mode?: string;
-    script_command?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -13636,9 +13619,6 @@ async function processTaskIpc(
     // For send_file
     filePath?: string;
     fileName?: string;
-    // For list_tasks
-    isAdminHome?: boolean;
-    includeDeleted?: boolean;
     // For discord_get_history
     limit?: number;
     before?: string;
@@ -13646,7 +13626,6 @@ async function processTaskIpc(
     inputTurnId?: string;
     queryRunId?: string;
     activationSequence?: number;
-    scheduledTaskRunId?: string;
     operation?: string;
     params?: Record<string, unknown>;
     // Workspace Memory v2. Workspace/actor/sourceType are never accepted from
@@ -20821,14 +20800,6 @@ function queueSerializationKey(groupJid: string): string {
     const group = registeredGroups[baseJid];
     const folder = group?.folder || baseJid;
     return `${folder}#${agentId}`;
-  }
-  // Task virtual JIDs: {chatJid}#task:{taskId} → separate serialization key
-  const taskSep = groupJid.indexOf('#task:');
-  if (taskSep >= 0) {
-    const baseJid = groupJid.slice(0, taskSep);
-    const taskId = groupJid.slice(taskSep + 6);
-    const group = registeredGroups[baseJid];
-    return `${group?.folder || baseJid}#task:${taskId}`;
   }
   const group = registeredGroups[groupJid];
   return group?.folder || groupJid;

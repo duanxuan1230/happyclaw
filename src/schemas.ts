@@ -67,20 +67,6 @@ export const FeishuAppRegistrationCreateSchema = z.object({
   brand: z.enum(['feishu', 'lark']).optional().default('feishu'),
 });
 
-/**
- * A schedule's prompt is replayed on a timer, so it is stored content with no
- * natural bound.
- *
- * Exported because the REST schemas are not the only writers: the MCP/IPC
- * `schedule_task` and `update_task` handlers call createTask/updateTask
- * directly. The Agent path is the one this cap exists for, so it must use the
- * same number rather than leave the hole open.
- */
-export const MAX_TASK_PROMPT_LENGTH = 16384;
-
-/** Same reasoning as MAX_TASK_PROMPT_LENGTH, for script tasks. */
-export const MAX_TASK_SCRIPT_COMMAND_LENGTH = 4096;
-
 const AutomationScheduleSchema = z.object({
   kind: z.enum(['cron', 'interval', 'once', 'manual']),
   cronExpr: z.string().max(200).nullable().optional(),

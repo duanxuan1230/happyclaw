@@ -56,7 +56,6 @@ function seedRunner(q: GroupQueue, jid: string, opts: SeedOpts = {}) {
     displayName: null,
     groupFolder: opts.groupFolder ?? 'main',
     agentId: opts.agentId ?? null,
-    taskRunId: null,
     retryCount: 0,
     retryTimer: null,
     restarting: false,

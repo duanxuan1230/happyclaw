@@ -3243,7 +3243,7 @@ function updateStreamingSnapshot(
   //
   // 键必须用完整 normalizedJid（含 #agent: 后缀），与 runner/快照同粒度：
   // 主 runner idle 只 tombstone `web:folder`，不会误杀并发 sub-agent /
-  // 定时任务（虚拟 jid）的快照；agent runner idle tombstone 自己的
+  // 会话（虚拟 jid）的快照；agent runner idle tombstone 自己的
   // `web:folder#agent:id`，其迟到事件才能被自己的 tombstone 拦住。
   if (snapshotTombstones.has(normalizedJid)) return;
 

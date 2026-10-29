@@ -126,12 +126,6 @@ describe('conversation reasoning effort on a grant', () => {
       groupFolder: 'other',
       sessionEffort: 'low',
     });
-    const isolatedTask = issue({
-      kind: 'container',
-      groupFolder: 'folder',
-      taskRunId: 'run-1',
-      sessionEffort: 'low',
-    });
     const oneShot = issue({ kind: 'sdk-query' });
     const effortOf = (token: string) =>
       resolveCodexGatewayToken(token)?.sessionEffort;
@@ -141,7 +135,6 @@ describe('conversation reasoning effort on a grant', () => {
     expect(effortOf(mainHost.token)).toBe('ultra');
     expect(effortOf(session.token)).toBe('low');
     expect(effortOf(otherWorkspace.token)).toBe('low');
-    expect(effortOf(isolatedTask.token)).toBe('low');
     expect(effortOf(oneShot.token)).toBeUndefined();
 
     // A Runtime Session is addressed by its own id; undefined clears the pick.
@@ -158,14 +151,7 @@ describe('conversation reasoning effort on a grant', () => {
       updateLiveSessionEffort({ groupFolder: 'nobody-home' }, 'high'),
     ).toBe(0);
 
-    for (const issued of [
-      main,
-      mainHost,
-      session,
-      otherWorkspace,
-      isolatedTask,
-      oneShot,
-    ]) {
+    for (const issued of [main, mainHost, session, otherWorkspace, oneShot]) {
       revokeCodexGatewayToken(issued.token);
     }
   });

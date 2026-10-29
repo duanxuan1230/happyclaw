@@ -46,9 +46,6 @@ function host(inputs: Record<string, AgentBuilderPersistedInput>) {
   }));
   const activeAgentBuilderTurns = new AgentBuilderTurnRegistry();
   const globals: Record<string, unknown> = {
-    resolveScheduledTaskIpcRunId: () => null,
-    extractDurableTaskRunIdFromNamespace: () => null,
-    getTaskRunById: () => undefined,
     getUserHomeGroup: () => undefined,
     resolveBroadcastFolder: () => FOLDER,
     registeredGroups: registrations,

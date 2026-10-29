@@ -16,7 +16,7 @@ vi.mock('../src/runtime-config.js', () => ({
     maxConcurrentHostProcesses: 10,
   }),
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue, setRetryJitterSourceForTesting } =
   await import('../src/group-queue.js');

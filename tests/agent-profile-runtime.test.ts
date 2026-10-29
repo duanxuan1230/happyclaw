@@ -259,7 +259,7 @@ describe('AgentProfile runtime invalidation', () => {
         listDescendantJids: (jid: string) =>
           jid === 'web:agent-profile-runtime-workspace'
             ? ['web:agent-profile-runtime-workspace#agent:a1']
-            : ['feishu:runtime-channel#task:t1'],
+            : ['feishu:runtime-channel#agent:a2'],
         stopGroup,
       },
     } as unknown as Parameters<
@@ -278,7 +278,7 @@ describe('AgentProfile runtime invalidation', () => {
     expect(stopped.sort()).toEqual(
       [
         'feishu:runtime-channel',
-        'feishu:runtime-channel#task:t1',
+        'feishu:runtime-channel#agent:a2',
         'web:agent-profile-runtime-workspace',
         'web:agent-profile-runtime-workspace#agent:a1',
       ].sort(),
@@ -295,7 +295,7 @@ describe('AgentProfile runtime invalidation', () => {
       'web:agent-profile-runtime-workspace#agent:a1',
       { force: true },
     );
-    expect(stopGroup).toHaveBeenCalledWith('feishu:runtime-channel#task:t1', {
+    expect(stopGroup).toHaveBeenCalledWith('feishu:runtime-channel#agent:a2', {
       force: true,
     });
   });

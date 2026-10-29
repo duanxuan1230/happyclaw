@@ -8,7 +8,7 @@ const settings = vi.hoisted(() => ({ maxConcurrentContainers: 1 }));
 vi.mock('../src/runtime-config.js', () => ({
   getSystemSettings: () => settings,
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue } = await import('../src/group-queue.js');
 type Queue = InstanceType<typeof GroupQueue>;

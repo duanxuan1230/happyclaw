@@ -430,7 +430,6 @@ describe('actual message loop dispatches the unconsumed channel suffix', () => {
       ...interactionRuntime,
       ...channelInteraction,
       channelConversationJid,
-      resolveScheduledGroupPromptInteractionMode: () => null,
       ...db,
       getChannelType,
       EMPTY_CURSOR,

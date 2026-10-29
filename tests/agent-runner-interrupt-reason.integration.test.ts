@@ -51,7 +51,7 @@ vi.mock('../src/container-runner.js', () => ({ killProcessTree: vi.fn() }));
 vi.mock('../src/runtime-config.js', () => ({
   getSystemSettings: () => ({ maxConcurrentContainers: 20 }),
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue } = await import('../src/group-queue.js');
 

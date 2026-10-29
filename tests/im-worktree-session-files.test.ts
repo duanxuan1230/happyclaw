@@ -71,9 +71,6 @@ const globals: Record<string, any> = {
   agentIdOfJid,
   // processTaskIpc's send_file path up to the IM delivery.
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  resolveScheduledTaskIpcRunId: () => null,
-  extractDurableTaskRunIdFromNamespace: () => null,
-  getTaskRunById: () => undefined,
   getUserHomeGroup: () => undefined,
   resolveBroadcastFolder: () => FOLDER,
   getUserById: () => undefined,
