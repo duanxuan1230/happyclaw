@@ -914,7 +914,7 @@ describe('StreamEventProcessor main tool results', () => {
     expect(ends(outputs)).toEqual(['toolu_a', 'toolu_b']);
   });
 
-  test('exposes active SDK task IDs and forwards sub-agent model telemetry', () => {
+  test("a sub-agent's type is never replaced by the model it runs on", () => {
     const { processor, outputs } = makeProcessor();
     startTool(processor, 'Task', 'toolu_sub');
     processor.processSystemMessage({
@@ -924,33 +924,28 @@ describe('StreamEventProcessor main tool results', () => {
       tool_use_id: 'toolu_sub',
       description: 'Investigate',
       task_type: 'local_agent',
+      subagent_type: 'Explore',
     });
-    expect(processor.getActiveSubAgentTaskIds()).toEqual(['sdk-task-42']);
-
-    processor.processSubAgentMessage({
-      type: 'assistant',
-      parent_tool_use_id: 'toolu_sub',
-      message: {
-        model: 'claude-sonnet-4-6',
-        content: [{ type: 'text', text: 'working' }],
-      },
-    });
-    const textDelta = outputs
-      .map((o) => o.streamEvent)
-      .find(
-        (e) =>
-          e?.eventType === 'text_delta' && e.parentToolUseId === 'toolu_sub',
-      );
-    expect(textDelta?.subagentType).toBe('claude-sonnet-4-6');
-
-    processor.processSystemMessage({
-      type: 'system',
-      subtype: 'task_notification',
-      task_id: 'sdk-task-42',
-      tool_use_id: 'toolu_sub',
-      status: 'completed',
-      summary: 'done',
-    });
-    expect(processor.getActiveSubAgentTaskIds()).toEqual([]);
+    // Later frames carry the model and, sometimes, no subagent_type.
+    for (const subagentType of [undefined, 'Explore']) {
+      processor.processSubAgentMessage({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_sub',
+        subagent_type: subagentType,
+        message: {
+          model: 'claude-sonnet-4-6',
+          content: [
+            { type: 'thinking', thinking: 'plan' },
+            { type: 'text', text: 'working' },
+            { type: 'tool_use', id: 'toolu_inner', name: 'Read', input: {} },
+          ],
+        },
+      });
+    }
+    // The Web and Feishu cards keep the last subagentType they are sent.
+    const sent = outputs
+      .map((o) => o.streamEvent?.subagentType)
+      .filter((type): type is string => !!type);
+    expect(new Set(sent)).toEqual(new Set(['Explore']));
   });
 });

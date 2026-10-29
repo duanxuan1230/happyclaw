@@ -5,8 +5,8 @@
  * whether the user stopped the turn or steered it; the runner also stops a
  * turn on its own (usage limit, model switch, model limit, a sub-agent's
  * provider error, shutdown). Only an explicit stop guarantees the turn's
- * sub-agents end with it. Background shells and monitors (a dev server, a log
- * watcher) are never stopped and never hold the query open.
+ * sub-agents end with it. Background shells, monitors and MCP tasks (a dev
+ * server, a log watcher) are never stopped and never hold the query open.
  */
 import fs from 'fs';
 import path from 'path';
@@ -32,46 +32,93 @@ const INTERRUPT_REASON_SENTINEL = '_interrupt_reason';
 export const SUB_AGENT_STOP_CLOSE_DELAY_MS = 3_000;
 
 /**
- * Consume a pending `_interrupt` and its reason. Null when none is pending.
- * A reason file written for another query is left alone.
+ * An `_interrupt` read empty may still be being written (hosts that predate
+ * the atomic rename write it in place, and the watch fires on creation). It
+ * is read again on a later event and only taken as the legacy interrupt
+ * without a query id once it has stayed empty this long.
+ */
+const EMPTY_SENTINEL_SETTLE_MS = 1_000;
+let emptySentinelSince = 0;
+
+/** The trimmed `_interrupt` content, null when there is none. */
+function readSentinel(inputDir: string): string | null {
+  try {
+    return fs
+      .readFileSync(path.join(inputDir, INTERRUPT_SENTINEL), 'utf8')
+      .trim();
+  } catch {
+    return null;
+  }
+}
+
+/** The reason the host wrote for this interrupt, null when it wrote none. */
+function readReason(
+  inputDir: string,
+  queryRunId: string,
+): InterruptReason | null {
+  try {
+    const written = JSON.parse(
+      fs.readFileSync(path.join(inputDir, INTERRUPT_REASON_SENTINEL), 'utf8'),
+    ) as { queryId?: unknown; reason?: unknown };
+    if (written?.queryId !== queryRunId) return null;
+    return written.reason === 'stop' ? 'stop' : 'steer';
+  } catch {
+    return null;
+  }
+}
+
+function unlinkSentinel(inputDir: string, name: string): void {
+  try {
+    fs.unlinkSync(path.join(inputDir, name));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Consume a pending `_interrupt` and its reason. Null when none is pending
+ * yet. A reason file written for another query is left alone.
  */
 export function consumeInterruptSentinel(
   inputDir: string,
 ): { queryRunId: string; reason: InterruptReason } | null {
-  const sentinel = path.join(inputDir, INTERRUPT_SENTINEL);
-  if (!fs.existsSync(sentinel)) return null;
-  let queryRunId = '';
-  try {
-    queryRunId = fs.readFileSync(sentinel, 'utf8').trim();
-    fs.unlinkSync(sentinel);
-  } catch {
-    /* ignore */
+  const queryRunId = readSentinel(inputDir);
+  if (queryRunId === null) {
+    emptySentinelSince = 0;
+    return null;
   }
-  const reasonFile = path.join(inputDir, INTERRUPT_REASON_SENTINEL);
-  let written: { queryId?: unknown; reason?: unknown } | undefined;
-  try {
-    written = JSON.parse(fs.readFileSync(reasonFile, 'utf8'));
-  } catch {
-    return { queryRunId, reason: 'steer' };
+  if (!queryRunId) {
+    const now = Date.now();
+    emptySentinelSince ||= now;
+    if (now - emptySentinelSince < EMPTY_SENTINEL_SETTLE_MS) return null;
   }
-  if (written?.queryId !== queryRunId) return { queryRunId, reason: 'steer' };
-  try {
-    fs.unlinkSync(reasonFile);
-  } catch {
-    /* ignore */
-  }
-  return { queryRunId, reason: written.reason === 'stop' ? 'stop' : 'steer' };
+  emptySentinelSince = 0;
+  unlinkSentinel(inputDir, INTERRUPT_SENTINEL);
+  const reason = readReason(inputDir, queryRunId);
+  if (reason) unlinkSentinel(inputDir, INTERRUPT_REASON_SENTINEL);
+  return { queryRunId, reason: reason ?? 'steer' };
+}
+
+/**
+ * After a steer the runner stops reading IPC while the superseded query
+ * winds down. Consume a later stop for that same query, if one arrived;
+ * anything else is left for the end of the query to discard.
+ */
+export function consumeStopAfterSteer(
+  inputDir: string,
+  queryRunId: string | undefined,
+): boolean {
+  const written = readSentinel(inputDir);
+  if (!written || (queryRunId && written !== queryRunId)) return false;
+  if (readReason(inputDir, written) !== 'stop') return false;
+  discardInterruptSentinel(inputDir);
+  return true;
 }
 
 /** Drop an interrupt that is no longer current, with its reason. */
 export function discardInterruptSentinel(inputDir: string): void {
-  for (const name of [INTERRUPT_SENTINEL, INTERRUPT_REASON_SENTINEL]) {
-    try {
-      fs.unlinkSync(path.join(inputDir, name));
-    } catch {
-      /* ignore */
-    }
-  }
+  unlinkSentinel(inputDir, INTERRUPT_SENTINEL);
+  unlinkSentinel(inputDir, INTERRUPT_REASON_SENTINEL);
 }
 
 type StoppableQuery = Pick<Query, 'interrupt' | 'close'>;
@@ -122,14 +169,7 @@ export class ActiveTurnStopper {
       activeQuery.close();
       return;
     }
-    const subAgents =
-      reason === 'stop' ? this.deps.activeSubAgentTaskIds().length : 0;
-    if (subAgents > 0) {
-      log(
-        `${label}: ${subAgents} sub-agent(s) must end within ${SUB_AGENT_STOP_CLOSE_DELAY_MS / 1000}s`,
-      );
-      this.closeIfSubAgentsOutlast(activeQuery, label);
-    }
+    if (reason === 'stop') this.requireSubAgentsToEnd(activeQuery, label);
     activeQuery
       .interrupt()
       .then((receipt) => {
@@ -140,6 +180,20 @@ export class ActiveTurnStopper {
         activeQuery.close();
       })
       .catch((err: unknown) => log(`${label} interrupt failed: ${err}`));
+  }
+
+  /**
+   * The explicit-stop deadline: close the query if a sub-agent is still
+   * running a few seconds from now. Also used when a stop follows a steer
+   * the runner already acted on.
+   */
+  requireSubAgentsToEnd(activeQuery: StoppableQuery, label: string): void {
+    const subAgents = this.deps.activeSubAgentTaskIds().length;
+    if (subAgents === 0) return;
+    this.deps.log(
+      `${label}: ${subAgents} sub-agent(s) must end within ${SUB_AGENT_STOP_CLOSE_DELAY_MS / 1000}s`,
+    );
+    this.closeIfSubAgentsOutlast(activeQuery, label);
   }
 
   dispose(): void {

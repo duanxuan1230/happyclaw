@@ -125,6 +125,13 @@ function sendMessage(res: http.ServerResponse, id: string, blocks: Block[]) {
   res.end();
 }
 
+const PROXY_VARIABLES = new Set([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+]);
+
 function runnerEnv(
   baseUrl: string,
   dirs: { group: string; ipc: string; config: string; home: string },
@@ -142,11 +149,15 @@ function runnerEnv(
           'ANTHROPIC_MODEL',
           'ANTHROPIC_CUSTOM_HEADERS',
           'CLAUDE_CONFIG_DIR',
-        ].includes(entry[0]),
+        ].includes(entry[0]) &&
+        // A CI or developer proxy must not carry the local endpoint away.
+        !PROXY_VARIABLES.has(entry[0].toUpperCase()),
     ),
   );
   return {
     ...env,
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
     HAPPYCLAW_WORKSPACE_GROUP: dirs.group,
     HAPPYCLAW_WORKSPACE_IPC: dirs.ipc,
     HAPPYCLAW_REQUIRE_BUNDLED_CLAUDE: '1',

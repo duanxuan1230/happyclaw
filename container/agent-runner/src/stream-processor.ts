@@ -42,12 +42,15 @@ const SDK_TERMINAL_TASK_STATUSES = new Set([
   'aborted',
 ]);
 
-// SDK task types that are not sub-agents: backgrounded Bash, monitors and MCP
-// tasks. The host and the Web leave the same types out of their Agent views.
-const NON_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
-  'local_bash',
-  'monitor',
-  'mcp_task',
+// SDK task types that are sub-agents, as Claude Code 2.1.296 itself groups
+// them; task_started reports the CLI's own task type. Shells (local_bash),
+// monitors (monitor_mcp, monitor_ws), MCP tasks and any type not listed here
+// are not sub-agents.
+const SUB_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_agent',
+  'remote_agent',
+  'in_process_teammate',
+  'local_workflow',
 ]);
 
 // Tool calls remembered by id so a result can be matched to its tool's name.
@@ -269,6 +272,8 @@ export class StreamEventProcessor {
       description: string;
       taskType?: string;
       isBackgrounded: boolean;
+      /** Launched by a sub-agent rather than the main Agent. */
+      launchedBySubAgent: boolean;
     }
   >();
 
@@ -1459,10 +1464,8 @@ export class StreamEventProcessor {
         message.task_id;
       const desc = message.description || message.prompt || '';
       if (message.task_id && !message.skip_transcript) {
-        this.backgroundDrain.taskStarted(
-          message.task_id,
-          !this.isSubAgentOwnedTask(message),
-        );
+        const subAgentOwned = this.isSubAgentOwnedTask(message);
+        this.backgroundDrain.taskStarted(message.task_id, !subAgentOwned);
         this.pendingSdkTasks.set(message.task_id, {
           description: desc,
           taskType:
@@ -1470,6 +1473,8 @@ export class StreamEventProcessor {
               ? message.task_type
               : undefined,
           isBackgrounded: false,
+          launchedBySubAgent:
+            subAgentOwned || typeof message.parent_task_id === 'string',
         });
         this.log(
           `[pending-tasks] +${message.task_id.slice(0, 12)} (${shorten(desc, 60)}) → ${this.pendingSdkTasks.size} pending`,
@@ -1567,6 +1572,7 @@ export class StreamEventProcessor {
         task_id: string;
         task_type?: string;
         description?: string;
+        parent_task_id?: string;
       }> = Array.isArray(message.tasks)
         ? (message.tasks as unknown[]).filter(
             (
@@ -1575,6 +1581,7 @@ export class StreamEventProcessor {
               task_id: string;
               task_type?: string;
               description?: string;
+              parent_task_id?: string;
             } =>
               typeof task === 'object' &&
               task !== null &&
@@ -1591,15 +1598,18 @@ export class StreamEventProcessor {
       for (const task of tasks) {
         this.backgroundLevelTaskIds.add(task.task_id);
         const existing = this.pendingSdkTasks.get(task.task_id);
+        const launchedBySubAgent = typeof task.parent_task_id === 'string';
         if (!existing) {
           this.pendingSdkTasks.set(task.task_id, {
             description: task.description || task.task_id,
             taskType: task.task_type,
             isBackgrounded: true,
+            launchedBySubAgent,
           });
         } else {
           existing.isBackgrounded = true;
           existing.taskType ??= task.task_type;
+          existing.launchedBySubAgent ||= launchedBySubAgent;
         }
       }
       this.backgroundDrain.replaceBackgroundTasks([...nextIds]);
@@ -1893,12 +1903,13 @@ export class StreamEventProcessor {
 
     if (message.type === 'assistant') {
       this.recordSubAgentText(msgParentToolUseId, message);
+      // Logged only: subagentType names the agent type (e.g. Explore), and
+      // the Web and Feishu cards keep the last one they were sent.
       const subModel =
         typeof message.message?.model === 'string' &&
         message.message.model.trim()
           ? message.message.model.trim()
           : undefined;
-      const effectiveSubagentType = message.subagent_type || subModel;
       const subContent = message.message?.content as
         | Array<{
             type: string;
@@ -1937,7 +1948,7 @@ export class StreamEventProcessor {
                 agentScope: 'subagent',
                 text: block.thinking,
                 parentToolUseId: msgParentToolUseId,
-                subagentType: effectiveSubagentType,
+                subagentType: message.subagent_type,
                 taskDescription: message.task_description,
               },
             });
@@ -1951,7 +1962,7 @@ export class StreamEventProcessor {
                 agentScope: 'subagent',
                 text: block.text,
                 parentToolUseId: msgParentToolUseId,
-                subagentType: effectiveSubagentType,
+                subagentType: message.subagent_type,
                 taskDescription: message.task_description,
               },
             });
@@ -1967,7 +1978,7 @@ export class StreamEventProcessor {
                 parentToolUseId: msgParentToolUseId,
                 isNested: true,
                 agentScope: 'subagent',
-                subagentType: effectiveSubagentType,
+                subagentType: message.subagent_type,
                 taskDescription: message.task_description,
                 toolInputSummary: summarizeToolInput(block.input),
               },
@@ -2533,14 +2544,17 @@ export class StreamEventProcessor {
   }
 
   /**
-   * Unsettled sub-agent tasks (Task/Agent, workflows): what an explicit stop
-   * waits on before it closes the query. Shells, monitors and MCP tasks are
-   * never among them.
+   * Unsettled sub-agents the main Agent launched (Task/Agent, workflows):
+   * what an explicit stop waits on before it closes the query. A nested
+   * sub-agent ends with its parent, possibly without a notification of its
+   * own; shells, monitors, MCP tasks and unknown types are never counted.
    */
   getActiveSubAgentTaskIds(): string[] {
     return [...this.pendingSdkTasks]
       .filter(
-        ([, pending]) => !NON_AGENT_TASK_TYPES.has(pending.taskType ?? ''),
+        ([, pending]) =>
+          !pending.launchedBySubAgent &&
+          SUB_AGENT_TASK_TYPES.has(pending.taskType ?? ''),
       )
       .map(([taskId]) => taskId);
   }
