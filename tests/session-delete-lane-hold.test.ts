@@ -298,9 +298,14 @@ describe('deleting a worktree session holds only its own lane', () => {
     // The session row survived but its worktree is gone: it can no longer
     // run anywhere, least of all in the main checkout.
     expect(db.getAgent(session.id)).toBeDefined();
+    // Checking it again keeps the reason it was given.
     expect(worktrees.resolveSessionWorkingDirectory(session.id)).toMatchObject({
       kind: 'broken',
+      reason: 'worktree removed with its session',
     });
+    expect(store.getSessionWorktree(session.id)?.broken_reason).toBe(
+      'worktree removed with its session',
+    );
     // The lane is not left held: it was dropped like a deleted session's.
     expect(ws.discarded).toContain(session.lane);
     expect(ws.queue.isGroupMutationPaused(session.lane)).toBe(false);
