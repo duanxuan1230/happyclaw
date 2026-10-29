@@ -280,18 +280,25 @@ describe('host IPC primary output routing', () => {
       onFinalCandidate: () => true,
     });
 
-    for (const turnSource of ['im', undefined] as const) {
+    // An IM turn with its route, and a turn of unknown source (no inputTurnId,
+    // or no bound turn), go the way they did on main.
+    for (const [turnSource, inputTurnId] of [
+      ['im', 'turn-im'],
+      [undefined, 'turn-im'],
+      [undefined, undefined],
+    ] as const) {
       expect(
         routeHostIpcOutput(
           {
             sourceGroup: 'workspace',
-            inputTurnId: 'turn-im',
+            inputTurnId,
             text: '正在查看日志',
             deliveryRole: 'progress',
             authorized: true,
             scheduledTask: false,
             interactionMode: 'proactive',
             turnSource,
+            imRouteAvailable: true,
           },
           activeTurnOutputs,
         ),
@@ -308,6 +315,64 @@ describe('host IPC primary output routing', () => {
     expect(activeTurnOutputs.get(scope, 'turn-im')?.attemptedFinalText).toBe(
       null,
     );
+  });
+
+  test('proactive progress of an IM turn whose route is gone fails closed', () => {
+    // A recalled input, or an address without its account: the Agent is told
+    // nothing was delivered, and nothing is staged for the Web instead.
+    const activeTurnOutputs = new ActiveTurnOutputRegistry();
+    const projectedProgress = vi.fn(() => true);
+    activeTurnOutputs.bind(channelTurnScope('workspace'), 'turn-im', {
+      source: 'im',
+      onProgress: projectedProgress,
+      onFinalCandidate: () => true,
+    });
+    expect(
+      routeHostIpcOutput(
+        {
+          sourceGroup: 'workspace',
+          inputTurnId: 'turn-im',
+          text: '正在查看日志',
+          deliveryRole: 'progress',
+          authorized: true,
+          scheduledTask: false,
+          interactionMode: 'proactive',
+          turnSource: activeTurnOutputs.sourceOf(
+            channelTurnScope('workspace'),
+            'turn-im',
+          ),
+          imRouteAvailable: false,
+        },
+        activeTurnOutputs,
+      ),
+    ).toEqual({
+      path: 'rejected',
+      delivered: false,
+      staged: false,
+      deliveryRole: 'progress',
+      reason: 'native_route_unavailable',
+    });
+    expect(projectedProgress).not.toHaveBeenCalled();
+  });
+
+  test('the source a turn was bound with is the one routing reads', () => {
+    const activeTurnOutputs = new ActiveTurnOutputRegistry();
+    const scope = channelTurnScope('workspace', 'session');
+    activeTurnOutputs.bind(scope, 'web-turn', {
+      source: 'web',
+      onProgress: () => true,
+      onFinalCandidate: () => true,
+    });
+    activeTurnOutputs.bind(scope, 'im-turn', {
+      source: 'im',
+      onProgress: () => true,
+      onFinalCandidate: () => true,
+    });
+    expect(activeTurnOutputs.sourceOf(scope, 'web-turn')).toBe('web');
+    expect(activeTurnOutputs.sourceOf(scope, 'im-turn')).toBe('im');
+    expect(activeTurnOutputs.sourceOf(scope, 'gone')).toBeUndefined();
+    activeTurnOutputs.unbind(scope, 'im-turn');
+    expect(activeTurnOutputs.sourceOf(scope, 'im-turn')).toBeUndefined();
   });
 
   test('an Assistant turn stages progress whatever its source', () => {
@@ -364,6 +429,7 @@ describe('host IPC primary output routing', () => {
           scheduledTask: false,
           interactionMode: 'proactive',
           turnSource,
+          imRouteAvailable: true,
         },
         activeTurnOutputs,
       );

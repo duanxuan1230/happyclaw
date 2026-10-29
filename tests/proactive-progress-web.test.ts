@@ -1,19 +1,25 @@
 import { describe, expect, test, vi } from 'vitest';
 
 import { ActiveChannelOutboxScopeRegistry } from '../src/channel-outbox-runtime-scope.js';
+import { resolveOutputChannelReplySource } from '../src/channel-reply-source.js';
 import { channelTurnScope } from '../src/channel-turn-registry.js';
 import { routeHostIpcOutput } from '../src/host-ipc-output-router.js';
 import type { StreamEvent } from '../src/stream-event.types.js';
 import { ActiveTurnOutputRegistry } from '../src/turn-output-coordinator.js';
 import { TurnTraceTracker } from '../src/turn-trace.js';
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
-import { projectProgressForWeb } from '../src/workspace-interaction-runtime.js';
+import {
+  proactiveClosingNote,
+  projectProgressForWeb,
+} from '../src/workspace-interaction-runtime.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
-// The proactive progress path as the host runs it: the IPC router stages a Web
-// turn's send_message(delivery_role=progress) on its turn, and the turn's own
-// onProgress handler (installed from index.ts, main session and conversation
-// session alike) tells the Web and records it for turn_traces.
+// The proactive progress path as the host runs it: each turn is bound with the
+// channel its input came from, the IPC router stages a Web turn's
+// send_message(delivery_role=progress) on it, and the turn's own onProgress
+// handler (installed from index.ts, main session and conversation session
+// alike) tells the Web and records it for turn_traces. A turn that ends
+// without a reply keeps its progress on a closing note.
 
 const LEVELS: ProcessVisibility[] = ['hidden', 'activity', 'full'];
 const FOLDER = 'ws-progress';
@@ -28,6 +34,7 @@ function sessionLane(
   lane: 'main' | 'session',
   mode: InteractionMode,
   visibility: ProcessVisibility,
+  options: { initialSource?: string | null } = {},
 ) {
   const activeTurnOutputs = new ActiveTurnOutputRegistry();
   const broadcast = vi.fn<(...args: unknown[]) => void>();
@@ -43,14 +50,19 @@ function sessionLane(
   const globals: Record<string, unknown> = {
     activeTurnOutputs,
     projectProgressForWeb,
+    resolveOutputChannelReplySource,
     interactionMode: mode,
-    resolveProcessVisibility: () => visibility,
     turnTraces,
     broadcastStreamEvent: broadcast,
     chatJid: CHAT_JID,
     agentId: AGENT_ID,
     activeSessionId: 'sdk-session',
     currentAgentSessionId: 'sdk-session',
+    lastProcessed: { id: 'input-1' },
+    initialReplySourceImJid: options.initialSource ?? null,
+    initialAgentReplySourceImJid: options.initialSource ?? null,
+    admittedWarmMainInputs: new Map(),
+    admittedWarmAgentInputs: new Map(),
     mainAdmissionKey: channelTurnScope(FOLDER),
     agentAdmissionKey: channelTurnScope(FOLDER, AGENT_ID),
     turnOutputCoordinators: new Map(),
@@ -75,7 +87,9 @@ function sessionLane(
       : 'bindAgentTurnOutputCoordinator'
   ] as (inputTurnId: string) => unknown;
   bind('input-1');
-  const send = (text: string) =>
+  const scope = channelTurnScope(FOLDER, lane === 'main' ? null : AGENT_ID);
+  // What the IPC watcher passes: the bound source, and whether a route is open.
+  const send = (text: string, imRouteAvailable = false) =>
     routeHostIpcOutput(
       {
         sourceGroup: FOLDER,
@@ -86,7 +100,8 @@ function sessionLane(
         authorized: true,
         scheduledTask: false,
         interactionMode: mode,
-        turnSource: 'web',
+        turnSource: activeTurnOutputs.sourceOf(scope, 'input-1'),
+        imRouteAvailable,
       },
       activeTurnOutputs,
     );
@@ -125,6 +140,23 @@ describe("a proactive Web turn's progress", () => {
       }
     });
 
+    test(`lands on the card of a warm turn, under the Runner's own id (${lane})`, () => {
+      // A warm turn's events carry the Runner's id, not the input's: a step
+      // under the input's id would start a new card and wipe the one shown.
+      const run = sessionLane(lane, 'proactive', 'hidden');
+      run.turnTraces.observe('input-1', {
+        eventType: 'status',
+        statusText: 'requesting',
+        turnId: 'runner-turn-2',
+      });
+      run.send('换个思路再试');
+      expect(run.sent()[0]).toMatchObject({
+        turnId: 'runner-turn-2',
+        inputTurnId: 'input-1',
+        progress: true,
+      });
+    });
+
     test(`is kept for turn_traces at every level, alone at hidden (${lane})`, () => {
       for (const level of LEVELS) {
         const run = sessionLane(lane, 'proactive', level);
@@ -150,6 +182,23 @@ describe("a proactive Web turn's progress", () => {
         );
       }
     });
+
+    test(`of an IM input goes to the channel, and fails closed without a route (${lane})`, () => {
+      // The input's own source decides, not whether a scope happens to exist:
+      // an address without its account, or a recalled input, has none.
+      const run = sessionLane(lane, 'proactive', 'full', {
+        initialSource: 'feishu:oc_chat',
+      });
+      expect(run.send('在查', true)).toMatchObject({
+        path: 'separate_provider',
+      });
+      expect(run.send('在查', false)).toMatchObject({
+        path: 'rejected',
+        reason: 'native_route_unavailable',
+      });
+      expect(run.sent()).toEqual([]);
+      expect(run.turnTraces.holdsProgress('input-1')).toBe(false);
+    });
   }
 
   test('an Assistant turn keeps its step and status line', () => {
@@ -160,6 +209,172 @@ describe("a proactive Web turn's progress", () => {
       'status',
     ]);
     expect(run.sent()[0].progress).toBeUndefined();
+  });
+});
+
+describe('a proactive turn that sent progress and ends without a reply', () => {
+  function mainLane(options: { replied?: boolean } = {}) {
+    const stored: StoredTrace[] = [];
+    const turnTraces = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'hidden',
+      store: (row) => {
+        stored.push(row);
+      },
+    });
+    const sendMessage = vi.fn(
+      async (
+        jid: string,
+        _text: string,
+        opts: {
+          turnTrace?: { tracker: TurnTraceTracker; inputId: string };
+          messageMeta?: { turnId?: string };
+        },
+      ) => {
+        opts.turnTrace?.tracker.persist({
+          chatJid: jid,
+          inputId: opts.turnTrace.inputId,
+          turnId: opts.messageMeta?.turnId,
+        });
+        return 'note-1';
+      },
+    );
+    const announceTurnTrace = vi.fn();
+    const globals: Record<string, unknown> = {
+      turnTraces,
+      chatJid: CHAT_JID,
+      activeSessionId: 'sdk-session',
+      resolveIpcOutputWorkspaceJid: () => null,
+      getLastAgentMessageIdForTurn: (jid: string) =>
+        options.replied && jid === CHAT_JID ? 'final-1' : undefined,
+      announceTurnTrace,
+      sendMessage,
+      proactiveClosingNote,
+      logger: { warn: vi.fn() },
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('persistProactiveTurnTrace', 'processGroupMessages');
+    harness.install('keepProactiveProgress', 'processGroupMessages');
+    const keep = globals.keepProactiveProgress as (
+      inputId: string,
+      ending: 'stopped' | 'steered' | 'failed',
+    ) => Promise<void>;
+    return { turnTraces, stored, sendMessage, announceTurnTrace, keep };
+  }
+  const progress = (turnTraces: TurnTraceTracker, inputId: string) =>
+    turnTraces.observeProgress(inputId, {
+      eventType: 'commentary',
+      agentScope: 'main',
+      text: '先看日志',
+      progress: true,
+    });
+
+  test("keeps it on a closing note that becomes the turn's reply", async () => {
+    for (const [ending, reason] of [
+      ['stopped', 'interrupted'],
+      ['steered', 'interrupted'],
+      ['failed', 'error'],
+    ] as const) {
+      const lane = mainLane();
+      progress(lane.turnTraces, 'input-1');
+      await lane.keep('input-1', ending);
+      expect(lane.sendMessage).toHaveBeenCalledOnce();
+      const [jid, text, opts] = lane.sendMessage.mock.calls[0];
+      expect(jid).toBe(CHAT_JID);
+      expect(text).toBe(proactiveClosingNote(ending));
+      expect(opts).toMatchObject({
+        sendToIM: false,
+        messageMeta: {
+          turnId: 'input-1',
+          sourceKind: 'interrupt_partial',
+          finalizationReason: reason,
+        },
+      });
+      // The note carries the turn's trace: the progress is kept with it.
+      expect(lane.stored).toHaveLength(1);
+      expect(lane.stored[0].turnId).toBe('input-1');
+      expect(JSON.parse(lane.stored[0].stepsJson!)).toEqual([
+        expect.objectContaining({ progress: true, text: '先看日志' }),
+      ]);
+      expect(lane.turnTraces.inputsWithProgress()).toEqual([]);
+    }
+  });
+
+  test('hangs it on the reply the turn already has', async () => {
+    const lane = mainLane({ replied: true });
+    progress(lane.turnTraces, 'input-1');
+    await lane.keep('input-1', 'stopped');
+    expect(lane.sendMessage).not.toHaveBeenCalled();
+    expect(lane.stored).toHaveLength(1);
+    expect(lane.announceTurnTrace).toHaveBeenCalledWith(
+      CHAT_JID,
+      'final-1',
+      'input-1',
+    );
+  });
+
+  test('writes nothing for a turn that sent no progress', async () => {
+    const lane = mainLane();
+    lane.turnTraces.observe('input-1', {
+      eventType: 'status',
+      statusText: 'requesting',
+      turnId: 'input-1',
+    });
+    await lane.keep('input-1', 'failed');
+    expect(lane.sendMessage).not.toHaveBeenCalled();
+    expect(lane.stored).toHaveLength(0);
+  });
+
+  test('a session keeps it the same way, on its own tab', () => {
+    const stored: StoredTrace[] = [];
+    const turnTraces = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'hidden',
+      store: (row) => {
+        stored.push(row);
+      },
+    });
+    const storeMessageDirect = vi.fn(() => 'note-s');
+    const broadcastNewMessage = vi.fn();
+    const globals: Record<string, unknown> = {
+      turnTraces,
+      virtualChatJid: `${CHAT_JID}#agent:${AGENT_ID}`,
+      agentId: AGENT_ID,
+      currentAgentSessionId: 'sdk-session',
+      getLastAgentMessageIdForTurn: () => undefined,
+      announceTurnTrace: vi.fn(),
+      ensureChatExists: vi.fn(),
+      storeMessageDirect,
+      broadcastNewMessage,
+      proactiveClosingNote,
+      logger: { warn: vi.fn() },
+      ASSISTANT_NAME: 'HappyClaw',
+      crypto: { randomUUID: () => 'uuid-1' },
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('persistProactiveTurnTrace', 'processAgentConversation');
+    harness.install('closeProactiveTurn', 'processAgentConversation');
+    harness.install('keepProactiveProgress', 'processAgentConversation');
+    progress(turnTraces, 'input-1');
+    (
+      globals.keepProactiveProgress as (
+        inputId: string,
+        ending: 'stopped',
+      ) => void
+    )('input-1', 'stopped');
+    expect(storeMessageDirect).toHaveBeenCalledOnce();
+    expect(broadcastNewMessage).toHaveBeenCalledWith(
+      `${CHAT_JID}#agent:${AGENT_ID}`,
+      expect.objectContaining({
+        id: 'note-s',
+        content: proactiveClosingNote('stopped'),
+        has_trace: true,
+        turn_id: 'input-1',
+        source_kind: 'interrupt_partial',
+      }),
+      AGENT_ID,
+    );
+    expect(stored).toHaveLength(1);
   });
 });
 
@@ -195,7 +410,7 @@ describe('the reply route a progress statement follows', () => {
     });
   }
 
-  test('an IM input has its channel route; a Web input has none', () => {
+  test('an IM input has its channel route while its scope is bound', () => {
     expect(routeOf(true)).toBe('feishu:oc_chat');
     expect(routeOf(false)).toBeNull();
   });

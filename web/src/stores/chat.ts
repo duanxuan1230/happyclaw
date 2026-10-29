@@ -296,6 +296,11 @@ export interface StreamSnapshotData {
   systemStatus: string | null;
   isThinking?: boolean;
   activeHook?: { hookName: string; hookEvent: string } | null;
+  /**
+   * The progress statements the Agent sent in this proactive Web turn, in
+   * order, with when each was sent (epoch ms).
+   */
+  progress?: Array<{ at: number; text: string }>;
   turnId?: string;
 }
 
@@ -819,20 +824,24 @@ export function isProactiveRuntime(
 }
 
 /**
- * A proactive turn's state cut down to what `visibility` shows: nothing but
- * the spinner at `hidden`, no reasoning text at `activity`. The owner can
- * lower the level while a turn runs; what the new level hides is dropped.
+ * A proactive turn's state cut down to what `visibility` shows: the spinner
+ * and the progress the Agent sent at `hidden`, no reasoning text at
+ * `activity`. The owner can lower the level while a turn runs; what the new
+ * level hides is dropped, and the progress, which every level shows, stays.
  */
 function scrubForVisibility(
   state: StreamingState,
   visibility: ProcessVisibility,
 ): StreamingState {
   if (visibility === 'hidden') {
+    const progress = state.steps?.filter(isProgressStep);
     return {
       ...DEFAULT_STREAMING_STATE,
       turnId: state.turnId,
+      inputTurnId: state.inputTurnId,
       sessionId: state.sessionId,
       systemStatus: state.systemStatus,
+      ...(progress?.length ? { steps: progress } : {}),
     };
   }
   // The reply is never shown, whatever the level; so is what a tool was given.
@@ -856,13 +865,40 @@ function scrubForVisibility(
     thinkingGap: false,
     // Reasoning text and the narration before a tool call are `full` only.
     steps: state.steps
-      ?.filter((step) => !step.commentary)
+      ?.filter((step) => !step.commentary || isProgressStep(step))
       .map((step) =>
         step.kind === 'thinking'
           ? { ...step, text: '', title: undefined }
           : step,
       ),
   };
+}
+
+/**
+ * `steps` with the progress statements a reconnect snapshot names that they
+ * do not already hold (this tab may have missed some while it was away), in
+ * the order they were sent among the other steps.
+ */
+function withSnapshotProgress(
+  steps: StreamingStep[],
+  progress: ReadonlyArray<{ at: number; text: string }>,
+): StreamingStep[] {
+  const held = new Set(
+    steps.filter(isProgressStep).map((step) => step.text?.trim()),
+  );
+  const missing = progress.filter((entry) => !held.has(entry.text.trim()));
+  if (missing.length === 0) return steps;
+  const added: StreamingStep[] = missing.map((entry, index) => ({
+    id: `progress-snapshot-${entry.at}-${index}`,
+    kind: 'text',
+    at: entry.at,
+    endedAt: entry.at,
+    status: 'done',
+    commentary: true,
+    progress: true,
+    text: entry.text,
+  }));
+  return [...steps, ...added].sort((a, b) => a.at - b.at);
 }
 
 /** Thinking time so far, including a burst still in progress. */
@@ -6567,6 +6603,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restored.stepsDropped = rebuilt.dropped;
         restored.stepsRebuilt = true;
       }
+      // The progress the Agent sent is no part of what the pieces rebuild:
+      // the snapshot names it, in order, and the steps take what they lack.
+      if (snapshot.progress?.length) {
+        restored.steps = withSnapshotProgress(
+          restored.steps ?? [],
+          snapshot.progress,
+        );
+      }
       return level ? scrubForVisibility(restored, level) : restored;
     };
 
@@ -6953,4 +6997,78 @@ useChatStore.subscribe((state, previous) => {
   }
   if (changed.length === 0) return;
   useChatStore.setState((current) => withoutProcessCaches(current, changed));
+  for (const jid of changed) {
+    if (processView(state.groups[jid]) === 'proactive:hidden') {
+      void resyncTraceFlags(jid);
+    }
+  }
 });
+
+/** The newest replies whose `has_trace` is read again after a view change. */
+const TRACE_FLAG_RESYNC_LIMIT = 200;
+
+/**
+ * The `has_trace` of the replies this tab holds of `jid` and its sessions,
+ * read again for the view now in force. At `hidden` the server flags only the
+ * turns whose progress it keeps, which this tab cannot tell from what it
+ * holds; the flags read at another level were let go meanwhile.
+ */
+async function resyncTraceFlags(jid: string): Promise<void> {
+  const view = processViewOfRuntime(useChatStore.getState(), jid);
+  const flaggedOf = async (query: string): Promise<Set<string> | null> => {
+    try {
+      const data = await api.get<{ messages: Message[] }>(
+        `/api/groups/${encodeURIComponent(jid)}/messages?${query}`,
+      );
+      if (processViewOfRuntime(useChatStore.getState(), jid) !== view) {
+        return null;
+      }
+      return new Set(data.messages.filter((m) => m.has_trace).map((m) => m.id));
+    } catch {
+      return null;
+    }
+  };
+  const flag = (list: Message[], flagged: Set<string>): Message[] =>
+    list.some((m) => !m.has_trace && flagged.has(m.id))
+      ? list.map((m) =>
+          !m.has_trace && flagged.has(m.id) ? { ...m, has_trace: true } : m,
+        )
+      : list;
+  const limit = `limit=${TRACE_FLAG_RESYNC_LIMIT}`;
+  if (useChatStore.getState().messages[jid]?.length) {
+    const flagged = await flaggedOf(limit);
+    if (flagged?.size) {
+      useChatStore.setState((s) =>
+        s.messages[jid]
+          ? {
+              messages: {
+                ...s.messages,
+                [jid]: flag(s.messages[jid], flagged),
+              },
+            }
+          : s,
+      );
+    }
+  }
+  const sessions = Object.entries(useChatStore.getState().agentMessages)
+    .filter(([, list]) =>
+      list.some((m) => m.chat_jid.startsWith(`${jid}#agent:`)),
+    )
+    .map(([agentId]) => agentId);
+  for (const agentId of sessions) {
+    const flagged = await flaggedOf(
+      `agentId=${encodeURIComponent(agentId)}&${limit}`,
+    );
+    if (!flagged?.size) continue;
+    useChatStore.setState((s) =>
+      s.agentMessages[agentId]
+        ? {
+            agentMessages: {
+              ...s.agentMessages,
+              [agentId]: flag(s.agentMessages[agentId], flagged),
+            },
+          }
+        : s,
+    );
+  }
+}

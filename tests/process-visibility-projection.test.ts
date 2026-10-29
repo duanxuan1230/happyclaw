@@ -281,82 +281,80 @@ describe('process visibility projection for the Web', () => {
 describe('progress statements written by the Agent', () => {
   // The Agent's send_message(delivery_role=progress), staged on a Web turn,
   // reaches the Web through projectProgressForWeb, the function both onProgress
-  // handlers call. It is the model's own sentence, so it still passes the gate
-  // every other event passes.
+  // handlers call. Only the host writes one: a Runner event claiming to be a
+  // progress statement is narration.
   const SENTENCE = '正在核对 /etc/secret-looking-path 下的配置';
-  const progress = (
-    mode: InteractionMode,
-    visibility: ProcessVisibility,
-    text = SENTENCE,
-  ) =>
-    projectProgressForWeb(mode, visibility, text, {
+  const progress = (mode: InteractionMode, text = SENTENCE, turnId?: string) =>
+    projectProgressForWeb(mode, text, {
       inputTurnId: 'input-1',
+      turnId,
       sessionId: 'session-1',
     });
 
   test('an assistant workspace shows it as a step and as the status line, unchanged', () => {
-    for (const level of LEVELS) {
-      expect(progress('assistant', level).web).toEqual([
-        {
-          eventType: 'commentary',
-          agentScope: 'main',
-          text: SENTENCE,
-          turnId: 'input-1',
-          inputTurnId: 'input-1',
-          sessionId: 'session-1',
-        },
-        {
-          eventType: 'status',
-          agentScope: 'system',
-          statusText: SENTENCE,
-          summary: SENTENCE,
-          isSynthetic: true,
-          displayLevel: 'primary',
-          turnId: 'input-1',
-          inputTurnId: 'input-1',
-          sessionId: 'session-1',
-        },
-      ]);
-    }
-  });
-
-  test('a proactive workspace shows it as a progress step at every level, and only that', () => {
-    for (const level of LEVELS) {
-      const { step, web } = progress('proactive', level);
-      expect(step).toEqual({
+    // Its events keep the input's id, whatever the Runner's turn is called.
+    expect(progress('assistant', SENTENCE, 'runner-turn').web).toEqual([
+      {
         eventType: 'commentary',
         agentScope: 'main',
         text: SENTENCE,
         turnId: 'input-1',
         inputTurnId: 'input-1',
         sessionId: 'session-1',
-        progress: true,
-      });
-      expect(web).toEqual([step]);
-    }
+      },
+      {
+        eventType: 'status',
+        agentScope: 'system',
+        statusText: SENTENCE,
+        summary: SENTENCE,
+        isSynthetic: true,
+        displayLevel: 'primary',
+        turnId: 'input-1',
+        inputTurnId: 'input-1',
+        sessionId: 'session-1',
+      },
+    ]);
   });
 
-  test('the step is what the trace records, at every level', () => {
-    for (const level of LEVELS) {
-      expect(progress('assistant', level).step.progress).toBeUndefined();
-      expect(progress('proactive', level).step.progress).toBe(true);
-    }
+  test('a proactive workspace shows it as a progress step, on the card of its Runner turn', () => {
+    const { step, web } = progress('proactive', SENTENCE, 'runner-turn');
+    expect(step).toEqual({
+      eventType: 'commentary',
+      agentScope: 'main',
+      text: SENTENCE,
+      turnId: 'runner-turn',
+      inputTurnId: 'input-1',
+      sessionId: 'session-1',
+      progress: true,
+    });
+    expect(web).toEqual([step]);
+    // Before the Runner has said anything, the input's own id.
+    expect(progress('proactive').step.turnId).toBe('input-1');
   });
 
   test('the step and the status line are bounded', () => {
     const long = '长'.repeat(5000);
-    const assistant = progress('assistant', 'full', long);
+    const assistant = progress('assistant', long);
     expect(assistant.step.text).toHaveLength(4000);
     expect(assistant.web[1].statusText).toHaveLength(160);
     expect(assistant.web[1].summary).toHaveLength(500);
-    expect(progress('proactive', 'hidden', long).step.text).toHaveLength(4000);
+    expect(progress('proactive', long).step.text).toHaveLength(4000);
   });
 
-  test('narration is still shown only at full: the gate tells the two apart', () => {
+  test('narration is still shown only at full', () => {
     const narration = event('commentary', { text: SENTENCE });
     expect(proactive('hidden', narration)).toBeNull();
     expect(proactive('activity', narration)).toBeNull();
     expect(proactive('full', narration)).toBe(narration);
+  });
+
+  test('a Runner event that claims to be a progress statement is narration', () => {
+    const claimed = event('commentary', { text: SENTENCE, progress: true });
+    expect(proactive('hidden', claimed)).toBeNull();
+    expect(proactive('activity', claimed)).toBeNull();
+    const shown = proactive('full', claimed)!;
+    expect(shown.text).toBe(SENTENCE);
+    expect(shown.progress).toBeUndefined();
   });
 
   test('preserves workspace memory write receipts in tool_result while stripping detail', () => {

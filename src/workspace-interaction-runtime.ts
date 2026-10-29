@@ -298,8 +298,9 @@ function withoutModelText(event: StreamEvent): StreamEvent {
  *   `full` also streams the main Agent's and sub-Agents' reasoning summary and
  *   the narration the model wrote before a tool call (`commentary`, which the
  *   host composes from the Runner's text_delta; see process-commentary.ts).
- *   Every level shows a progress statement the Agent sent the user in a Web
- *   turn (a `commentary` marked `progress`, see projectProgressForWeb).
+ *   A progress statement the Agent sent the user in a Web turn (a
+ *   `commentary` marked `progress`) shows at every level, but only the host
+ *   writes one (projectProgressForWeb): here the mark is dropped.
  * - Never, at any level: text_delta itself (the model's own answer text, which
  *   reaches the user only through send_message), usage, memory_recall,
  *   prompt_suggestion, raw_sdk_event, notification and unknown event types.
@@ -326,8 +327,13 @@ export function projectSdkStreamEventForWeb(
     if (isLifecycleStatus(event.statusText)) return event;
     return visibility === 'hidden' ? null : event;
   }
-  // What the Agent told the user mid-turn (see projectProgressForWeb).
-  if (type === 'commentary' && event.progress) return event;
+  // Only the host writes a progress statement (projectProgressForWeb, which
+  // does not come through here). A Runner event that claims to be one is
+  // narration like any other.
+  if (type === 'commentary' && event.progress !== undefined) {
+    const { progress: _progress, ...narration } = event;
+    event = narration;
+  }
   if (visibility === 'hidden') return null;
   // The reasoning summary and the narration before a tool call (written by the
   // host, see process-commentary.ts) are the model's words about its work.
@@ -351,40 +357,49 @@ const MAX_PROGRESS_CHARS = 4000;
  * status line. A proactive turn shows it as a commentary step marked
  * `progress` at every process visibility: it is the Agent speaking to the
  * user, not detail of the process, and the Web folds it into the process once
- * the final lands. It still passes the gate every other event passes.
+ * the final lands.
+ *
+ * `turn.turnId` is the id the turn's Runner events carry (a warm turn's own,
+ * not its input's): the Web starts a new card on a change of it, so a
+ * proactive step carries the same one to land on the card it belongs to.
  */
 export function projectProgressForWeb(
   mode: InteractionMode,
-  visibility: ProcessVisibility,
   text: string,
-  turn: { inputTurnId: string; sessionId?: string },
+  turn: { inputTurnId: string; turnId?: string; sessionId?: string },
 ): { step: StreamEvent; web: StreamEvent[] } {
   const step: StreamEvent = {
     eventType: 'commentary',
     agentScope: 'main',
     text: text.slice(0, MAX_PROGRESS_CHARS),
-    turnId: turn.inputTurnId,
+    // An Assistant turn keeps the input's id it always had.
+    turnId:
+      mode === 'proactive'
+        ? (turn.turnId ?? turn.inputTurnId)
+        : turn.inputTurnId,
     inputTurnId: turn.inputTurnId,
     sessionId: turn.sessionId,
     ...(mode === 'proactive' ? { progress: true } : {}),
   };
-  const web: StreamEvent[] = [];
-  const shown = projectSdkStreamEventForWeb(mode, visibility, step);
-  if (shown) web.push(shown);
-  if (mode === 'assistant') {
-    web.push({
-      eventType: 'status',
-      agentScope: 'system',
-      statusText: text.slice(0, 160),
-      summary: text.slice(0, 500),
-      isSynthetic: true,
-      displayLevel: 'primary',
-      turnId: turn.inputTurnId,
-      inputTurnId: turn.inputTurnId,
-      sessionId: turn.sessionId,
-    });
-  }
-  return { step, web };
+  if (mode === 'proactive') return { step, web: [step] };
+  // An Assistant turn shows everything (the gate passes it unchanged).
+  return {
+    step,
+    web: [
+      step,
+      {
+        eventType: 'status',
+        agentScope: 'system',
+        statusText: text.slice(0, 160),
+        summary: text.slice(0, 500),
+        isSynthetic: true,
+        displayLevel: 'primary',
+        turnId: step.turnId,
+        inputTurnId: turn.inputTurnId,
+        sessionId: turn.sessionId,
+      },
+    ],
+  };
 }
 
 /**
@@ -396,6 +411,26 @@ export function shouldBroadcastTaskAgentStatus(
   visibility: ProcessVisibility,
 ): boolean {
   return mode === 'assistant' || visibility !== 'hidden';
+}
+
+/** How a proactive turn that sent progress ended without a reply. */
+export type ProactiveTurnEnding = 'stopped' | 'steered' | 'failed';
+
+/**
+ * The reply a proactive Web turn that sent progress is given when it ends
+ * without one of its own: the turn's process, with that progress, hangs on it
+ * as on any reply, so the progress stays with the turn after a refresh (an IM
+ * turn's progress is a message of its own already).
+ */
+export function proactiveClosingNote(ending: ProactiveTurnEnding): string {
+  switch (ending) {
+    case 'stopped':
+      return '已停止。';
+    case 'steered':
+      return '已转向新的消息。';
+    case 'failed':
+      return '⚠️ 本轮在给出最终回复前中断，已发出的进展在“处理过程”里。';
+  }
 }
 
 export const PROACTIVE_TAIL_INTERRUPTION_NOTICE =
