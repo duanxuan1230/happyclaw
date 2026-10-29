@@ -8380,6 +8380,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const existing = turnOutputCoordinators.get(inputTurnId);
     if (existing) return existing;
     const coordinator = activeTurnOutputs.bind(mainAdmissionKey, inputTurnId, {
+      // Where this input came from: a Web admission owns a null source.
+      source: resolveOutputChannelReplySource({
+        inputTurnId,
+        initialInputTurnId: lastProcessed.id,
+        initialSourceJid: initialReplySourceImJid,
+        admittedInput: admittedWarmMainInputs.get(inputTurnId),
+      })
+        ? 'im'
+        : 'web',
       onProgress: (text) => {
         const projection = channelStreamingSessionsByInput.get(inputTurnId);
         if (projection?.session.isActive()) {
@@ -12906,17 +12915,22 @@ function startIpcWatcher(): void {
                   authorized,
                   scheduledTask: isTaskIpcMessage,
                   interactionMode: ipcInteractionMode,
-                  // The input's own reply route, the one a separate message
-                  // would take below: none means a Web turn.
-                  turnSource: resolveImRoute({
+                  // The channel the input came from, recorded when its turn
+                  // was bound, and whether its own reply route is still open.
+                  turnSource:
+                    typeof data.inputTurnId === 'string' && data.inputTurnId
+                      ? activeTurnOutputs.sourceOf(
+                          channelTurnScope(sourceGroup, ipcAgentId),
+                          data.inputTurnId,
+                        )
+                      : undefined,
+                  imRouteAvailable: !!resolveImRoute({
                     inputTurnId: data.inputTurnId,
                     ipcAgentId,
                     isHome,
                     chatJid: data.chatJid,
                     sourceGroup,
-                  })
-                    ? 'im'
-                    : 'web',
+                  }),
                 },
                 activeTurnOutputs,
               );
@@ -12960,7 +12974,9 @@ function startIpcWatcher(): void {
                 messageDeliveryError =
                   hostOutputRoute.reason === 'conflicting_final'
                     ? 'A different final has already sealed this input turn; the second final was not sent.'
-                    : 'Unauthorized message target.';
+                    : hostOutputRoute.reason === 'native_route_unavailable'
+                      ? 'Message could not be delivered: this session is bound to a native channel whose route is currently unavailable.'
+                      : 'Unauthorized message target.';
                 logger.warn(
                   {
                     sourceGroup,
@@ -17986,6 +18002,15 @@ async function processAgentConversation(
     const existing = agentTurnOutputCoordinators.get(inputTurnId);
     if (existing) return existing;
     const coordinator = activeTurnOutputs.bind(agentAdmissionKey, inputTurnId, {
+      // Where this input came from: a Web admission owns a null source.
+      source: resolveOutputChannelReplySource({
+        inputTurnId,
+        initialInputTurnId: lastProcessed.id,
+        initialSourceJid: initialAgentReplySourceImJid,
+        admittedInput: admittedWarmAgentInputs.get(inputTurnId),
+      })
+        ? 'im'
+        : 'web',
       onProgress: (text) => {
         const projection = agentStreamingSessionsByInput.get(inputTurnId);
         if (projection?.session.isActive()) {
