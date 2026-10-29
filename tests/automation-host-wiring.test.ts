@@ -334,7 +334,7 @@ describe('a Runtime Session turn settles its automation run', () => {
       virtualChatJid: SESSION,
       virtualJid: SESSION,
       agentBuilderScope: 'scope',
-      activeAgentBuilderTurns: { clearCompleted: vi.fn() },
+      promoteNextDeliveredBatch: vi.fn(),
       healthyAgentCompletedInputTurns: new Set<string>(),
       agentInputUsageProjection: { complete: vi.fn() },
       agent: { source_kind: agentSourceKind },
