@@ -35,6 +35,8 @@ import {
 import { ProactiveCommentaryRelay } from '../src/process-commentary.js';
 import { TurnTraceTracker } from '../src/turn-trace.js';
 import { resolveContainerOutputInputTurnId } from '../src/channel-output-correlation.js';
+import { buildSubagentCheckpointContext } from '../src/subagent-checkpoint.js';
+import { StreamEventProcessor } from '../container/agent-runner/src/stream-processor.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
@@ -1096,6 +1098,68 @@ describe('main Session interrupt settlement (behavioural)', () => {
     });
     expect(run.card.abort).not.toHaveBeenCalled();
     expect(run.card.complete).toHaveBeenCalled();
+  });
+
+  test('/break: a sub-agent the stop ended is handed back as unfinished on replay', async () => {
+    const run = mainRun('break-subagent');
+    const folder = 'main-break-subagent';
+    const tasks = new Map<string, Record<string, unknown>>();
+    Object.assign(run.globals, {
+      group: { name: 'Main fixture', folder },
+      queryTaskIds: new Set<string>(),
+      nonSubagentTaskIds: new Set<string>(),
+      getAgent: (id: string) => tasks.get(id),
+      createAgent: (row: Record<string, unknown>) =>
+        tasks.set(row.id as string, row),
+      updateAgentInfo: vi.fn(),
+      updateAgentStatus: (id: string, status: string) =>
+        Object.assign(tasks.get(id)!, { status }),
+      pickRunningTaskForNotification: () => undefined,
+      upsertSubagentCheckpoint: db.upsertSubagentCheckpoint,
+      taskInputMessageId: () => run.inputId,
+      broadcastAgentStatus: vi.fn(),
+    });
+    // The runner's processor turns the SDK frames into what the Host reads.
+    const frames: unknown[] = [];
+    const processor = new StreamEventProcessor(
+      (output) => frames.push({ ...output, inputTurnId: run.inputId }),
+      () => {},
+    );
+    const forward = async () => {
+      for (const frame of frames.splice(0)) await run.output(frame);
+    };
+    processor.processSystemMessage({
+      type: 'system',
+      subtype: 'task_started',
+      task_id: 'sdk-task-1',
+      tool_use_id: 'toolu_audit',
+      description: 'Audit the deploy scripts',
+      task_type: 'local_agent',
+    });
+    await forward();
+    await run.interrupted();
+    // stopTask ends the sub-agent; the SDK reports it as stopped.
+    processor.processSystemMessage({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'sdk-task-1',
+      tool_use_id: 'toolu_audit',
+      status: 'stopped',
+      summary: 'Stopped by the user',
+    });
+    await forward();
+
+    const rows = db.listSubagentCheckpointsForInputs(
+      folder,
+      run.globals.chatJid,
+      [run.inputId],
+    );
+    expect(rows).toMatchObject([{ taskId: 'toolu_audit', status: 'stopped' }]);
+    const handedBack = buildSubagentCheckpointContext(rows)!;
+    expect(handedBack).toMatchObject({ completed: 0, unfinished: 1 });
+    expect(handedBack.context).toContain(
+      '<subagent_task id="toolu_audit" state="unfinished" description="Audit the deploy scripts">\n<note>上次运行中被停止：Stopped by the user</note>',
+    );
   });
 });
 

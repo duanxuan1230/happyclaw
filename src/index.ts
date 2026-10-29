@@ -22567,7 +22567,9 @@ function handleCardInterrupt(
     return { ok: false, message: '你没有中断这个会话的权限。' };
   }
   const sessionJid = cardSessionJid(chatJid, sourceChatJid);
-  const interrupted = sessionJid ? queue.interruptQuery(sessionJid) : false;
+  const interrupted = sessionJid
+    ? queue.interruptQuery(sessionJid, undefined, 'stop')
+    : false;
   if (!interrupted) {
     return { ok: false, message: '当前回复已经结束，无需中断。' };
   }
@@ -22718,7 +22720,7 @@ function interruptActiveSessionRun(
 ): { activeRunId: string | null; interrupted: boolean } {
   const activeRunId = queue.getActiveQueryId(targetJid) ?? null;
   const interrupted = activeRunId
-    ? queue.interruptQuery(targetJid, activeRunId)
+    ? queue.interruptQuery(targetJid, activeRunId, 'stop')
     : false;
   if (interrupted) {
     void clearTrackedProcessingIndicators(targetJid);

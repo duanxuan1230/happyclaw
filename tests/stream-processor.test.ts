@@ -925,7 +925,7 @@ describe('StreamEventProcessor main tool results', () => {
       description: 'Investigate',
       task_type: 'local_agent',
     });
-    expect(processor.getActiveSdkTaskIds()).toEqual(['sdk-task-42']);
+    expect(processor.getActiveSubAgentTaskIds()).toEqual(['sdk-task-42']);
 
     processor.processSubAgentMessage({
       type: 'assistant',
@@ -951,6 +951,6 @@ describe('StreamEventProcessor main tool results', () => {
       status: 'completed',
       summary: 'done',
     });
-    expect(processor.getActiveSdkTaskIds()).toEqual([]);
+    expect(processor.getActiveSubAgentTaskIds()).toEqual([]);
   });
 });
