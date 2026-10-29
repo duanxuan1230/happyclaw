@@ -111,6 +111,11 @@ export class TurnTraceAccumulator {
     return !this.stepsFailed && this.steps.hasProgress;
   }
 
+  /** Those progress statements, in order. */
+  progress(): CarriedProgress[] {
+    return this.stepsFailed ? [] : this.steps.progressSteps();
+  }
+
   get isEmpty(): boolean {
     return (
       !this.thinking.text &&
@@ -274,6 +279,30 @@ export class TurnTraceTracker {
     return this.turns.get(inputId)?.hasProgress ?? false;
   }
 
+  /** The progress statements the open turn of `inputId` holds, in order. */
+  progressOf(inputId: string): CarriedProgress[] {
+    return this.turns.get(inputId)?.progress() ?? [];
+  }
+
+  /**
+   * Progress an earlier attempt of `inputId`'s turn sent (see
+   * ProactiveProgressCarry): the turn records it as its own.
+   */
+  seedProgress(inputId: string, progress: readonly CarriedProgress[]): void {
+    for (const entry of progress) {
+      this.observeProgress(
+        inputId,
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: entry.text,
+          progress: true,
+        },
+        entry.at,
+      );
+    }
+  }
+
   /** The open turns that hold a progress statement, oldest first. */
   inputsWithProgress(): string[] {
     return [...this.turns]
@@ -351,6 +380,55 @@ export class TurnTraceTracker {
       );
       return false;
     }
+  }
+}
+
+/** A progress statement, as one attempt of a turn hands it to the next. */
+export interface CarriedProgress {
+  at: number;
+  text: string;
+}
+
+/** Inputs whose progress waits for a later attempt at once. */
+const MAX_CARRIED_INPUTS = 64;
+/** Progress statements one input keeps; the newest win. */
+const MAX_CARRIED_PROGRESS = 50;
+
+/**
+ * Progress a proactive turn sent before an attempt of it failed, waiting for
+ * the attempt that runs it again (a retried refusal or failure), by chat and
+ * input message. The turn gets one closing note, or its final, when it ends
+ * for good, and that one carries the progress of every attempt.
+ */
+export class ProactiveProgressCarry {
+  private readonly held = new Map<string, CarriedProgress[]>();
+
+  private key(chatJid: string, messageId: string): string {
+    return `${chatJid}\0${messageId}`;
+  }
+
+  hold(
+    chatJid: string,
+    messageId: string,
+    progress: readonly CarriedProgress[],
+  ): void {
+    if (progress.length === 0) return;
+    const key = this.key(chatJid, messageId);
+    const kept = [...(this.held.get(key) ?? []), ...progress];
+    this.held.delete(key);
+    this.held.set(key, kept.slice(-MAX_CARRIED_PROGRESS));
+    boundTo(this.held, MAX_CARRIED_INPUTS);
+  }
+
+  /** What waits for these input messages, in order; it is handed over once. */
+  take(chatJid: string, messageIds: readonly string[]): CarriedProgress[] {
+    const taken: CarriedProgress[] = [];
+    for (const messageId of messageIds) {
+      const key = this.key(chatJid, messageId);
+      taken.push(...(this.held.get(key) ?? []));
+      this.held.delete(key);
+    }
+    return taken.sort((a, b) => a.at - b.at);
   }
 }
 

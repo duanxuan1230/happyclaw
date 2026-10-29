@@ -6,7 +6,8 @@ import { channelTurnScope } from '../src/channel-turn-registry.js';
 import { routeHostIpcOutput } from '../src/host-ipc-output-router.js';
 import type { StreamEvent } from '../src/stream-event.types.js';
 import { ActiveTurnOutputRegistry } from '../src/turn-output-coordinator.js';
-import { TurnTraceTracker } from '../src/turn-trace.js';
+import { hasUnfinishedProactiveOutput } from '../src/turn-outcome.js';
+import { ProactiveProgressCarry, TurnTraceTracker } from '../src/turn-trace.js';
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 import {
   proactiveClosingNote,
@@ -251,6 +252,8 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
       sendMessage,
       proactiveClosingNote,
       logger: { warn: vi.fn() },
+      // No attempt follows: each ending here is the turn's last.
+      queue: { willRetryAfterFailure: () => false },
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('persistProactiveTurnTrace', 'processGroupMessages');
@@ -376,6 +379,221 @@ describe('a proactive turn that sent progress and ends without a reply', () => {
     );
     expect(stored).toHaveLength(1);
   });
+});
+
+describe('a proactive turn refused for lack of a final, and run again', () => {
+  // Every attempt is a run of its own (a fresh tracker); what an attempt that
+  // will be retried sent waits in the one carry the host keeps for all runs.
+  const carry = new ProactiveProgressCarry();
+  const messages: Array<{ id: string; turnId: string; content: string }> = [];
+  const stored: StoredTrace[] = [];
+
+  function attempt(willRetry: boolean) {
+    const turnTraces = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'hidden',
+      store: (row) => {
+        stored.push(row);
+      },
+    });
+    const globals: Record<string, unknown> = {
+      turnTraces,
+      proactiveProgressCarry: carry,
+      queue: { willRetryAfterFailure: () => willRetry },
+      chatJid: CHAT_JID,
+      missedMessages: [{ id: 'm1' }],
+      lastProcessed: { id: 'm1' },
+      interactionMode: 'proactive',
+      admittedWarmMainInputs: new Map(),
+      channelTurnRuntimes: new Map(),
+      hasUnfinishedProactiveOutput,
+      // The attempt sent progress and no final.
+      channelNonTerminalDeliveryAckByInput: new Map([['m1', true]]),
+      channelPhysicalDeliveryAckByInput: new Map(),
+      clearProcessingIndicatorForInput: vi.fn(),
+      logger: { warn: vi.fn(), error: vi.fn() },
+      activeSessionId: 'sdk-session',
+      resolveIpcOutputWorkspaceJid: () => null,
+      getLastAgentMessageIdForTurn: (_jid: string, turnId: string) =>
+        messages.filter((m) => m.turnId === turnId).at(-1)?.id,
+      announceTurnTrace: vi.fn(),
+      proactiveClosingNote,
+      sendMessage: async (
+        jid: string,
+        content: string,
+        opts: {
+          turnTrace?: { tracker: TurnTraceTracker; inputId: string };
+          messageMeta?: { turnId?: string };
+        },
+      ) => {
+        const id = `note-${messages.length + 1}`;
+        messages.push({ id, turnId: opts.messageMeta!.turnId!, content });
+        opts.turnTrace?.tracker.persist({
+          chatJid: jid,
+          inputId: opts.turnTrace.inputId,
+          turnId: opts.messageMeta?.turnId,
+        });
+        return id;
+      },
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    for (const name of [
+      'takeCarriedProgress',
+      'persistProactiveTurnTrace',
+      'keepProactiveProgress',
+      'completeChannelRuntimesForOutput',
+    ]) {
+      harness.install(name, 'processGroupMessages');
+    }
+    (globals.takeCarriedProgress as () => void)();
+    return {
+      progress: (text: string, at: number) =>
+        turnTraces.observeProgress(
+          'm1',
+          { eventType: 'commentary', agentScope: 'main', text, progress: true },
+          at,
+        ),
+      // The turn's result arrives without a final: the host refuses it.
+      refuse: () =>
+        (
+          globals.completeChannelRuntimesForOutput as (
+            result: Record<string, unknown>,
+          ) => Promise<boolean>
+        )({ inputTurnCompleted: true, inputTurnId: 'm1' }),
+      final: () => {
+        messages.push({ id: 'final-1', turnId: 'm1', content: '结论' });
+        (globals.persistProactiveTurnTrace as (inputId: string) => void)('m1');
+      },
+    };
+  }
+  const notes = () =>
+    messages.filter((m) => m.content === proactiveClosingNote('failed'));
+  const lastTrace = () =>
+    (JSON.parse(stored.at(-1)!.stepsJson!) as Array<{ text?: string }>).map(
+      (step) => step.text,
+    );
+
+  test('refused, retried, refused, given up: one closing note with all the progress', async () => {
+    messages.length = 0;
+    stored.length = 0;
+    const first = attempt(true);
+    first.progress('第一次：先看日志', 1_000);
+    expect(await first.refuse()).toBe(false);
+    expect(notes()).toHaveLength(0);
+    const second = attempt(true);
+    second.progress('第二次：换个方向', 2_000);
+    expect(await second.refuse()).toBe(false);
+    expect(notes()).toHaveLength(0);
+    const last = attempt(false);
+    last.progress('第三次：还是不行', 3_000);
+    expect(await last.refuse()).toBe(false);
+    expect(notes()).toHaveLength(1);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].turnId).toBe('m1');
+    expect(lastTrace()).toEqual([
+      '第一次：先看日志',
+      '第二次：换个方向',
+      '第三次：还是不行',
+    ]);
+  });
+
+  test('refused, then retried with a final: no closing note, the progress on the final', async () => {
+    messages.length = 0;
+    stored.length = 0;
+    const first = attempt(true);
+    first.progress('先看日志', 1_000);
+    await first.refuse();
+    const retry = attempt(true);
+    retry.progress('找到了', 2_000);
+    retry.final();
+    expect(notes()).toHaveLength(0);
+    expect(messages.map((m) => m.id)).toEqual(['final-1']);
+    expect(stored).toHaveLength(1);
+    expect(lastTrace()).toEqual(['先看日志', '找到了']);
+  });
+});
+
+test('a session turn refused and retried, then given up, gets one closing note', () => {
+  const carry = new ProactiveProgressCarry();
+  const stored: StoredTrace[] = [];
+  const storeMessageDirect = vi.fn(() => 'note-s');
+  function attempt(willRetry: boolean) {
+    const turnTraces = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'hidden',
+      store: (row) => {
+        stored.push(row);
+      },
+    });
+    const globals: Record<string, unknown> = {
+      turnTraces,
+      proactiveProgressCarry: carry,
+      queue: { willRetryAfterFailure: () => willRetry },
+      virtualChatJid: `${CHAT_JID}#agent:${AGENT_ID}`,
+      agentId: AGENT_ID,
+      missedMessages: [{ id: 'm1' }],
+      lastProcessed: { id: 'm1' },
+      admittedWarmAgentInputs: new Map(),
+      currentAgentSessionId: 'sdk-session',
+      getLastAgentMessageIdForTurn: () => undefined,
+      announceTurnTrace: vi.fn(),
+      ensureChatExists: vi.fn(),
+      storeMessageDirect,
+      broadcastNewMessage: vi.fn(),
+      proactiveClosingNote,
+      logger: { warn: vi.fn() },
+      ASSISTANT_NAME: 'HappyClaw',
+      crypto: { randomUUID: () => 'uuid-1' },
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    for (const name of [
+      'takeCarriedProgress',
+      'persistProactiveTurnTrace',
+      'closeProactiveTurn',
+      'keepProactiveProgress',
+    ]) {
+      harness.install(name, 'processAgentConversation');
+    }
+    (globals.takeCarriedProgress as () => void)();
+    return { turnTraces, globals };
+  }
+  const first = attempt(true);
+  first.turnTraces.observeProgress(
+    'm1',
+    {
+      eventType: 'commentary',
+      agentScope: 'main',
+      text: '先看',
+      progress: true,
+    },
+    1_000,
+  );
+  (first.globals.keepProactiveProgress as (id: string, e: string) => void)(
+    'm1',
+    'failed',
+  );
+  expect(storeMessageDirect).not.toHaveBeenCalled();
+  const last = attempt(false);
+  last.turnTraces.observeProgress(
+    'm1',
+    {
+      eventType: 'commentary',
+      agentScope: 'main',
+      text: '再看',
+      progress: true,
+    },
+    2_000,
+  );
+  (last.globals.keepProactiveProgress as (id: string, e: string) => void)(
+    'm1',
+    'failed',
+  );
+  expect(storeMessageDirect).toHaveBeenCalledOnce();
+  expect(
+    (JSON.parse(stored[0].stepsJson!) as Array<{ text?: string }>).map(
+      (step) => step.text,
+    ),
+  ).toEqual(['先看', '再看']);
 });
 
 describe('the reply route a progress statement follows', () => {

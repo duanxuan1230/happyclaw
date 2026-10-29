@@ -584,7 +584,7 @@ import {
 } from './billing.js';
 import { recordUsageEvent } from './usage-service.js';
 import { InputUsageProjection } from './input-usage-projection.js';
-import { TurnTraceTracker } from './turn-trace.js';
+import { ProactiveProgressCarry, TurnTraceTracker } from './turn-trace.js';
 import {
   AgentProfile,
   ChannelMessageMeta,
@@ -1486,6 +1486,8 @@ const activeIpcReplyTurnTrackers = new Map<string, IpcReplyTurnTracker>();
 // safety invariant rather than a product policy or quota for the model to spend.
 const MAX_REPLIES_PER_TURN = 20;
 const activeTurnOutputs = new ActiveTurnOutputRegistry(MAX_REPLIES_PER_TURN);
+/** Progress of proactive turns whose failed attempt will run again. */
+const proactiveProgressCarry = new ProactiveProgressCarry();
 
 /**
  * Per-turn reply fuse shared by every user-visible IPC delivery path.
@@ -8258,6 +8260,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     mode: interactionMode,
     getVisibility: resolveProcessVisibility,
   });
+  // What earlier attempts of these inputs sent before they failed and were
+  // retried: this attempt's reply, or closing note, carries it too.
+  const takeCarriedProgress = (): void =>
+    turnTraces.seedProgress(
+      lastProcessed.id,
+      proactiveProgressCarry.take(
+        chatJid,
+        missedMessages.map((message) => message.id),
+      ),
+    );
+  takeCarriedProgress();
   // The narration before a tool call, for a proactive Workspace at `full`.
   const commentaryRelay = new ProactiveCommentaryRelay();
   // A proactive turn has no single SDK reply to carry its trace. Hang it on the
@@ -8281,9 +8294,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // steered away, failed, or refused to settle without a final) keeps that
   // progress with the turn: a short closing note becomes its reply, and the
   // turn's process hangs on it as on any reply.
+  // A failed attempt that will run again writes nothing: its progress waits
+  // for the attempt that ends the turn for good (`final` says this is one).
   const keepProactiveProgress = async (
     inputId: string,
     ending: ProactiveTurnEnding,
+    final = false,
   ): Promise<void> => {
     if (!turnTraces.holdsProgress(inputId)) return;
     try {
@@ -8292,6 +8308,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
       if (replied) {
         persistProactiveTurnTrace(inputId);
+        return;
+      }
+      if (
+        !final &&
+        ending === 'failed' &&
+        queue.willRetryAfterFailure(chatJid)
+      ) {
+        proactiveProgressCarry.hold(
+          chatJid,
+          admittedWarmMainInputs.get(inputId)?.inputMessageId ?? inputId,
+          turnTraces.progressOf(inputId),
+        );
+        turnTraces.discard(inputId);
         return;
       }
       await sendMessage(chatJid, proactiveClosingNote(ending), {
@@ -9004,6 +9033,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     scheduledError = text,
   ): Promise<true> => {
     const inputTurnId = ipcReplyTurnTracker.inputTurnId;
+    // No attempt follows: progress a failed attempt left for the next one
+    // closes the turn now.
+    takeCarriedProgress();
+    await keepProactiveProgress(lastProcessed.id, 'failed', true);
     sendSystemMessage(chatJid, webType, text);
     await projectCurrentScheduledGroupTerminal('failed', scheduledError);
     commitCursor();
@@ -17930,6 +17963,17 @@ async function processAgentConversation(
     mode: interactionMode,
     getVisibility: resolveProcessVisibility,
   });
+  // What earlier attempts of these inputs sent before they failed and were
+  // retried (see the main session).
+  const takeCarriedProgress = (): void =>
+    turnTraces.seedProgress(
+      lastProcessed.id,
+      proactiveProgressCarry.take(
+        virtualChatJid,
+        missedMessages.map((message) => message.id),
+      ),
+    );
+  takeCarriedProgress();
   const commentaryRelay = new ProactiveCommentaryRelay();
   const persistProactiveTurnTrace = (inputId: string): void => {
     const lastMessageId = getLastAgentMessageIdForTurn(virtualChatJid, inputId);
@@ -17963,6 +18007,16 @@ async function processAgentConversation(
   ): void => {
     if (getLastAgentMessageIdForTurn(virtualChatJid, inputId)) {
       persistProactiveTurnTrace(inputId);
+      return;
+    }
+    // A failed attempt that will run again: its progress waits for the last.
+    if (ending === 'failed' && queue.willRetryAfterFailure(virtualChatJid)) {
+      proactiveProgressCarry.hold(
+        virtualChatJid,
+        admittedWarmAgentInputs.get(inputId)?.inputMessageId ?? inputId,
+        turnTraces.progressOf(inputId),
+      );
+      turnTraces.discard(inputId);
       return;
     }
     const content = proactiveClosingNote(ending);
