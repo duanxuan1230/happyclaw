@@ -510,16 +510,19 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
   `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
   或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
   仓库根目录的 `.worktreeinclude` 列出要复制进新 worktree 的被忽略文件（如 `.env`）；
-  匹配列表超过 256 KB（此时一个都不复制）、超过 100 个文件或超过单文件 10 MB / 合计
-  50 MB 时少复制的部分会记 warn 日志，创建响应的 `worktree.include_incomplete` 为
-  `{"reason": "list_truncated" | "file_limit" | "size_limit", "copied_files"}`，完整复制时为
-  `null`（`GET` 列表不带该字段）。
+  该文件超过 64 KB 或匹配列表超过 256 KB（此时一个都不复制）、超过 100 个文件或超过
+  单文件 10 MB / 合计 50 MB 时少复制的部分会记 warn 日志，创建响应的
+  `worktree.include_incomplete` 为 `{"reason": "include_file_too_large" | "list_truncated" |
+"file_limit" | "size_limit", "copied_files", "skipped_files"}`（`skipped_files` 是最多 5 个
+  未复制的路径，前两种原因下为空），完整复制时为 `null`（`GET` 列表不带该字段）。Web 在
+  新建会话后据此弹出不阻塞的提示。
 - 删除带 worktree 的会话会移除 worktree 目录、保留分支。可能丢失内容时返回 409
-  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules"}]}`：
+  `{"code": "WORKTREE_DIRTY", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules", "embedded_repos"}]}`：
   有未提交改动（含未跟踪文件）；目录还在但状态读不出（`.git` 丢失或 git 失败，按有改动
-  处理）；或初始化过子模块（子模块的本地提交存放在 worktree 的管理目录，会随之删除）。
-  嵌入的仓库或子模块指向的提交有变化（已暂存或未暂存）计为改动，其内部未提交的内容
-  不计入（检查不会在其中启动 git）。被 `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。worktree 被
+  处理）；初始化过子模块（子模块的本地提交存放在 worktree 的管理目录，会随之删除）；或
+  索引里的 gitlink 在 worktree 中有自己的 `.git` 目录（嵌入的 git 仓库，其中的提交和改动
+  只存在 worktree 里）。嵌入的仓库或子模块指向的提交有变化（已暂存或未暂存）计为改动；
+  检查只读索引和文件系统，不会在嵌入的仓库中启动 git。被 `.gitignore` 忽略的文件不计入改动。带 `?force_worktree=true` 确认后才移除。worktree 被
   标为 `broken` 后，目录恢复时（下次运行或列出会话时重新检查）回到 `active`。删除工作区和 `clear-history` 同理（409 相同），
   确认参数为 `?force_worktrees=true`。工作区有 worktree 会话时 `PATCH` 不能切换到 Docker 执行
   （409 `WORKTREE_SESSIONS_EXIST`）。最后一个 worktree 移除后，空的

@@ -905,12 +905,19 @@ export interface SessionWorktreeInfo {
 }
 
 /**
- * `.worktreeinclude` matched more than its caps let through: the matched list
- * outgrew 256 KB (nothing copied), or the 100-file or size caps stopped it.
+ * `.worktreeinclude` matched more than its caps let through. Nothing was
+ * copied when the include file is over 64 KB or the matched list over 256 KB;
+ * otherwise the 100-file or size caps stopped the copy.
  */
 export interface WorktreeIncludeIncomplete {
-  reason: 'list_truncated' | 'file_limit' | 'size_limit';
+  reason:
+    | 'include_file_too_large'
+    | 'list_truncated'
+    | 'file_limit'
+    | 'size_limit';
   copied_files: number;
+  /** Up to five matched paths that were not copied (file and size caps). */
+  skipped_files: string[];
 }
 
 export interface ImContextBinding {

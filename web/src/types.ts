@@ -412,6 +412,19 @@ export interface SessionWorktreeInfo {
   /** `broken`: the checkout is missing or damaged; runs fail until deleted. */
   status: 'active' | 'broken';
   broken_reason: string | null;
+  /** Creation response only: what `.worktreeinclude` could not copy. */
+  include_incomplete?: WorktreeIncludeIncomplete | null;
+}
+
+export interface WorktreeIncludeIncomplete {
+  reason:
+    | 'include_file_too_large'
+    | 'list_truncated'
+    | 'file_limit'
+    | 'size_limit';
+  copied_files: number;
+  /** Up to five matched paths that were not copied. */
+  skipped_files: string[];
 }
 
 export interface AvailableImGroup {

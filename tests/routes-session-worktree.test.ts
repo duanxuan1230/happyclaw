@@ -257,11 +257,15 @@ describe('creating a session with its own worktree', () => {
     expect(created.body.session.worktree.include_incomplete).toEqual({
       reason: 'file_limit',
       copied_files: 100,
+      skipped_files: [expect.stringMatching(/^env\/\d+\.env$/)],
     });
     const record = store.getSessionWorktree(created.body.session.id)!;
     expect(fs.readdirSync(path.join(record.worktree_path, 'env'))).toHaveLength(
       100,
     );
+    const [skipped] = created.body.session.worktree.include_incomplete
+      .skipped_files as string[];
+    expect(fs.existsSync(path.join(record.worktree_path, skipped))).toBe(false);
     // Only the creation response carries it.
     const listed = await call(agentRoutes, `/${enc(jid)}/sessions`);
     expect(
@@ -634,6 +638,19 @@ describe('deleting worktree sessions', () => {
       { session_id: sessionId, changed_files: 1 },
     ]);
     expect(db.getAgent(sessionId)).toBeDefined();
+    expect(fs.existsSync(path.join(nested, '.git'))).toBe(true);
+
+    // Committed and unchanged: the nested history still lives in the worktree.
+    git(worktree.worktree_path, 'add', 'nested');
+    git(worktree.worktree_path, 'commit', '-qm', 'bump');
+    const committed = await deleteSession();
+    expect(committed.status).toBe(409);
+    expect(committed.body).toMatchObject({
+      error: expect.stringContaining('包含嵌入的 git 仓库'),
+      dirty_worktrees: [
+        { session_id: sessionId, changed_files: 0, embedded_repos: true },
+      ],
+    });
     expect(fs.existsSync(path.join(nested, '.git'))).toBe(true);
   });
 

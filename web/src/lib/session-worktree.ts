@@ -1,5 +1,6 @@
 import type { ApiError } from '../api/client';
 import { confirmDialog } from '../stores/confirm';
+import type { WorktreeIncludeIncomplete } from '../types';
 
 /** What removing a session's worktree would lose (409 WORKTREE_DIRTY). */
 export interface WorktreeDirtyInfo {
@@ -9,6 +10,8 @@ export interface WorktreeDirtyInfo {
   unreadable?: boolean;
   /** It has initialized submodules, whose local commits go with it. */
   submodules?: boolean;
+  /** It holds an embedded git repository whose commits go with it. */
+  embeddedRepos?: boolean;
 }
 
 /** Said wherever a worktree is about to be removed. */
@@ -37,11 +40,13 @@ export function dirtyWorktreesFromError(
       changed_files?: unknown;
       unreadable?: unknown;
       submodules?: unknown;
+      embedded_repos?: unknown;
     }) => ({
       branch: String(item.branch ?? ''),
       changedFiles: Number(item.changed_files ?? 0),
       ...(item.unreadable === true ? { unreadable: true } : {}),
       ...(item.submodules === true ? { submodules: true } : {}),
+      ...(item.embedded_repos === true ? { embeddedRepos: true } : {}),
     }),
   );
 }
@@ -65,6 +70,9 @@ export function confirmDiscardWorktreeChanges(
     ...(dirty.some((item) => item.submodules)
       ? ['有已初始化的子模块，子模块中的本地提交会随 worktree 一起丢失']
       : []),
+    ...(dirty.some((item) => item.embeddedRepos)
+      ? ['包含嵌入的 git 仓库，删除会一并删除其中的提交和改动']
+      : []),
   ];
   return confirmDialog({
     title: '丢弃未提交的改动？',
@@ -72,4 +80,24 @@ export function confirmDiscardWorktreeChanges(
     confirmText,
     variant: 'danger',
   });
+}
+
+/**
+ * What a new worktree is missing from `.worktreeinclude` and why, for the
+ * notice shown after the session is created.
+ */
+export function describeIncludeIncomplete(
+  incomplete: WorktreeIncludeIncomplete,
+): string {
+  const why = {
+    include_file_too_large:
+      '.worktreeinclude 文件超过 64 KB，未读取，没有复制任何文件',
+    list_truncated: '匹配的文件列表超过 256 KB，没有复制任何文件',
+    file_limit: `匹配的文件超过 100 个，只复制了 ${incomplete.copied_files} 个`,
+    size_limit: `有文件超过 10 MB 或合计超过 50 MB，这些文件没有复制（已复制 ${incomplete.copied_files} 个）`,
+  }[incomplete.reason];
+  const skipped = incomplete.skipped_files.length
+    ? `未复制的文件包括：${incomplete.skipped_files.join('、')}。`
+    : '';
+  return `${why}。${skipped}需要时请从主仓库手动复制到 worktree。`;
 }

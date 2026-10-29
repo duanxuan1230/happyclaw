@@ -4,6 +4,7 @@ import { useChatStore } from '../stores/chat';
 import { confirmDialog } from '../stores/confirm';
 import {
   confirmDiscardWorktreeChanges,
+  describeIncludeIncomplete,
   WORKTREE_IGNORED_FILES_NOTE,
 } from '../lib/session-worktree';
 import type { AgentInfo } from '../types';
@@ -34,6 +35,12 @@ export function useSessionActions() {
         if (!agent) {
           toast.error(useChatStore.getState().error || '创建 Web 会话失败');
           return null;
+        }
+        const incomplete = agent.worktree?.include_incomplete;
+        if (incomplete) {
+          toast.warning('部分 .worktreeinclude 文件没有复制到新 worktree', {
+            description: describeIncludeIncomplete(incomplete),
+          });
         }
         return agent;
       } finally {
