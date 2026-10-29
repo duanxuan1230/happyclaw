@@ -22,6 +22,8 @@ import { useNewConversation } from '../../hooks/useNewConversation';
 import { CommandPaletteHost } from '../command/CommandPaletteHost';
 import { useGlobalStreamSubscriptions } from '../../hooks/useStreamSubscriptions';
 import { useUsageLimitWaitSubscription } from '../../stores/usage-limit-waits';
+import { useAutomationSubscription } from '../../stores/automations';
+import { AutomationFormHost } from '../automations/AutomationFormHost';
 
 export function AppLayout() {
   const location = useLocation();
@@ -120,6 +122,8 @@ export function AppLayout() {
   useGlobalStreamSubscriptions();
   // Usage-limit waits, so a Session shows when its parked input goes on.
   useUsageLimitWaitSubscription();
+  // Automations feed the sidebar tree and the chat header, not only their page.
+  useAutomationSubscription();
 
   // Message deletion is a durable server mutation. Apply it globally so a
   // second tab/device cannot retain a deleted main or Runtime Session bubble.
@@ -149,14 +153,10 @@ export function AppLayout() {
     };
   }, []);
 
-  // 监听 group_created（定时任务工作区创建），刷新侧边栏和任务列表
+  // 监听 group_created（其他标签页或渠道新建了工作区），刷新侧边栏
   useEffect(() => {
     const unsub = wsManager.on('group_created', () => {
       useGroupsStore.getState().loadGroups();
-      // Also refresh tasks — workspace_folder may have been populated
-      import('../../stores/tasks').then((m) =>
-        m.useTasksStore.getState().loadTasks(),
-      );
     });
     return () => {
       unsub();
@@ -232,6 +232,7 @@ export function AppLayout() {
 
           {isPhone ? <NavDrawer /> : !hideMobileTabBar && <BottomTabBar />}
           <CommandPaletteHost />
+          <AutomationFormHost />
         </div>
       </TooltipProvider>
     </MotionProvider>

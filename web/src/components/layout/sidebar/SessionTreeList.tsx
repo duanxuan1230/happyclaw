@@ -1,9 +1,10 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useMemo, useState, type ReactNode } from 'react';
 import { AnimatePresence, m } from 'motion/react';
-import { Link2, Search, Trash2 } from 'lucide-react';
+import { ChevronRight, Link2, Play, Search, Timer, Trash2 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import { useShellStore } from '../../../stores/shell';
+import { useAutomationsStore } from '../../../stores/automations';
 import { useSessionActions } from '../../../hooks/useSessionActions';
 import {
   chatHref,
@@ -14,10 +15,22 @@ import {
   formatSessionTime,
   isNativeManagedSession,
   messagePreview,
+  partitionAutomationSessions,
   sessionActivityAt,
+  type AutomationSessionGroup,
 } from '../../../lib/session-presentation';
+import { sessionJidOf } from '../../../lib/session-jid';
+import type { Automation } from '../../../lib/automation';
 import type { AgentInfo, SessionWorktreeInfo } from '../../../types';
 import { WorktreeBranchTag } from '../../chat/WorktreeBranchTag';
+import {
+  AutomationMenuItems,
+  BoundAutomationMark,
+  UnreadDot,
+  useAutomationGroup,
+  useBoundAutomations,
+} from '../../automations/AutomationSessionBits';
+import { runAutomationNow } from '../../automations/automation-actions';
 import type { GroupEntry } from '../../../utils/group-utils';
 import { sidebarRowClass } from './SidebarItem';
 import { RowMenu, revealOnRowHover, rowIconButtonClass } from './WorkspaceTree';
@@ -30,6 +43,7 @@ import {
 
 const INITIAL_VISIBLE = 8;
 const SEARCH_THRESHOLD = 8;
+const NO_AUTOMATIONS: Automation[] = [];
 
 interface SessionTreeListProps {
   group: GroupEntry;
@@ -58,6 +72,8 @@ export const SessionTreeList = memo(function SessionTreeList({
     group.jid,
   );
   const requestBinding = useShellStore((s) => s.requestBinding);
+  const openCreateAutomation = useAutomationsStore((s) => s.openCreateForm);
+  const boundTo = useBoundAutomations(group.jid);
   const { deleteSession } = useSessionActions();
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [query, setQuery] = useState('');
@@ -80,18 +96,67 @@ export const SessionTreeList = memo(function SessionTreeList({
         : null,
     [sessions, searching],
   );
-  const filtered = searchText
-    ? sessions.filter((session) =>
-        searchText.get(session.id)?.includes(normalizedQuery),
-      )
-    : sessions;
-  const visible = filtered.slice(0, visibleCount);
+  const filtered = useMemo(
+    () =>
+      searchText
+        ? sessions.filter((session) =>
+            searchText.get(session.id)?.includes(normalizedQuery),
+          )
+        : sessions,
+    [sessions, searchText, normalizedQuery],
+  );
+  // Sessions an automation opened sit in its group, not in the flat list.
+  const { groups: automationGroups, others } = useMemo(
+    () => partitionAutomationSessions(filtered),
+    [filtered],
+  );
+  const visible = others.slice(0, visibleCount);
   const mainLabel = group.is_my_home ? '直接对话' : '当前对话';
 
   // Binding lives in ChatView; open the workspace first so it can react.
   const openBinding = (target: string) => {
     if (!isCurrent) navigate(chatHref(group.folder));
     requestBinding(group.jid, target);
+  };
+  const createAutomationFrom = (sessionId: string | null) =>
+    openCreateAutomation({
+      workspaceJid: group.jid,
+      targetSessionJid: sessionJidOf(group.jid, sessionId),
+    });
+
+  const renderSession = (session: AgentInfo) => {
+    const nativeManaged = isNativeManagedSession(session);
+    return (
+      <SessionRow
+        asListItem={false}
+        name={session.name || '新会话'}
+        active={isCurrent && activeSessionId === session.id}
+        running={session.status === 'running'}
+        titleGenerating={session.title_generating}
+        linked={(session.linked_im_groups?.length ?? 0) > 0}
+        worktree={session.worktree}
+        automations={boundTo(session)}
+        time={formatSessionTime(sessionActivityAt(session))}
+        onSelect={() => openWorkspaceSession(navigate, group, session.id)}
+        onDelete={
+          canModify && !nativeManaged
+            ? () => deleteSession(group.jid, session.id, openBinding)
+            : undefined
+        }
+        deleteLabel={`删除${session.name || '新会话'}`}
+        menuLabel={`${session.name}的更多操作`}
+        menu={
+          canModify && !nativeManaged ? (
+            <SessionMenuItems
+              onBind={() => openBinding(session.id)}
+              onCreateAutomation={() => createAutomationFrom(session.id)}
+              onRename={() => setRenameTarget(session)}
+              onDelete={() => deleteSession(group.jid, session.id, openBinding)}
+            />
+          ) : undefined
+        }
+      />
+    );
   };
 
   return (
@@ -123,71 +188,63 @@ export const SessionTreeList = memo(function SessionTreeList({
         <SessionRow
           name={mainLabel}
           active={isCurrent && activeSessionId === null}
+          automations={boundTo(null)}
           onSelect={() => openWorkspaceSession(navigate, group, null)}
           menu={
             canModify ? (
-              <SessionMenuItems onBind={() => openBinding(MAIN_BINDING)} />
+              <SessionMenuItems
+                onBind={() => openBinding(MAIN_BINDING)}
+                onCreateAutomation={() => createAutomationFrom(null)}
+              />
             ) : undefined
           }
           menuLabel={`${mainLabel}的更多操作`}
         />
+        {automationGroups.map((automationGroup) => (
+          <AutomationGroupRow
+            key={automationGroup.automationId}
+            group={automationGroup}
+            // A search shows its matches without a click.
+            forceExpanded={searching}
+            containsActive={
+              isCurrent &&
+              automationGroup.sessions.some(
+                (session) => session.id === activeSessionId,
+              )
+            }
+            navigate={navigate}
+          >
+            {automationGroup.sessions.map((session) => (
+              <li key={session.id} className="list-none">
+                {renderSession(session)}
+              </li>
+            ))}
+          </AutomationGroupRow>
+        ))}
         <AnimatePresence initial={false}>
-          {visible.map((session) => {
-            const nativeManaged = isNativeManagedSession(session);
-            return (
-              <m.li
-                key={session.id}
-                // Search results appear and disappear instantly: animating
-                // dozens of rows in and out on every keystroke was a third of
-                // the per-key cost in long lists.
-                initial={searching ? false : { opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={searching ? undefined : { opacity: 0, height: 0 }}
-                className="list-none overflow-hidden"
-              >
-                <SessionRow
-                  asListItem={false}
-                  name={session.name || '新会话'}
-                  active={isCurrent && activeSessionId === session.id}
-                  running={session.status === 'running'}
-                  titleGenerating={session.title_generating}
-                  linked={(session.linked_im_groups?.length ?? 0) > 0}
-                  worktree={session.worktree}
-                  time={formatSessionTime(sessionActivityAt(session))}
-                  onSelect={() =>
-                    openWorkspaceSession(navigate, group, session.id)
-                  }
-                  onDelete={
-                    canModify && !nativeManaged
-                      ? () => deleteSession(group.jid, session.id, openBinding)
-                      : undefined
-                  }
-                  deleteLabel={`删除${session.name || '新会话'}`}
-                  menuLabel={`${session.name}的更多操作`}
-                  menu={
-                    canModify && !nativeManaged ? (
-                      <SessionMenuItems
-                        onBind={() => openBinding(session.id)}
-                        onRename={() => setRenameTarget(session)}
-                        onDelete={() =>
-                          deleteSession(group.jid, session.id, openBinding)
-                        }
-                      />
-                    ) : undefined
-                  }
-                />
-              </m.li>
-            );
-          })}
+          {visible.map((session) => (
+            <m.li
+              key={session.id}
+              // Search results appear and disappear instantly: animating
+              // dozens of rows in and out on every keystroke was a third of
+              // the per-key cost in long lists.
+              initial={searching ? false : { opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={searching ? undefined : { opacity: 0, height: 0 }}
+              className="list-none overflow-hidden"
+            >
+              {renderSession(session)}
+            </m.li>
+          ))}
         </AnimatePresence>
       </ul>
-      {filtered.length > visibleCount && (
+      {others.length > visibleCount && (
         <button
           type="button"
           onClick={() => setVisibleCount((n) => n + 30)}
           className={cn(sidebarRowClass, 'ml-2 h-7 w-auto text-caption')}
         >
-          显示更多（{filtered.length - visibleCount}）
+          显示更多（{others.length - visibleCount}）
         </button>
       )}
       {normalizedQuery && filtered.length === 0 && (
@@ -204,6 +261,100 @@ export const SessionTreeList = memo(function SessionTreeList({
   );
 });
 
+/**
+ * One automation's sessions under a collapsible row: its name, whether a
+ * run goes or results wait unread, and 立即运行 / ⋯ on hover.
+ */
+function AutomationGroupRow({
+  group,
+  forceExpanded,
+  containsActive,
+  navigate,
+  children,
+}: {
+  group: AutomationSessionGroup;
+  forceExpanded: boolean;
+  containsActive: boolean;
+  navigate: NavigateToPath;
+  children: ReactNode;
+}) {
+  const {
+    automation,
+    name,
+    running,
+    expanded: stored,
+    toggle,
+  } = useAutomationGroup(group);
+  const busy = useAutomationsStore((s) => !!s.runBusy[group.automationId]);
+  const expanded = forceExpanded || stored;
+
+  return (
+    <li className="list-none">
+      <div
+        data-active={(!expanded && containsActive) || undefined}
+        className={cn(
+          sidebarRowClass,
+          'ml-2 h-7 w-[calc(100%-0.5rem)] gap-1.5 pr-1',
+        )}
+      >
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={toggle}
+          className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left outline-none"
+        >
+          <Timer
+            className="size-3.5 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <span className="truncate">{name}</span>
+          <span className="shrink-0 text-micro text-faint-foreground tabular-nums">
+            {group.sessions.length}
+          </span>
+          <ChevronRight
+            aria-hidden="true"
+            className={cn(
+              'size-3 shrink-0 text-faint-foreground transition-transform duration-150 motion-reduce:transition-none',
+              expanded && 'rotate-90',
+            )}
+          />
+        </button>
+        {running ? (
+          <Spinner
+            className="size-3 shrink-0 text-muted-foreground"
+            aria-label="自动化运行中"
+          />
+        ) : (
+          automation && <UnreadDot automation={automation} />
+        )}
+        {automation && (
+          <span className="flex shrink-0 items-center">
+            <button
+              type="button"
+              aria-label={`立即运行「${name}」`}
+              disabled={busy}
+              onClick={(event) => {
+                event.stopPropagation();
+                void runAutomationNow(automation.id);
+              }}
+              className={cn(rowIconButtonClass, revealOnRowHover)}
+            >
+              <Play className="size-3.5" />
+            </button>
+            <RowMenu label={`${name}的更多操作`}>
+              <AutomationMenuItems
+                automation={automation}
+                navigate={navigate}
+              />
+            </RowMenu>
+          </span>
+        )}
+      </div>
+      {expanded && <ul className="pl-3">{children}</ul>}
+    </li>
+  );
+}
+
 function SessionRow({
   name,
   active,
@@ -211,6 +362,7 @@ function SessionRow({
   titleGenerating = false,
   linked = false,
   worktree,
+  automations = NO_AUTOMATIONS,
   time,
   onSelect,
   onDelete,
@@ -225,6 +377,8 @@ function SessionRow({
   titleGenerating?: boolean;
   linked?: boolean;
   worktree?: SessionWorktreeInfo | null;
+  /** Automations bound to this session, shown as a timer mark. */
+  automations?: Automation[];
   time?: string;
   onSelect: () => void;
   /** Shown next to the menu on hover; the handler asks for confirmation. */
@@ -260,6 +414,7 @@ function SessionRow({
           />
         )}
       </button>
+      <BoundAutomationMark automations={automations} />
       {running || titleGenerating ? (
         <Spinner
           className="size-3 shrink-0 text-muted-foreground"

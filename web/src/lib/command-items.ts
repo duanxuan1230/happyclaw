@@ -10,6 +10,7 @@ import {
   Palette,
   SquarePen,
   Sun,
+  Timer,
   Users,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -24,6 +25,11 @@ export type CommandAction =
   | { type: 'navigate'; to: string }
   | { type: 'newConversation' }
   | { type: 'createWorkspace' }
+  | {
+      type: 'createAutomation';
+      /** From a session: prefilled with its workspace, bound to it. */
+      from?: { workspaceJid: string; sessionJid: string };
+    }
   | { type: 'toggleSidebar' }
   | { type: 'logout' }
   | { type: 'theme'; value: Theme }
@@ -70,6 +76,8 @@ export interface CommandSourceInput {
   colorScheme: ColorScheme;
   /** Max sessions listed across all workspaces. */
   sessionLimit?: number;
+  /** The session open on the chat page, if any. */
+  currentSession?: { workspaceJid: string; sessionJid: string } | null;
 }
 
 const THEME_LABELS: Record<Theme, string> = {
@@ -114,6 +122,27 @@ export function buildCommandGroups(
       icon: FolderPlus,
       action: { type: 'createWorkspace' },
     },
+    {
+      id: 'action:create-automation',
+      label: '新建自动化',
+      keywords: ['automation', 'schedule', 'cron', '定时', '计划'],
+      icon: Timer,
+      action: { type: 'createAutomation' },
+    },
+    ...(input.currentSession
+      ? [
+          {
+            id: 'action:create-automation-from-session',
+            label: '从此会话创建自动化',
+            keywords: ['automation', 'schedule', '定时', '绑定', '会话'],
+            icon: Timer,
+            action: {
+              type: 'createAutomation',
+              from: input.currentSession,
+            } as const,
+          },
+        ]
+      : []),
     {
       id: 'action:toggle-sidebar',
       label: '切换侧边栏',

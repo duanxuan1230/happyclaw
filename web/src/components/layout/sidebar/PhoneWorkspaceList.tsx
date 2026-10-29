@@ -9,13 +9,14 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, m } from 'motion/react';
-import { ChevronRight, Folder, Link2, Pin } from 'lucide-react';
+import { ChevronRight, Folder, Link2, Pin, Timer } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import { useChatStore } from '../../../stores/chat';
 import { useAuthStore } from '../../../stores/auth';
 import { useGroupsStore } from '../../../stores/groups';
 import { useShellStore } from '../../../stores/shell';
+import { useAutomationsStore } from '../../../stores/automations';
 import { useSessionActions } from '../../../hooks/useSessionActions';
 import { useStableCallback } from '../../../hooks/useStableCallback';
 import {
@@ -26,9 +27,20 @@ import {
   formatSessionTime,
   isNativeManagedSession,
   messagePreview,
+  partitionAutomationSessions,
   previewText,
   sessionActivityAt,
+  type AutomationSessionGroup,
 } from '../../../lib/session-presentation';
+import { sessionJidOf } from '../../../lib/session-jid';
+import type { Automation } from '../../../lib/automation';
+import {
+  AutomationMenuItems,
+  BoundAutomationMark,
+  UnreadDot,
+  useAutomationGroup,
+  useBoundAutomations,
+} from '../../automations/AutomationSessionBits';
 import {
   type AgentWorkspaceSection,
   getPrimaryAgentWorkspaceRows,
@@ -55,6 +67,7 @@ import {
 
 /** Sessions shown under a workspace before 显示更多, as in cindy's projects. */
 const INITIAL_VISIBLE = 5;
+const NO_AUTOMATIONS: Automation[] = [];
 
 /** One workspace header of the list, with what it shows and acts on. */
 interface WorkspaceEntry {
@@ -326,13 +339,20 @@ function WorkspaceSessions({
     group.jid,
   );
   const requestBinding = useShellStore((s) => s.requestBinding);
+  const openCreateAutomation = useAutomationsStore((s) => s.openCreateForm);
+  const boundTo = useBoundAutomations(group.jid);
   const { deleteSession } = useSessionActions();
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [renameTarget, setRenameTarget] = useState<AgentInfo | null>(null);
 
   const canModify = !!group.can_modify;
   const mainLabel = group.is_my_home ? '直接对话' : '当前对话';
-  const hidden = sessions.length - visibleCount;
+  // Sessions an automation opened sit in its group, not in the flat list.
+  const { groups: automationGroups, others } = useMemo(
+    () => partitionAutomationSessions(sessions),
+    [sessions],
+  );
+  const hidden = others.length - visibleCount;
   const open = (sessionId: string | null) =>
     openWorkspaceSession(navigate, group, sessionId);
   // Binding lives in ChatView, which stays mounted behind this list for the
@@ -340,6 +360,45 @@ function WorkspaceSessions({
   const openBinding = (target: string) => {
     useChatStore.getState().selectGroup(group.jid);
     requestBinding(group.jid, target);
+  };
+  const createAutomationFrom = (sessionId: string | null) =>
+    openCreateAutomation({
+      workspaceJid: group.jid,
+      targetSessionJid: sessionJidOf(group.jid, sessionId),
+    });
+  const renderSession = (session: AgentInfo) => {
+    const running = session.status === 'running';
+    return (
+      <PhoneSessionRow
+        key={session.id}
+        title={session.name || '新会话'}
+        preview={
+          running ? '正在生成回复' : messagePreview(session) || '暂无消息'
+        }
+        time={formatSessionTime(sessionActivityAt(session))}
+        busy={
+          session.title_generating
+            ? '正在生成标题'
+            : running
+              ? '正在生成回复'
+              : undefined
+        }
+        linked={(session.linked_im_groups?.length ?? 0) > 0}
+        worktree={session.worktree}
+        automations={boundTo(session)}
+        onOpen={() => open(session.id)}
+        menu={
+          canModify && !isNativeManagedSession(session) ? (
+            <SessionMenuItems
+              onBind={() => openBinding(session.id)}
+              onCreateAutomation={() => createAutomationFrom(session.id)}
+              onRename={() => setRenameTarget(session)}
+              onDelete={() => deleteSession(group.jid, session.id, openBinding)}
+            />
+          ) : undefined
+        }
+      />
+    );
   };
 
   return (
@@ -350,47 +409,27 @@ function WorkspaceSessions({
         time={
           group.lastMessageTime ? formatSessionTime(group.lastMessageTime) : ''
         }
+        automations={boundTo(null)}
         onOpen={() => open(null)}
         menu={
           canModify ? (
-            <SessionMenuItems onBind={() => openBinding(MAIN_BINDING)} />
+            <SessionMenuItems
+              onBind={() => openBinding(MAIN_BINDING)}
+              onCreateAutomation={() => createAutomationFrom(null)}
+            />
           ) : undefined
         }
       />
-      {sessions.slice(0, visibleCount).map((session) => {
-        const running = session.status === 'running';
-        return (
-          <PhoneSessionRow
-            key={session.id}
-            title={session.name || '新会话'}
-            preview={
-              running ? '正在生成回复' : messagePreview(session) || '暂无消息'
-            }
-            time={formatSessionTime(sessionActivityAt(session))}
-            busy={
-              session.title_generating
-                ? '正在生成标题'
-                : running
-                  ? '正在生成回复'
-                  : undefined
-            }
-            linked={(session.linked_im_groups?.length ?? 0) > 0}
-            worktree={session.worktree}
-            onOpen={() => open(session.id)}
-            menu={
-              canModify && !isNativeManagedSession(session) ? (
-                <SessionMenuItems
-                  onBind={() => openBinding(session.id)}
-                  onRename={() => setRenameTarget(session)}
-                  onDelete={() =>
-                    deleteSession(group.jid, session.id, openBinding)
-                  }
-                />
-              ) : undefined
-            }
-          />
-        );
-      })}
+      {automationGroups.map((automationGroup) => (
+        <PhoneAutomationGroup
+          key={automationGroup.automationId}
+          group={automationGroup}
+          navigate={navigate}
+        >
+          {automationGroup.sessions.map(renderSession)}
+        </PhoneAutomationGroup>
+      ))}
+      {others.slice(0, visibleCount).map(renderSession)}
       {hidden > 0 && (
         <li className="list-none">
           <button
@@ -423,6 +462,7 @@ function PhoneSessionRow({
   busy,
   linked = false,
   worktree,
+  automations = NO_AUTOMATIONS,
   onOpen,
   menu,
 }: {
@@ -433,6 +473,8 @@ function PhoneSessionRow({
   busy?: string;
   linked?: boolean;
   worktree?: SessionWorktreeInfo | null;
+  /** Automations bound to this session, shown as a timer mark. */
+  automations?: Automation[];
   onOpen: () => void;
   menu?: ReactNode;
 }) {
@@ -465,6 +507,10 @@ function PhoneSessionRow({
               aria-label="已绑定消息渠道"
             />
           )}
+          <BoundAutomationMark
+            automations={automations}
+            className="[&_svg]:size-3.5"
+          />
         </span>
         {busy ? (
           <Spinner
@@ -490,6 +536,70 @@ function PhoneSessionRow({
           )}
         </span>
       </div>
+    </li>
+  );
+}
+
+/** One automation's sessions under a collapsible row (collapsed by default). */
+function PhoneAutomationGroup({
+  group,
+  navigate,
+  children,
+}: {
+  group: AutomationSessionGroup;
+  navigate: NavigateToPath;
+  children: ReactNode;
+}) {
+  const contentId = useId();
+  const { automation, name, running, expanded, toggle } =
+    useAutomationGroup(group);
+  return (
+    <li className="list-none">
+      <div className="flex h-14 items-center gap-2 border-b border-surface-border pr-2 pl-13">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          onClick={toggle}
+          className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <Timer
+            aria-hidden="true"
+            className="size-4 shrink-0 text-muted-foreground"
+          />
+          <span className="truncate text-body-lg font-medium text-foreground">
+            {name}
+          </span>
+          <span className="shrink-0 text-label text-faint-foreground tabular-nums">
+            {group.sessions.length}
+          </span>
+          <ChevronRight
+            aria-hidden="true"
+            className={cn(
+              'size-4 shrink-0 text-faint-foreground transition-transform duration-150 motion-reduce:transition-none',
+              expanded && 'rotate-90',
+            )}
+          />
+        </button>
+        {running ? (
+          <Spinner
+            className="size-3.5 shrink-0 text-muted-foreground"
+            aria-label="自动化运行中"
+          />
+        ) : (
+          automation && <UnreadDot automation={automation} className="size-2" />
+        )}
+        {automation && (
+          <RowMenu label={`${name}的更多操作`} touch>
+            <AutomationMenuItems automation={automation} navigate={navigate} />
+          </RowMenu>
+        )}
+      </div>
+      {expanded && (
+        <ul id={contentId} className="pl-4">
+          {children}
+        </ul>
+      )}
     </li>
   );
 }

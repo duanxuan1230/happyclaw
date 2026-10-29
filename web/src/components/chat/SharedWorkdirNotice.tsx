@@ -71,7 +71,7 @@ function describePeer(peer: WorkdirPeer, groupJid: string): string {
     peer.kind === 'main'
       ? '主会话'
       : peer.kind === 'task'
-        ? '定时任务'
+        ? '自动化'
         : `会话「${peer.session_name || '新会话'}」`;
   return peer.workspace_jid === groupJid
     ? conversation
