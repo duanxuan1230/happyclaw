@@ -2400,6 +2400,8 @@ export function createFeishuConnection(
     fileKey: string,
     filename: string,
     groupFolder: string,
+    /** The admitted route; a session route picks that session's worktree. */
+    routeJid: string,
   ): Promise<string | null> {
     const activeClient = client;
     if (!activeClient) return null;
@@ -2438,6 +2440,7 @@ export function createFeishuConnection(
           'feishu',
           effectiveName,
           buffer,
+          routeJid,
         );
         return relPath;
       } catch (err) {
@@ -4292,6 +4295,7 @@ export function createFeishuConnection(
                 'feishu',
                 fileName,
                 Buffer.from(imageData.base64, 'base64'),
+                admittedRoute.targetJid,
               );
               if (relPath) savedPaths.push(relPath);
             } catch (err) {
@@ -4348,6 +4352,7 @@ export function createFeishuConnection(
                 'feishu',
                 fileName,
                 Buffer.from(imageData.base64, 'base64'),
+                admittedRoute.targetJid,
               );
               if (relPath) replacement = `[引用图片: ${relPath}]`;
             } catch (err) {
@@ -4435,6 +4440,7 @@ export function createFeishuConnection(
               fi.fileKey,
               fi.filename,
               groupFolder,
+              admittedRoute.targetJid,
             );
             text = text.replace(fi.marker, fileAttachmentText(fi, relPath));
           }

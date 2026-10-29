@@ -1036,6 +1036,7 @@ export function createWeChatConnection(
     groupFolder: string | undefined,
     label: string,
     resolveFileName: (buffer: Buffer) => string,
+    routeJid: string,
   ): Promise<{ buffer: Buffer; savedPath?: string } | null> {
     if (!media?.encrypt_query_param || !media?.aes_key) {
       logger.debug(`WeChat ${label} missing media or aes_key, skipping`);
@@ -1067,8 +1068,13 @@ export function createWeChatConnection(
       try {
         const fileName = resolveFileName(buffer);
         savedPath =
-          (await saveDownloadedFile(groupFolder, 'wechat', fileName, buffer)) ??
-          undefined;
+          (await saveDownloadedFile(
+            groupFolder,
+            'wechat',
+            fileName,
+            buffer,
+            routeJid,
+          )) ?? undefined;
       } catch (err) {
         logger.warn({ err }, `Failed to save WeChat ${label} to disk`);
       }
@@ -1081,6 +1087,7 @@ export function createWeChatConnection(
     item: MessageItem,
     msgIdentifier: string,
     groupFolder: string | undefined,
+    routeJid: string,
   ): Promise<{
     attachmentEntry?: { type: string; data: string; mimeType: string };
     textPrefix?: string;
@@ -1106,6 +1113,7 @@ export function createWeChatConnection(
           };
           return `wechat_img_${msgIdentifier}${extMap[mimeType] ?? '.jpg'}`;
         },
+        routeJid,
       );
       if (!result) return { textPrefix: downloadFailed };
 
@@ -1145,6 +1153,7 @@ export function createWeChatConnection(
     kind: 'voice' | 'video',
     msgIdentifier: string,
     groupFolder: string | undefined,
+    routeJid: string,
   ): Promise<string | null> {
     const media =
       kind === 'video' ? item.video_item?.media : item.voice_item?.media;
@@ -1159,6 +1168,7 @@ export function createWeChatConnection(
           kind === 'video'
             ? `wechat_vid_${msgIdentifier}.mp4`
             : `wechat_voice_${msgIdentifier}${detectWeChatVoiceExtension(buffer)}`,
+        routeJid,
       );
       if (result?.savedPath) {
         return kind === 'video'
@@ -1175,6 +1185,7 @@ export function createWeChatConnection(
   async function processFileItem(
     item: MessageItem,
     groupFolder: string | undefined,
+    routeJid: string,
   ): Promise<string | null> {
     const fileName = item.file_item?.file_name || 'unknown_file';
     try {
@@ -1183,6 +1194,7 @@ export function createWeChatConnection(
         groupFolder,
         'file',
         () => fileName,
+        routeJid,
       );
       if (result?.savedPath) return `[文件: ${result.savedPath}]`;
       // CDN media unavailable, fall back to name-only label
@@ -1407,14 +1419,19 @@ export function createWeChatConnection(
         for (const item of msg.item_list) {
           if (item.type === MESSAGE_ITEM_TYPE_IMAGE) {
             mediaPromises.push(
-              processImageItem(item, msgId.slice(-8), groupFolder).then((r) => {
+              processImageItem(
+                item,
+                msgId.slice(-8),
+                groupFolder,
+                targetJid,
+              ).then((r) => {
                 if (r.attachmentEntry) imageAttachments.push(r.attachmentEntry);
                 if (r.textPrefix) textPrefixes.push(r.textPrefix);
               }),
             );
           } else if (item.type === MESSAGE_ITEM_TYPE_FILE) {
             mediaPromises.push(
-              processFileItem(item, groupFolder).then((label) => {
+              processFileItem(item, groupFolder, targetJid).then((label) => {
                 if (label) textPrefixes.push(label);
               }),
             );
@@ -1425,6 +1442,7 @@ export function createWeChatConnection(
                 'video',
                 msgId.slice(-8),
                 groupFolder,
+                targetJid,
               ).then((label) => {
                 if (label) textPrefixes.push(label);
               }),
@@ -1436,6 +1454,7 @@ export function createWeChatConnection(
                 'voice',
                 msgId.slice(-8),
                 groupFolder,
+                targetJid,
               ).then((label) => {
                 if (label) textPrefixes.push(label);
               }),

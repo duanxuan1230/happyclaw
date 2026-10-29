@@ -208,6 +208,8 @@ describe('DingTalk C2C inbound audio/video', () => {
       'dingtalk',
       expect.stringMatching(/^audio_\d+\.amr$/),
       rawAudio,
+      // Saved under the route the message is stored under.
+      inbound.storeMessageDirect.mock.calls[0][1],
     );
     expect(inbound.storeMessageDirect.mock.calls[0][4]).toMatch(
       /^你好\n\n\[语音: audio\.amr → files\/dingtalk\/audio_\d+\.amr\]$/,

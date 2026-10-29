@@ -792,6 +792,7 @@ export function createDiscordConnection(
                     'discord',
                     filename,
                     buffer,
+                    targetJid,
                   );
                   inboundLifecycle.assertCurrent(lease);
                   if (!content) {
@@ -830,6 +831,7 @@ export function createDiscordConnection(
                     'discord',
                     attachName,
                     buffer,
+                    targetJid,
                   );
                   inboundLifecycle.assertCurrent(lease);
                   if (!content) {

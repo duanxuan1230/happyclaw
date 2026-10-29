@@ -926,6 +926,8 @@ export function createTelegramConnection(
     fileId: string,
     originalFilename: string,
     groupFolder: string,
+    /** The admitted route; a session route picks that session's worktree. */
+    routeJid: string,
     fileSizeHint?: number,
   ): Promise<string | null> {
     // Telegram Bot API 免费 tier 上限 20 MB，提前预检
@@ -964,6 +966,7 @@ export function createTelegramConnection(
           'telegram',
           effectiveName,
           buffer,
+          routeJid,
         );
       } catch (err) {
         if (err instanceof FileTooLargeError) {
@@ -1809,6 +1812,7 @@ export function createTelegramConnection(
                     'telegram',
                     fileName,
                     Buffer.from(imageData.base64, 'base64'),
+                    targetJid,
                   );
                   if (relPath) imgMarker = `[图片: ${relPath}]`;
                 } catch (err) {
@@ -2014,6 +2018,7 @@ export function createTelegramConnection(
                 doc.file_id,
                 originalFilename,
                 groupFolder,
+                targetJid,
                 doc.file_size,
               );
               fileText = relPath
@@ -2184,6 +2189,7 @@ export function createTelegramConnection(
                   file.fileId,
                   originalFilename,
                   groupFolder,
+                  targetJid,
                   file.fileSize,
                 );
                 fileText = relPath

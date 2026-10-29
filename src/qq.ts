@@ -1438,6 +1438,8 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     attachment: QQInboundAttachment,
     msgId: string,
     jid: string,
+    /** The admitted route; a session route picks that session's worktree. */
+    routeJid: string,
     content: string,
     opts: QQConnectOpts,
     logContext: string,
@@ -1473,6 +1475,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
             'qq',
             fileName,
             buffer,
+            routeJid,
           );
           inboundLifecycle.assertCurrent(lease);
           if (relPath) content = `[图片: ${relPath}]\n${content}`.trim();
@@ -1501,6 +1504,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           'qq',
           fileName,
           buffer,
+          routeJid,
         );
         inboundLifecycle.assertCurrent(lease);
         if (relPath) {
@@ -2179,6 +2183,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
             data.attachments[0],
             msgId,
             jid,
+            targetJid,
             content,
             opts,
             'c2c',
@@ -2455,6 +2460,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
             data.attachments[0],
             msgId,
             jid,
+            targetJid,
             content,
             opts,
             'group',

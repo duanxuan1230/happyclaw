@@ -636,6 +636,7 @@ import {
   validateAdditionalMountsStrict,
 } from './mount-security.js';
 import {
+  agentIdOfJid,
   ensureAgentDirectories,
   isRealpathInside,
   isSystemMaintenanceNoise,
@@ -2990,14 +2991,41 @@ function extractFeishuCardText(text: string): string | null {
   }
 }
 
+/**
+ * The directory a run of workspace `folder` (as session `agentId`) works in,
+ * where relative paths the Agent reports and IM files handed to it resolve:
+ * a worktree session's worktree, a Host custom directory, or data/groups.
+ */
+function agentWorkingRoot(folder: string, agentId?: string | null): string {
+  const workspaceJid = findWebJidForFolder(folder);
+  const workspace = workspaceJid
+    ? (registeredGroups[workspaceJid] ?? getRegisteredGroup(workspaceJid))
+    : undefined;
+  return workspace
+    ? resolveWorkspaceProjectRoot(
+        resolveEffectiveGroup(workspace).effectiveGroup,
+        { agentId },
+      )
+    : path.join(GROUPS_DIR, folder);
+}
+
+/**
+ * Where an IM file for `folder` lands. Connectors pass the admitted route, so
+ * a chat routed to a worktree session gets the file in that worktree, where
+ * the Agent resolves the relative path it is told.
+ */
+function imDownloadRoot(folder: string, routeJid: string): string {
+  return agentWorkingRoot(folder, agentIdOfJid(routeJid));
+}
+
 /** Send a message to an IM channel with automatic fail-count tracking and auto-unbind. */
 function extractLocalImImagePaths(
   text: string,
   groupFolder?: string,
+  agentId?: string | null,
 ): string[] {
   if (!groupFolder || !text) return [];
 
-  const workspaceRoot = path.resolve(GROUPS_DIR, groupFolder);
   const seen = new Set<string>();
   const imagePaths: string[] = [];
   const candidates: string[] = [];
@@ -3027,6 +3055,9 @@ function extractLocalImImagePaths(
   for (const match of text.matchAll(taggedImageRe)) {
     pushCandidate(match[1] || '');
   }
+  // Most replies name no image: skip resolving the working root.
+  if (candidates.length === 0) return [];
+  const workspaceRoot = path.resolve(agentWorkingRoot(groupFolder, agentId));
 
   for (const candidate of candidates) {
     const resolved = path.resolve(workspaceRoot, candidate);
@@ -12347,7 +12378,11 @@ async function sendMessageWithOutcome(
         const imText = options.imTextOverride ?? text;
         const localImagePaths =
           options.localImagePaths ??
-          extractLocalImImagePaths(imText, resolveEffectiveFolder(jid));
+          extractLocalImImagePaths(
+            imText,
+            resolveEffectiveFolder(jid),
+            agentIdOfJid(jid),
+          );
         targetDelivered = await sendImWithRetry(
           jid,
           imText,
@@ -13164,7 +13199,11 @@ function startIpcWatcher(): void {
                         messageDelivered = await sendImWithRetry(
                           ipcImRoute,
                           data.text,
-                          extractLocalImImagePaths(data.text, sourceGroup),
+                          extractLocalImImagePaths(
+                            data.text,
+                            sourceGroup,
+                            ipcAgentId,
+                          ),
                           channelOutboxRefForInput(
                             messageScopeKey,
                             ipcImRoute,
@@ -16612,12 +16651,16 @@ async function processTaskIpc(
         }
 
         try {
-          // Resolve to workspace path - IPC sends relative paths from workspace/group
-          const fullPath = path.join(GROUPS_DIR, sourceGroup, data.filePath);
+          // The runner sends paths relative to its cwd: the session's worktree,
+          // a Host custom directory, or data/groups/{folder}.
+          const sendRoot = path.resolve(
+            agentWorkingRoot(sourceGroup, ipcAgentId),
+          );
+          const fullPath = path.join(sendRoot, data.filePath);
 
           // Path traversal protection: ensure resolved path stays within workspace
           let resolvedPath = path.resolve(fullPath);
-          const safeRoot = path.resolve(GROUPS_DIR, sourceGroup) + path.sep;
+          const safeRoot = sendRoot + path.sep;
           if (!resolvedPath.startsWith(safeRoot)) {
             logger.warn(
               { sourceGroup, filePath: data.filePath, resolvedPath },
@@ -16629,11 +16672,7 @@ async function processTaskIpc(
 
           if (!fs.existsSync(resolvedPath)) {
             // Fallback: search in downloads subdirs (DingTalk/Telegram files land here)
-            const downloadsDir = path.join(
-              GROUPS_DIR,
-              sourceGroup,
-              'downloads',
-            );
+            const downloadsDir = path.join(sendRoot, 'downloads');
             const fileName = data.fileName || path.basename(data.filePath);
             const foundPath = fs.existsSync(downloadsDir)
               ? findFileInSubdirs(downloadsDir, fileName)
@@ -16712,7 +16751,6 @@ async function processTaskIpc(
             // not stop a symlink (inside the workspace) pointing at host/other-user
             // files. Re-verify the final path (original OR downloads fallback)
             // resolves inside the workspace before reading it for delivery.
-            const sendRoot = path.resolve(GROUPS_DIR, sourceGroup);
             if (!isRealpathInside(resolvedPath, sendRoot)) {
               logger.warn(
                 { sourceGroup, filePath: data.filePath, resolvedPath },
@@ -19578,6 +19616,7 @@ async function processAgentConversation(
         const localImagePaths = extractLocalImImagePaths(
           text,
           effectiveGroup.folder,
+          agentId,
         );
 
         // ── Complete or hold Feishu streaming card, or fall back to static ──
@@ -20716,6 +20755,7 @@ async function processAgentConversation(
           const localImagePaths = extractLocalImImagePaths(
             partialReply,
             effectiveGroup.folder,
+            agentId,
           );
           logger.info(
             { partialReplySourceJid, textLen: partialReply.length },
@@ -24928,19 +24968,9 @@ async function main(): Promise<void> {
     );
   });
   // IM attachments must land where the Agent's cwd resolves the relative
-  // path it is given: a Host workspace with customCwd runs there, not in
-  // data/groups/{folder} (same root as the Web file panel).
-  setImDownloadRootResolver((folder: string) => {
-    const workspaceJid = findWebJidForFolder(folder);
-    const workspace = workspaceJid
-      ? (registeredGroups[workspaceJid] ?? getRegisteredGroup(workspaceJid))
-      : undefined;
-    if (!workspace) return undefined;
-    const { effectiveGroup } = resolveEffectiveGroup(workspace);
-    return effectiveGroup.executionMode === 'host' && effectiveGroup.customCwd
-      ? effectiveGroup.customCwd
-      : undefined;
-  });
+  // path it is given: a worktree session's worktree, a Host workspace's
+  // customCwd, else data/groups/{folder} (same root as the Web file panel).
+  setImDownloadRootResolver(imDownloadRoot);
   queue.setHostModeChecker((groupJid: string) => {
     const baseJid = stripVirtualJidSuffix(groupJid);
 

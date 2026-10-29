@@ -71,6 +71,36 @@ describe('NewSessionDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  test('Enter that confirms an IME candidate does not create the session', async () => {
+    get.mockResolvedValue({ available: true });
+    const onCreate = vi.fn(async () => true);
+    await render(
+      <NewSessionDialog
+        open
+        groupJid="web:dev"
+        onClose={vi.fn()}
+        onCreate={onCreate}
+      />,
+    );
+    const input =
+      document.querySelector<HTMLInputElement>('#new-session-name')!;
+    const enter = (isComposing: boolean) =>
+      act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+            isComposing,
+          }),
+        );
+      });
+    await enter(true);
+    expect(onCreate).not.toHaveBeenCalled();
+    await enter(false);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   test('disables the option with the reason when the workspace cannot have one', async () => {
     get.mockResolvedValue({
       available: false,

@@ -670,6 +670,8 @@ export function createWhatsAppConnection(
     msg: WAMessage,
     content: proto.IMessage,
     groupFolder: string | undefined,
+    /** The admitted route; a session route picks that session's worktree. */
+    routeJid: string,
     lease: ChannelInboundLease,
     activeSock: WASocket,
     /** Replaces the provider caption, e.g. by the guidance of `/steer`. */
@@ -731,6 +733,7 @@ export function createWhatsAppConnection(
         'whatsapp',
         fileName,
         buffer,
+        routeJid,
       );
       inboundLifecycle.assertCurrent(lease);
     } catch (err) {
@@ -1022,6 +1025,7 @@ export function createWhatsAppConnection(
         msg,
         inner,
         opts.resolveGroupFolder?.(chatJid),
+        targetJid,
         lease,
         activeSock,
         steerText,

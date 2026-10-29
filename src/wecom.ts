@@ -1131,6 +1131,7 @@ export function createWeComConnection(
           'wecom',
           fileName,
           buffer,
+          targetJid,
         );
         assertConnectionGeneration(generation, signal);
         return { content: `[图片: ${savedPath}]`, attachments, ...usage };
@@ -1225,6 +1226,7 @@ export function createWeComConnection(
           'wecom',
           fileName,
           buffer,
+          targetJid,
         );
         assertConnectionGeneration(generation, signal);
         return { content: `[${label}: ${savedPath}]`, attachments: [] };
