@@ -12921,6 +12921,17 @@ function startIpcWatcher(): void {
                   authorized,
                   scheduledTask: isTaskIpcMessage,
                   interactionMode: ipcInteractionMode,
+                  // The input's own reply route, the one a separate message
+                  // would take below: none means a Web turn.
+                  turnSource: resolveImRoute({
+                    inputTurnId: data.inputTurnId,
+                    ipcAgentId,
+                    isHome,
+                    chatJid: data.chatJid,
+                    sourceGroup,
+                  })
+                    ? 'im'
+                    : 'web',
                 },
                 activeTurnOutputs,
               );

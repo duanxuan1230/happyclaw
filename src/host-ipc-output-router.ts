@@ -14,6 +14,13 @@ export interface HostIpcOutputRouteInput {
   authorized: boolean;
   scheduledTask: boolean;
   interactionMode?: 'assistant' | 'proactive';
+  /**
+   * Where the input turn came from, which is where its replies go: `im` when
+   * the input has a native channel reply route, `web` when it has none.
+   * Unknown is treated as `im`, the delivery a proactive progress statement
+   * always had.
+   */
+  turnSource?: 'web' | 'im';
 }
 
 /**
@@ -90,6 +97,13 @@ function normalizeDeliveryRole(value: unknown): TurnMessageDeliveryRole | null {
  * consumed so it cannot fall through and create a second provider message.
  * Legacy requests, explicit `separate`, and scheduled-task notifications keep
  * their independent delivery path.
+ *
+ * A proactive turn's final is always its own message. Its progress depends on
+ * where the turn came from: a Web turn stages it into the turn's process,
+ * which the Web shows at every process visibility and folds away once the
+ * final lands; an IM turn sends it as a message of its own, because a channel
+ * cannot fold anything and the user would otherwise hear nothing until the
+ * final.
  */
 export function routeHostIpcOutput(
   input: HostIpcOutputRouteInput,
@@ -147,6 +161,16 @@ export function routeHostIpcOutput(
       staged: false,
       deliveryRole,
       attemptedFinalRecorded,
+    };
+  }
+
+  if (input.interactionMode === 'proactive' && input.turnSource !== 'web') {
+    return {
+      path: 'separate_provider',
+      delivered: false,
+      staged: false,
+      deliveryRole,
+      attemptedFinalRecorded: false,
     };
   }
 

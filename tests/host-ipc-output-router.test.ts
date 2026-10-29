@@ -8,6 +8,7 @@ import {
   routeHostIpcOutput,
 } from '../src/host-ipc-output-router.js';
 import { ActiveTurnOutputRegistry } from '../src/turn-output-coordinator.js';
+import { hasUnfinishedProactiveOutput } from '../src/turn-outcome.js';
 
 describe('host IPC primary output routing', () => {
   test('projects conversation-agent output into its canonical Web session', () => {
@@ -207,7 +208,7 @@ describe('host IPC primary output routing', () => {
     ).toBe('separate_provider');
   });
 
-  test('proactive mode stages progress on the active turn and keeps final on independent message delivery', () => {
+  test("proactive mode stages a Web turn's progress on the active turn and keeps final on independent message delivery", () => {
     const activeTurnOutputs = new ActiveTurnOutputRegistry();
     const projectedProgress = vi.fn(() => true);
     const projectedFinal = vi.fn(() => true);
@@ -231,6 +232,7 @@ describe('host IPC primary output routing', () => {
           authorized: true,
           scheduledTask: false,
           interactionMode: 'proactive',
+          turnSource: 'web',
         },
         activeTurnOutputs,
       ),
@@ -255,6 +257,7 @@ describe('host IPC primary output routing', () => {
           authorized: true,
           scheduledTask: false,
           interactionMode: 'proactive',
+          turnSource: 'web',
         },
         activeTurnOutputs,
       ),
@@ -264,6 +267,123 @@ describe('host IPC primary output routing', () => {
       deliveryRole: 'final',
     });
     expect(projectedFinal).not.toHaveBeenCalled();
+  });
+
+  test('proactive progress of an IM turn is sent as a message of its own', () => {
+    // A channel cannot fold a process: staging it there would leave the user
+    // without a word until the final.
+    const activeTurnOutputs = new ActiveTurnOutputRegistry();
+    const projectedProgress = vi.fn(() => true);
+    const scope = channelTurnScope('workspace');
+    activeTurnOutputs.bind(scope, 'turn-im', {
+      onProgress: projectedProgress,
+      onFinalCandidate: () => true,
+    });
+
+    for (const turnSource of ['im', undefined] as const) {
+      expect(
+        routeHostIpcOutput(
+          {
+            sourceGroup: 'workspace',
+            inputTurnId: 'turn-im',
+            text: '正在查看日志',
+            deliveryRole: 'progress',
+            authorized: true,
+            scheduledTask: false,
+            interactionMode: 'proactive',
+            turnSource,
+          },
+          activeTurnOutputs,
+        ),
+      ).toEqual({
+        path: 'separate_provider',
+        delivered: false,
+        staged: false,
+        deliveryRole: 'progress',
+        attemptedFinalRecorded: false,
+      });
+    }
+    expect(projectedProgress).not.toHaveBeenCalled();
+    // It is no final: the final lane is still open for the real answer.
+    expect(activeTurnOutputs.get(scope, 'turn-im')?.attemptedFinalText).toBe(
+      null,
+    );
+  });
+
+  test('an Assistant turn stages progress whatever its source', () => {
+    const activeTurnOutputs = new ActiveTurnOutputRegistry();
+    const projectedProgress = vi.fn(() => true);
+    activeTurnOutputs.bind(channelTurnScope('workspace'), 'turn-a', {
+      onProgress: projectedProgress,
+      onFinalCandidate: () => true,
+    });
+
+    expect(
+      routeHostIpcOutput(
+        {
+          sourceGroup: 'workspace',
+          inputTurnId: 'turn-a',
+          text: '正在处理',
+          deliveryRole: 'progress',
+          authorized: true,
+          scheduledTask: false,
+          interactionMode: 'assistant',
+          turnSource: 'im',
+        },
+        activeTurnOutputs,
+      ),
+    ).toMatchObject({ path: 'primary_projection', staged: true });
+    expect(projectedProgress).toHaveBeenCalledOnce();
+  });
+
+  test('progress without a final never settles a proactive turn, by either lane', () => {
+    // Staged (Web) and sent (IM) progress both count as non-terminal output, so
+    // the host still refuses to settle the input until a final arrives.
+    for (const turnSource of ['web', 'im'] as const) {
+      const activeTurnOutputs = new ActiveTurnOutputRegistry();
+      const scope = channelTurnScope('workspace');
+      let nonTerminal = false;
+      let final = false;
+      activeTurnOutputs.bind(scope, 'turn-x', {
+        onProgress: () => true,
+        onFinalCandidate: () => true,
+        onNonTerminalDelivered: () => {
+          nonTerminal = true;
+        },
+        onUtteranceDelivered: () => {
+          final = true;
+        },
+      });
+      const route = routeHostIpcOutput(
+        {
+          sourceGroup: 'workspace',
+          inputTurnId: 'turn-x',
+          text: '先看一下',
+          deliveryRole: 'progress',
+          authorized: true,
+          scheduledTask: false,
+          interactionMode: 'proactive',
+          turnSource,
+        },
+        activeTurnOutputs,
+      );
+      // The IPC watcher records a separately delivered message on its turn.
+      if (route.path === 'separate_provider') {
+        activeTurnOutputs.recordDeliveredUtterance({
+          scopeKey: scope,
+          inputTurnId: 'turn-x',
+          role: 'progress',
+          text: '先看一下',
+        });
+      }
+      expect(
+        hasUnfinishedProactiveOutput({
+          interactionMode: 'proactive',
+          nonTerminalDelivered: nonTerminal,
+          finalDelivered: final,
+        }),
+      ).toBe(true);
+    }
   });
 
   test('records the exact Proactive final before entering provider delivery', () => {
