@@ -455,43 +455,54 @@ async function checkWorktreeBeforeDelete(
 }
 
 /**
- * Remove a deleted session's worktree, keeping its branch. Without `force`
- * uncommitted changes block the deletion with 409. Returns a response only
- * when the session must not be deleted.
+ * Remove a deleted session's worktree, keeping its branch. The runner is
+ * stopped first so nothing writes into the checkout while it is checked
+ * again and removed, but under a mutation pause that keeps the session's
+ * queued work: when the removal is refused (409, work found after the runner
+ * stopped) or fails (500), the session is left as it was and its queue
+ * resumes. Otherwise the caller deletes the session and then calls `finish`,
+ * which drops the work the pause kept.
  */
 async function releaseSessionWorktree(
   c: Context<{ Variables: Variables }>,
   input: { jid: string; sessionId: string; force: boolean },
-): Promise<Response | null> {
-  const worktree = getSessionWorktree(input.sessionId);
-  if (!worktree) return null;
-  // Settle the runner first so nothing writes into the checkout while it
-  // is checked and removed.
-  await getWebDeps()?.queue?.stopGroup(
-    `${input.jid}#agent:${input.sessionId}`,
-    { force: true },
-  );
+): Promise<{ refusal: Response } | { finish: () => void }> {
+  if (!getSessionWorktree(input.sessionId)) return { finish: () => {} };
+  const queue = getWebDeps()?.queue;
+  const laneJid = `${input.jid}#agent:${input.sessionId}`;
+  const pause = queue?.pauseGroupsForMutation([laneJid]);
+  const refuse = (refusal: Response) => {
+    if (pause) queue!.resumeGroupsAfterMutation(pause);
+    return { refusal };
+  };
   try {
+    await queue?.stopGroup(laneJid, { force: true, preserveQueuedWork: true });
     const result = await removeSessionWorktree(input.sessionId, {
       force: input.force,
     });
     if (result && !result.removed) {
-      return c.json(dirtyWorktreesConflict([result.risk]), 409);
+      return refuse(c.json(dirtyWorktreesConflict([result.risk]), 409));
     }
-    return null;
   } catch (error) {
     logger.error(
       { err: error, sessionId: input.sessionId },
       'Failed to remove session worktree',
     );
-    return c.json(
-      {
-        error: `移除 worktree 失败，会话未删除：${error instanceof Error ? error.message : String(error)}`,
-        code: 'WORKTREE_REMOVE_FAILED',
-      },
-      500,
+    return refuse(
+      c.json(
+        {
+          error: `移除 worktree 失败，会话未删除：${error instanceof Error ? error.message : String(error)}`,
+          code: 'WORKTREE_REMOVE_FAILED',
+        },
+        500,
+      ),
     );
   }
+  return {
+    finish: () => {
+      if (pause) queue!.discardGroupsAfterMutation(pause);
+    },
+  };
 }
 
 // POST /api/groups/:jid/agents — create a user conversation
@@ -894,6 +905,15 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   );
   if (worktreeBlock) return worktreeBlock;
 
+  // Nothing destructive happens before the worktree is settled: a refused
+  // removal leaves the session, its runner state and its queue as they were.
+  const worktreeRelease = await releaseSessionWorktree(c, {
+    jid,
+    sessionId: agentId,
+    force: forceWorktree,
+  });
+  if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
+
   // If the agent is still running or idle, stop the process
   if (agent.status === 'running' || agent.status === 'idle') {
     updateAgentStatus(agentId, 'error', '用户手动停止');
@@ -904,12 +924,6 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
       deps.queue.stopGroup(virtualJid);
     }
   }
-  const worktreeFailure = await releaseSessionWorktree(c, {
-    jid,
-    sessionId: agentId,
-    force: forceWorktree,
-  });
-  if (worktreeFailure) return worktreeFailure;
 
   // Clean up IPC/session directories
   const agentIpcDir = path.join(
@@ -951,6 +965,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   clearSessionChannelOwner(group.folder, agentId);
 
   deleteAgent(agentId);
+  worktreeRelease.finish();
 
   // Broadcast removal
   projectWebAgentRemoved(jid, agentId, agent.name);
@@ -1050,17 +1065,20 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
   );
   if (worktreeBlock) return worktreeBlock;
 
+  // Nothing destructive happens before the worktree is settled: a refused
+  // removal leaves the session, its runner state and its queue as they were.
+  const worktreeRelease = await releaseSessionWorktree(c, {
+    jid,
+    sessionId,
+    force: forceWorktree,
+  });
+  if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
+
   if (session.status === 'running' || session.status === 'idle') {
     updateAgentStatus(sessionId, 'error', '用户手动停止');
     const deps = getWebDeps();
     if (deps) deps.queue.stopGroup(`${jid}#agent:${sessionId}`);
   }
-  const worktreeFailure = await releaseSessionWorktree(c, {
-    jid,
-    sessionId,
-    force: forceWorktree,
-  });
-  if (worktreeFailure) return worktreeFailure;
 
   for (const dir of [
     path.join(DATA_DIR, 'ipc', group.folder, 'agents', sessionId),
@@ -1077,6 +1095,7 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
   deleteSession(group.folder, sessionId);
   clearSessionChannelOwner(group.folder, sessionId);
   deleteAgent(sessionId);
+  worktreeRelease.finish();
 
   projectWebAgentRemoved(jid, sessionId, session.name);
 

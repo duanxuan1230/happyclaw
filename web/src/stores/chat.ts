@@ -63,6 +63,7 @@ import {
 import { extractErrorMessage } from '../utils/error';
 import {
   dirtyWorktreesFromError,
+  worktreeConfirmationParams,
   type WorktreeDirtyInfo,
 } from '../lib/session-worktree';
 import { markdownTail } from '../lib/markdown-blocks';
@@ -1131,12 +1132,12 @@ interface ChatState {
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   /**
-   * Rebuild the workspace. Session worktrees with uncommitted changes refuse
-   * it until `forceWorktrees` confirms discarding them.
+   * Rebuild the workspace. Session worktrees that could lose work refuse it
+   * until `confirmedWorktrees` names every such session.
    */
   clearHistory: (
     jid: string,
-    options?: { forceWorktrees?: boolean },
+    options?: { confirmedWorktrees?: string[] },
   ) => Promise<boolean | { worktreesDirty: WorktreeDirtyInfo[] }>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
   handleMessageDeleted: (
@@ -1172,7 +1173,7 @@ interface ChatState {
   inspectDeleteFlow: (jid: string) => Promise<WorkspaceDeleteImpact>;
   deleteFlow: (
     jid: string,
-    options?: { unbindChannels?: boolean; forceWorktrees?: boolean },
+    options?: { unbindChannels?: boolean; confirmedWorktrees?: string[] },
   ) => Promise<void>;
   /**
    * Load the reasoning and execution trace the server kept of a finished
@@ -3907,9 +3908,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ clearing: { ...s.clearing, [jid]: true } }));
 
     try {
+      const search = worktreeConfirmationParams(
+        options.confirmedWorktrees,
+      ).toString();
       await api.post<{ success: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}/clear-history${
-          options.forceWorktrees ? '?force_worktrees=true' : ''
+          search ? `?${search}` : ''
         }`,
       );
 
@@ -4352,9 +4356,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteFlow: async (jid: string, options = {}) => {
     try {
-      const params = new URLSearchParams();
+      const params = worktreeConfirmationParams(options.confirmedWorktrees);
       if (options.unbindChannels) params.set('unbind_channels', 'true');
-      if (options.forceWorktrees) params.set('force_worktrees', 'true');
       const search = params.toString();
       const query = search ? `?${search}` : '';
       await api.delete<{ success: boolean }>(

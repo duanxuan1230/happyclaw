@@ -203,6 +203,9 @@ describe('session worktree lifecycle', () => {
         unreadable: false,
         submodules: false,
         embeddedRepos: false,
+        detachedCommits: false,
+        operationInProgress: null,
+        hiddenChanges: false,
       },
     });
     expect(fs.existsSync(record.worktree_path)).toBe(true);
@@ -281,6 +284,39 @@ describe('session worktree lifecycle', () => {
     expect(
       worktrees.sessionWorktreeRunError(record, 'worktree has no .git entry'),
     ).toContain(record.worktree_path);
+  });
+
+  test('.worktreeinclude copies only what the ignore rules also ignore', async () => {
+    const repo = makeRepo('repo-include-ignored-only', {
+      '.gitignore': '.env\nconfig/local.json\n',
+      '.worktreeinclude': '.env\nconfig/*\n',
+    });
+    fs.writeFileSync(path.join(repo, '.env'), 'KEY=1\n');
+    fs.mkdirSync(path.join(repo, 'config'));
+    fs.writeFileSync(path.join(repo, 'config', 'local.json'), '{}\n');
+    // Matches `config/*` but is ordinary untracked work, not ignored.
+    fs.writeFileSync(path.join(repo, 'config', 'new-wip.ts'), 'wip\n');
+    // Ignored through info/exclude, which counts as an ignore rule too.
+    fs.appendFileSync(
+      path.join(repo, '.git', 'info', 'exclude'),
+      'config/excluded.json\n',
+    );
+    fs.writeFileSync(path.join(repo, 'config', 'excluded.json'), '{}\n');
+
+    const record = await worktrees.createSessionWorktree({
+      group: hostGroup('ws-include-ignored-only', repo),
+      chatJid: 'web:ws-include-ignored-only',
+      agentId: '16161616-0000-0000-0000-000000000000',
+    });
+    expect(record.include_incomplete).toBeNull();
+    expect(
+      fs.readdirSync(path.join(record.worktree_path, 'config')).sort(),
+    ).toEqual(['excluded.json', 'local.json']);
+    expect(fs.existsSync(path.join(record.worktree_path, '.env'))).toBe(true);
+    // Nothing the agent did not do waits to be confirmed on delete.
+    await expect(
+      worktrees.countWorktreeChanges(record.worktree_path),
+    ).resolves.toBe(0);
   });
 
   test('.worktreeinclude copies matched untracked ignored files and skips non-matching or symlinked files', async () => {

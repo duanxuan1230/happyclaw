@@ -694,10 +694,19 @@ describe('deleting worktree sessions', () => {
       ],
     });
     expect(db.getRegisteredGroup(jid)).toBeDefined();
+    // Forcing without naming what was confirmed confirms nothing.
+    const unnamed = await call(
+      groupRoutes,
+      `/${enc(jid)}?force_worktrees=true`,
+      {
+        method: 'DELETE',
+      },
+    );
+    expect(unnamed.status).toBe(409);
 
     const forced = await call(
       groupRoutes,
-      `/${enc(jid)}?force_worktrees=true`,
+      `/${enc(jid)}?force_worktrees=true&confirmed_worktrees=${sessionId}`,
       { method: 'DELETE' },
     );
     expect(forced.status).toBe(200);
@@ -730,7 +739,7 @@ describe('deleting worktree sessions', () => {
 
     const forced = await call(
       groupRoutes,
-      `/${enc(jid)}/clear-history?force_worktrees=true`,
+      `/${enc(jid)}/clear-history?force_worktrees=true&confirmed_worktrees=${sessionId}`,
       { method: 'POST' },
     );
     expect(forced.status).toBe(200);
@@ -744,6 +753,120 @@ describe('deleting worktree sessions', () => {
       'hello\n',
     );
   });
+
+  test.each([
+    ['deleting', (jid: string) => `/${enc(jid)}`, 'DELETE'],
+    ['rebuilding', (jid: string) => `/${enc(jid)}/clear-history`, 'POST'],
+  ] as const)(
+    '%s the workspace: work that appears while runners stop asks again',
+    async (_label, route, method) => {
+      const repo = makeRepo();
+      const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+      const confirmed = (await createSession(jid, { worktree: true })).body
+        .session.id as string;
+      const late = (await createSession(jid, { worktree: true })).body.session
+        .id as string;
+      const lateWorktree = store.getSessionWorktree(late)!;
+      fs.writeFileSync(
+        path.join(store.getSessionWorktree(confirmed)!.worktree_path, 'wip'),
+        'wip\n',
+      );
+      // The session's runner writes its last file while it is being stopped.
+      stopGroup.mockImplementationOnce(async () => {
+        fs.writeFileSync(path.join(lateWorktree.worktree_path, 'late'), 'x\n');
+      });
+      const queue = webContext.getWebDeps()!.queue as any;
+
+      const again = await call(
+        groupRoutes,
+        `${route(jid)}?force_worktrees=true&confirmed_worktrees=${confirmed}`,
+        { method },
+      );
+      expect(again.status).toBe(409);
+      expect(
+        again.body.dirty_worktrees.map((item: any) => item.session_id).sort(),
+      ).toEqual([confirmed, late].sort());
+      expect(fs.existsSync(path.join(lateWorktree.worktree_path, 'late'))).toBe(
+        true,
+      );
+      // Refused after the stop: every stop kept its queue, and the pause was
+      // released so that work resumes.
+      expect(stopGroup.mock.calls.length).toBeGreaterThan(0);
+      for (const [, options] of stopGroup.mock.calls as any[]) {
+        expect(options).toMatchObject({ preserveQueuedWork: true });
+      }
+      expect(queue.resumeGroupsAfterMutation).toHaveBeenCalledTimes(1);
+      expect(queue.discardGroupsAfterMutation).not.toHaveBeenCalled();
+      stopGroup.mockClear();
+
+      const both = await call(
+        groupRoutes,
+        `${route(jid)}?force_worktrees=true&confirmed_worktrees=${confirmed},${late}`,
+        { method },
+      );
+      expect(both.status).toBe(200);
+      expect(fs.existsSync(lateWorktree.worktree_path)).toBe(false);
+      if (method === 'DELETE') {
+        // A committed delete drops everything the pause kept.
+        expect(queue.discardGroupsAfterMutation).toHaveBeenCalledTimes(1);
+      } else {
+        // A rebuild drops the work queued before it, as a plain stop does;
+        // what arrives during it runs against the fresh workspace.
+        expect(
+          (stopGroup.mock.calls as any[]).some(
+            ([, options]) => !options?.preserveQueuedWork,
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
+  test.each([
+    ['sessions', 'sessions'],
+    ['the legacy /agents alias', 'agents'],
+  ] as const)(
+    'deleting a session through %s leaves it whole when the second check refuses',
+    async (_label, segment) => {
+      const repo = makeRepo();
+      const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
+      const sessionId = (await createSession(jid, { worktree: true })).body
+        .session.id as string;
+      const worktree = store.getSessionWorktree(sessionId)!;
+      const queue = webContext.getWebDeps()!.queue as any;
+      const url = `/${enc(jid)}/${segment}/${sessionId}`;
+
+      // Clean at the first check; the runner writes while it is stopped.
+      stopGroup.mockImplementationOnce(async () => {
+        fs.writeFileSync(path.join(worktree.worktree_path, 'late'), 'x\n');
+      });
+      const refused = await call(agentRoutes, url, { method: 'DELETE' });
+      expect(refused.status).toBe(409);
+      expect(stopGroup).toHaveBeenCalledTimes(1);
+      expect(stopGroup).toHaveBeenCalledWith(`${jid}#agent:${sessionId}`, {
+        force: true,
+        preserveQueuedWork: true,
+      });
+      expect(queue.resumeGroupsAfterMutation).toHaveBeenCalledTimes(1);
+      expect(queue.discardGroupsAfterMutation).not.toHaveBeenCalled();
+      expect(db.getAgent(sessionId)).toMatchObject({ status: 'idle' });
+
+      // The stop itself failing leaves it whole too.
+      fs.rmSync(path.join(worktree.worktree_path, 'late'));
+      stopGroup.mockRejectedValueOnce(new Error('runner would not stop'));
+      const failed = await call(agentRoutes, url, { method: 'DELETE' });
+      expect(failed.status).toBe(500);
+      expect(failed.body.code).toBe('WORKTREE_REMOVE_FAILED');
+      expect(queue.resumeGroupsAfterMutation).toHaveBeenCalledTimes(2);
+      expect(db.getAgent(sessionId)).toMatchObject({ status: 'idle' });
+
+      const forced = await call(agentRoutes, `${url}?force_worktree=true`, {
+        method: 'DELETE',
+      });
+      expect(forced.status).toBe(200);
+      expect(db.getAgent(sessionId)).toBeUndefined();
+      expect(queue.discardGroupsAfterMutation).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('workspace settings', () => {

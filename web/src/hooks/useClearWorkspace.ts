@@ -49,10 +49,10 @@ export function useClearWorkspace() {
   const handleClearConfirm = async () => {
     setClearLoading(true);
     try {
-      const result = await clearHistory(clearState.jid);
-      let ok = result === true;
-      if (typeof result === 'object') {
-        // Session worktrees hold uncommitted work the rebuild would remove.
+      let result = await clearHistory(clearState.jid);
+      // Session worktrees hold work the rebuild would remove. The server
+      // checks again after stopping runners and asks about anything new.
+      while (typeof result === 'object') {
         const discard = await confirmDiscardWorktreeChanges(
           result.worktreesDirty,
           '丢弃并重建',
@@ -61,10 +61,13 @@ export function useClearWorkspace() {
           closeClear();
           return;
         }
-        ok =
-          (await clearHistory(clearState.jid, { forceWorktrees: true })) ===
-          true;
+        result = await clearHistory(clearState.jid, {
+          confirmedWorktrees: result.worktreesDirty.map(
+            (item) => item.sessionId,
+          ),
+        });
       }
+      const ok = result === true;
       if (!ok) toast.error('重建工作区失败，请稍后重试');
       closeClear();
     } catch (err) {

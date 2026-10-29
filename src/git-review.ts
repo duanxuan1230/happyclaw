@@ -99,6 +99,51 @@ function parseConfigEntries(
   return entries;
 }
 
+/**
+ * Environment that redirects which repository, work tree, index or object
+ * store git uses, or injects config: what `git rev-parse --local-env-vars`
+ * lists, plus discovery and config-file overrides. Inherited from the host
+ * process (HappyClaw started from a git hook, say) it would aim every call at
+ * another repository, so no git child sees it.
+ */
+const REPOSITORY_ENV = new Set([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_NAMESPACE',
+  'GIT_PREFIX',
+  'GIT_INTERNAL_SUPER_PREFIX',
+  'GIT_GRAFT_FILE',
+  'GIT_SHALLOW_FILE',
+  'GIT_NO_REPLACE_OBJECTS',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_CONFIG',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+]);
+
+function gitChildEnv(config: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (REPOSITORY_ENV.has(key) || /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) {
+      continue;
+    }
+    env[key] = value;
+  }
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    ...config,
+  };
+}
+
 export async function runGit(
   cwd: string,
   args: string[],
@@ -114,6 +159,8 @@ export async function runGit(
      * asked for in their own repository: `worktree add`.
      */
     trustRepoConfig?: boolean;
+    /** Written to stdin, e.g. paths for `--stdin`; stdin is empty otherwise. */
+    input?: string;
   } = {},
 ): Promise<GitRunResult> {
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
@@ -140,16 +187,14 @@ export async function runGit(
         ...args,
       ],
       {
-        env: {
-          ...process.env,
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_OPTIONAL_LOCKS: '0',
-          ...configEnv,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: gitChildEnv(configEnv),
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
     );
+    // A child that exits before reading all of it is reported by `close`.
+    child.stdin.on('error', () => {});
+    child.stdin.end(options.input ?? '');
     const chunks: Buffer[] = [];
     let size = 0;
     let truncated = false;
