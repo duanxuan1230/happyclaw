@@ -91,6 +91,15 @@ export interface AutomationRuntimeDeps {
     automation: Automation;
     title: string;
   }): Promise<{ sessionJid: string }>;
+  /**
+   * True if the run's input row exists and is still waiting or executing
+   * (not consumed, cancelled or withdrawn). Startup recovery uses it to tell
+   * a queued run that will replay from one whose input is gone.
+   */
+  isAutomationInputPending(req: {
+    sessionJid: string;
+    inputMessageId: string;
+  }): boolean;
   /** True if the session JID resolves to a live Main or Runtime Session. */
   sessionExists(sessionJid: string): boolean;
   /** Hide an old fresh-mode run session (status completed); keeps history. */
