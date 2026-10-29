@@ -31,7 +31,6 @@ import {
   IpcTurnDeliveryTracker,
   IpcTurnOutputCorrelation,
   latestIpcInputMessage,
-  scheduledGroupRunIdFromIpcMessages,
 } from '../container/agent-runner/src/ipc-delivery.js';
 import { normalizeChannelTurnContext } from '../container/agent-runner/src/types.js';
 
@@ -502,7 +501,6 @@ function runner(f: Awaited<ReturnType<typeof fixture>>) {
       runnerInstanceId: f.auth.runnerInstanceId,
       secret: f.auth.signingSecret,
       agentId: f.agentId,
-      taskRunId: null,
     },
     workspaceIpc: path.dirname(f.input),
     workspaceGroup: paths.root,
@@ -512,7 +510,6 @@ function runner(f: Awaited<ReturnType<typeof fixture>>) {
     ipcDeliveryTracker: tracker,
     outputCorrelation: new IpcTurnOutputCorrelation(tracker, 'cold-a'),
     latestIpcInputMessage,
-    scheduledGroupRunIdFromIpcMessages,
     normalizeChannelTurnContext,
     emitOutput: true,
     mcpToolsContext: ctx,

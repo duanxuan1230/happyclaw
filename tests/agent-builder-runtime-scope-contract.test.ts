@@ -27,8 +27,6 @@ describe('Agent Builder runtime scope contract', () => {
     );
     expect(promptAssembly).toMatch(/agentBuilderEnabled/);
     expect(promptAssembly).not.toMatch(/\.\.\.\(isHome &&/);
-    expect(promptAssembly).toMatch(/!containerInput\.isScheduledTask/);
-    expect(promptAssembly).toMatch(/!containerInput\.messageTaskId/);
 
     const toolRegistration = section(
       tools,

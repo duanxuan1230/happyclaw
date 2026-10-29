@@ -13,8 +13,6 @@ import type { SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
-import { CronExpressionParser } from 'cron-parser';
-import { formatIsoLocal } from './utils.js';
 import {
   normalizeChannelTurnContext,
   type ChannelTurnContext,
@@ -29,6 +27,7 @@ import {
   captureWorkspaceSnapshot,
   formatFreshWindowHandoff,
 } from './fresh-window.js';
+import { createAutomationTools } from './automation-tools.js';
 
 /** Context required by MCP tools. Passed at construction time. */
 export interface McpContext {
@@ -44,13 +43,6 @@ export interface McpContext {
   ownerProfileEnabled: boolean;
   /** Public reply contract selected by the workspace. */
   interactionMode?: 'assistant' | 'proactive';
-  isScheduledTask?: boolean;
-  /** Mutable: set when the current IPC turn was triggered by a task prompt.
-   * Cleared between turns by the agent-runner main loop so that regular
-   * follow-up messages aren't misattributed to the prior task. */
-  currentTaskId?: string | null;
-  /** Exact durable group-mode occurrence correlated from the scheduler prompt. */
-  currentScheduledTaskRunId?: string | null;
   /** Mutable correlation id for the user input currently being answered.
    * Cold starts use the triggering message id; IPC turns use the host-issued
    * delivery id from their receipt. */
@@ -74,7 +66,6 @@ export interface McpContext {
     runnerInstanceId: string;
     secret: string;
     agentId?: string | null;
-    taskRunId?: string | null;
   };
   workspaceIpc: string;
   workspaceGroup: string;
@@ -206,7 +197,6 @@ export function activateMcpChannelTurn(
       {
         groupFolder: ctx.groupFolder,
         agentId: auth.agentId ?? null,
-        taskRunId: auth.taskRunId ?? null,
       },
       request,
     );
@@ -411,7 +401,6 @@ async function callWorkspaceMemory(
     operation,
     requestId,
     inputTurnId: ctx.currentInputTurnId || undefined,
-    taskId: ctx.currentTaskId || undefined,
     sessionId: ctx.currentSessionId || undefined,
     timestamp: new Date().toISOString(),
   };
@@ -428,7 +417,6 @@ async function callWorkspaceMemory(
         {
           groupFolder: ctx.groupFolder,
           agentId: auth.agentId ?? null,
-          taskRunId: auth.taskRunId ?? null,
         },
         request,
       );
@@ -475,7 +463,6 @@ async function callHappyClawOwnerProfile(
       {
         groupFolder: ctx.groupFolder,
         agentId: auth.agentId ?? null,
-        taskRunId: auth.taskRunId ?? null,
       },
       request,
     );
@@ -678,12 +665,10 @@ function memoryIdempotencyKey(
 /**
  * Build the IPC payload shared by send_message / send_image MCP tools.
  *
- * Always stamps `chatJid`, `groupFolder`, `timestamp`. Conditionally stamps
- * `isScheduledTask` (when ctx.isScheduledTask is truthy) and `taskId` (when
- * ctx.currentTaskId is non-empty). The conditional stamping matters for host-
- * side routing: a missing `taskId` key means "regular user-turn reply", while
- * a present `taskId` key triggers the task-broadcast branch in the IPC
- * consumer. `extras` carries per-tool fields (`type`, `text`, `imageBase64`, …).
+ * Always stamps `chatJid`, `groupFolder`, `timestamp`, the frozen interaction
+ * mode, and the current `inputTurnId` when there is one (the host routes the
+ * delivery to that input's source). `extras` carries per-tool fields (`type`,
+ * `text`, `imageBase64`, …).
  *
  * Pure function; exported for unit testing.
  */
@@ -701,15 +686,6 @@ export function buildSendMessageData(
     interactionMode:
       ctx.interactionMode === 'proactive' ? 'proactive' : 'assistant',
   };
-  if (ctx.isScheduledTask) {
-    data.isScheduledTask = true;
-  }
-  if (ctx.currentTaskId) {
-    data.taskId = ctx.currentTaskId;
-  }
-  if (ctx.currentScheduledTaskRunId) {
-    data.scheduledTaskRunId = ctx.currentScheduledTaskRunId;
-  }
   if (ctx.currentInputTurnId) {
     data.inputTurnId = ctx.currentInputTurnId;
   }
@@ -728,17 +704,8 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   /**
    * Must stay in step with `usesProactiveInteractiveContract()` in
    * container/agent-runner/src/index.ts, which selects the system prompt.
-   *
-   * A message-triggered task run gets the task delivery contract, not the
-   * interactive Proactive one. The tool descriptions here checked only
-   * `isScheduledTask`, so such a run was told two different things at once: the
-   * prompt said "send one complete result when the task is done" while the tool
-   * said "call me zero, one, or many times".
    */
-  const usesProactiveInteractiveContract =
-    ctx.interactionMode === 'proactive' &&
-    !ctx.isScheduledTask &&
-    !ctx.currentTaskId;
+  const usesProactiveInteractiveContract = ctx.interactionMode === 'proactive';
 
   const currentChannelContext = (): ChannelTurnContext | undefined =>
     normalizeChannelTurnContext(ctx.channelContext, ctx.chatJid);
@@ -816,7 +783,6 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
         ...payload,
         requestId,
         chatJid: ctx.chatJid,
-        isScheduledTask: ctx.isScheduledTask || undefined,
         timestamp: new Date().toISOString(),
       },
       `${type}_result`,
@@ -1005,7 +971,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
       'send_message',
       usesProactiveInteractiveContract
         ? "Send user-visible output or update live progress. The Workspace uses Proactive reply mode: your normal SDK final text is not published. Set delivery_role=final for the turn's permanent chat reply (which seals the turn), delivery_role=progress for an acknowledgement or interim update (on the Web it joins the live work process and folds away once final is sent; on an IM channel it is sent as a message of its own), and delivery_role=separate only when an additional standalone chat message is genuinely needed. You may call this tool zero, one, or many times and continue working after each successful progress send. A delivery error is authoritative: do not sleep and retry, switch to a card, or call a raw channel API as a fallback."
-        : "Publish text through HappyClaw's turn-owned delivery coordinator. In an interactive user turn, delivery_role=progress updates the existing reply status and delivery_role=final stages the primary answer on the existing card; neither creates a second text reply. Use delivery_role=separate only when the user explicitly requested another message. Scheduled/background tasks always deliver separately because their normal SDK final is not published.",
+        : "Publish text through HappyClaw's turn-owned delivery coordinator. In an interactive user turn, delivery_role=progress updates the existing reply status and delivery_role=final stages the primary answer on the existing card; neither creates a second text reply. Use delivery_role=separate only when the user explicitly requested another message.",
       {
         // Trim/min-length at the schema layer: the host guard is `!data.text`,
         // which a whitespace-only string passes, so it reached the chat as an
@@ -1017,15 +983,13 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
           .describe(
             usesProactiveInteractiveContract
               ? 'progress is an acknowledgement or interim update (Web: in the live work process, folded once final is sent; IM: a message of its own); final delivers the permanent chat reply and seals the turn; separate sends an extra standalone chat message. Omitted defaults to progress.'
-              : 'progress updates the active reply, final stages its answer, separate creates an additional message. Defaults to final for interactive turns and separate for scheduled tasks.',
+              : 'progress updates the active reply, final stages its answer, separate creates an additional message. Defaults to final.',
           ),
       },
       async (args) => {
-        const deliveryRole = ctx.isScheduledTask
-          ? 'separate'
-          : ctx.interactionMode === 'proactive'
-            ? (args.delivery_role ?? 'progress')
-            : (args.delivery_role ?? 'final');
+        const deliveryRole = usesProactiveInteractiveContract
+          ? (args.delivery_role ?? 'progress')
+          : (args.delivery_role ?? 'final');
         if (
           usesProactiveInteractiveContract &&
           deliveryRole === 'final' &&
@@ -1338,866 +1302,31 @@ The actual file types and size limit are enforced by the selected provider.`,
       },
     ),
 
-    // --- schedule_task ---
+    // --- schedule_task (removed) ---
+    // Kept only so an agent that still knows the old name is pointed at the
+    // replacement; it accepts any arguments and does nothing.
     tool(
       'schedule_task',
-      `Schedule a recurring or one-time task.
-
-EXECUTION TYPE:
-\u2022 "agent" (default): Task runs as a full Claude Agent with access to all tools. Consumes API tokens.
-\u2022 "script" (admin only): Task runs a shell command directly on the host. Zero API token cost. Use for deterministic tasks like health checks, data collection, cURL calls, or cron-like scripts.
-
-EXECUTION MODE:
-\u2022 "host": Task runs directly on the host machine. Admin only.
-\u2022 "container" (default for non-admin): Task runs in a Docker container.
-Each agent task runs in its source workspace (same files, mounts, skills, and Agent profile).
-
-CONTEXT MODE (agent mode only) - Choose based on task type:
-\u2022 "group": Task runs in the group's conversation context, with access to chat history.
-\u2022 "isolated": Each trigger gets a fresh, independent session inside the source workspace. The session and virtual task chat are removed after that run.
-
-MESSAGING BEHAVIOR - The task output is sent to the user or group.
-\u2022 Agent mode: output is sent via MCP tool or stdout. Use <internal> tags to suppress.
-\u2022 Script mode: stdout is sent as the result. stderr is included on failure.
-
-SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
-\u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
-\u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
-\u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
-      {
-        prompt: z
-          .string()
-          .optional()
-          .default('')
-          .describe(
-            'The action to perform on EACH run (agent mode), or task description (script mode). The repeat cadence is expressed by schedule_type/schedule_value — do NOT put scheduling words like "每隔N/每天/定期/提醒我/every N" into the prompt. This prompt is replayed verbatim to the agent on every trigger to execute, so write it as a direct imperative action, not as a request to schedule something.',
-          ),
-        schedule_type: z
-          .enum(['cron', 'interval', 'once'])
-          .describe(
-            'cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time',
-          ),
-        schedule_value: z
-          .string()
-          .describe(
-            'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
-          ),
-        execution_type: z
-          .enum(['agent', 'script'])
-          .default('agent')
-          .describe(
-            'agent=full Claude Agent (default), script=shell command (admin only, zero token cost)',
-          ),
-        script_command: z
-          .string()
-          .max(4096)
-          .optional()
-          .describe(
-            'Shell command to execute (required for script mode). Runs in the group workspace directory.',
-          ),
-        execution_mode: z
-          .enum(['host', 'container'])
-          .optional()
-          .describe(
-            'Execution mode: host runs directly on the server, container runs in Docker isolation',
-          ),
-        context_mode: z
-          .enum(['group', 'isolated'])
-          .default('isolated')
-          .describe(
-            '(agent mode only) isolated=fresh session each time (default), group=runs with persistent workspace context',
-          ),
-        target_group_jid: z
-          .string()
-          .optional()
-          .describe(
-            '(Admin home only) JID of the group to schedule the task for. Defaults to the current group.',
-          ),
-      },
-      async (args) => {
-        const execType = args.execution_type || 'agent';
-
-        // Validate execution_type constraints
-        if (execType === 'agent' && !args.prompt?.trim()) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Agent mode requires a prompt. Provide instructions for what the agent should do.',
-              },
-            ],
-            isError: true,
-          };
-        }
-        if (execType === 'script' && !args.script_command?.trim()) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Script mode requires script_command. Provide the shell command to execute.',
-              },
-            ],
-            isError: true,
-          };
-        }
-        if (execType === 'script' && !ctx.isAdminHome) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Only admin home container can create script tasks.',
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Validate schedule_value before writing IPC
-        if (args.schedule_type === 'cron') {
-          try {
-            const interval = CronExpressionParser.parse(args.schedule_value, {
-              tz: process.env.TZ || 'Asia/Shanghai',
-            });
-            if (interval.fields.second.values.length !== 1) {
-              throw new Error('Cron frequency must be at least 60 seconds');
-            }
-          } catch {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        } else if (args.schedule_type === 'interval') {
-          const ms = Number(args.schedule_value);
-          if (!Number.isFinite(ms) || ms < 60_000) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Invalid interval: "${args.schedule_value}". Must be at least 60000 milliseconds (e.g., "300000" for 5 min).`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        } else if (args.schedule_type === 'once') {
-          const date = new Date(args.schedule_value);
-          if (isNaN(date.getTime())) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Invalid timestamp: "${args.schedule_value}". Use ISO 8601 format like "2026-02-01T15:30:00.000Z".`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        }
-
-        const targetJid =
-          hasCrossGroupAccess && args.target_group_jid
-            ? args.target_group_jid
-            : ctx.chatJid;
-        const requestId = newRequestId();
-        const data: Record<string, unknown> & { requestId: string } = {
-          type: 'schedule_task',
-          requestId,
-          prompt: args.prompt || '',
-          schedule_type: args.schedule_type,
-          schedule_value: args.schedule_value,
-          context_mode: args.context_mode || 'isolated',
-          execution_type: execType,
-          targetJid,
-          createdBy: ctx.groupFolder,
-          timestamp: new Date().toISOString(),
-        };
-        if (execType === 'script') {
-          data.script_command = args.script_command;
-        }
-        if (args.execution_mode) {
-          data.execution_mode = args.execution_mode;
-        }
-        const modeLabel = execType === 'script' ? 'script' : 'agent';
-        // 改为阻塞确认：等主进程真正落库后回执，避免 fire-and-forget 的“报成功但没建成”。
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            data,
-            'schedule_task_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to schedule task: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          const nextRun = result.nextRun
-            ? ` 下次触发：${formatIsoLocal(result.nextRun as string)}`
-            : '';
-          const dup = result.duplicate
-            ? '（已存在完全相同的活动任务，未重复创建，返回的是已有任务）'
-            : '';
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Task scheduled [${modeLabel}] id=${result.taskId ?? '?'}: ${args.schedule_type} - ${args.schedule_value}.${nextRun}${dup}`,
-              },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Timeout waiting for schedule_task confirmation. 任务可能已创建也可能未创建——请先用 list_tasks 核实，不要直接重试以免重复创建。',
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
+      '已停用，请改用 mcp__happyclaw__automation_create。',
+      {},
+      async () => ({
+        content: [
+          {
+            type: 'text' as const,
+            text: '定时任务已改为自动化：请改用 mcp__happyclaw__automation_create',
+          },
+        ],
+        isError: true,
+      }),
     ),
 
-    // --- list_tasks ---
-    tool(
-      'list_tasks',
-      "List all scheduled tasks. From admin home: shows all tasks. From other groups: shows only that group's tasks.",
-      {
-        include_deleted: z
-          .boolean()
-          .default(false)
-          .describe(
-            'Include soft-deleted tasks so they can be inspected/restored',
-          ),
-      },
-      async (args) => {
-        const requestId = newRequestId();
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            {
-              type: 'list_tasks',
-              requestId,
-              groupFolder: ctx.groupFolder,
-              isAdminHome: hasCrossGroupAccess,
-              includeDeleted: args.include_deleted,
-              timestamp: new Date().toISOString(),
-            },
-            'list_tasks_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Error listing tasks: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          const tasks = (result.tasks || []) as Array<{
-            id: string;
-            prompt: string;
-            schedule_type: string;
-            schedule_value: string;
-            status: string;
-            next_run: string | null;
-            revision: number;
-            current_run?: { id: string; status: string } | null;
-            deleted_at?: string | null;
-          }>;
-          if (tasks.length === 0) {
-            return {
-              content: [
-                { type: 'text' as const, text: 'No scheduled tasks found.' },
-              ],
-            };
-          }
-          const formatted = tasks
-            .map(
-              (t) =>
-                `- [${t.id}] rev=${t.revision}${t.deleted_at ? ' [deleted]' : ''} ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.current_run?.status || t.status}, next: ${t.next_run ? formatIsoLocal(t.next_run) : '-'}`,
-            )
-            .join('\n');
-          return {
-            content: [
-              { type: 'text' as const, text: `Scheduled tasks:\n${formatted}` },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Timeout waiting for task list response.',
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- pause_task ---
-    tool(
-      'pause_task',
-      'Pause future scheduled occurrences. A currently running occurrence continues; use stop_task_run to stop it.',
-      {
-        task_id: z.string().describe('The task ID to pause'),
-        expected_revision: z
-          .number()
-          .int()
-          .positive()
-          .describe('Revision returned by list_tasks'),
-      },
-      async (args) => {
-        const data = {
-          type: 'pause_task',
-          requestId: newRequestId(),
-          taskId: args.task_id,
-          expectedRevision: args.expected_revision,
-          groupFolder: ctx.groupFolder,
-          isMain: hasCrossGroupAccess,
-          timestamp: new Date().toISOString(),
-        };
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            data,
-            'pause_task_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to pause task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          return {
-            content: [
-              { type: 'text' as const, text: `Task ${args.task_id} paused.` },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for pause confirmation for task ${args.task_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- resume_task ---
-    tool(
-      'resume_task',
-      'Resume a paused task.',
-      {
-        task_id: z.string().describe('The task ID to resume'),
-        expected_revision: z
-          .number()
-          .int()
-          .positive()
-          .describe('Revision returned by list_tasks'),
-      },
-      async (args) => {
-        const data = {
-          type: 'resume_task',
-          requestId: newRequestId(),
-          taskId: args.task_id,
-          expectedRevision: args.expected_revision,
-          groupFolder: ctx.groupFolder,
-          isMain: hasCrossGroupAccess,
-          timestamp: new Date().toISOString(),
-        };
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            data,
-            'resume_task_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to resume task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          return {
-            content: [
-              { type: 'text' as const, text: `Task ${args.task_id} resumed.` },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for resume confirmation for task ${args.task_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- cancel_task ---
-    tool(
-      'cancel_task',
-      'Soft-delete a scheduled task. Future runs stop, but run history is retained.',
-      {
-        task_id: z.string().describe('The task ID to delete'),
-        expected_revision: z
-          .number()
-          .int()
-          .positive()
-          .describe('Revision returned by list_tasks'),
-      },
-      async (args) => {
-        const data = {
-          type: 'cancel_task',
-          requestId: newRequestId(),
-          taskId: args.task_id,
-          expectedRevision: args.expected_revision,
-          groupFolder: ctx.groupFolder,
-          isMain: hasCrossGroupAccess,
-          timestamp: new Date().toISOString(),
-        };
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            data,
-            'cancel_task_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to cancel task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Task ${args.task_id} deleted. Its run history is retained.`,
-              },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for cancel confirmation for task ${args.task_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- update_task ---
-    tool(
-      'update_task',
-      `Update an existing scheduled task IN PLACE. Strongly PREFER this over cancel_task + schedule_task when modifying an existing task: delete-then-recreate risks leaving a duplicate (if the delete silently fails) or losing the task entirely. Only the fields you pass are changed; omit a field to keep its current value.`,
-      {
-        task_id: z.string().describe('The task ID to update'),
-        expected_revision: z
-          .number()
-          .int()
-          .positive()
-          .describe(
-            'Revision returned by list_tasks. The update is rejected if the task changed since it was listed.',
-          ),
-        prompt: z
-          .string()
-          .optional()
-          .describe('New action/instructions for the task (agent mode)'),
-        schedule_type: z
-          .enum(['cron', 'interval', 'once'])
-          .optional()
-          .describe(
-            'New schedule type. If you change this you MUST also pass schedule_value.',
-          ),
-        schedule_value: z
-          .string()
-          .optional()
-          .describe(
-            'New schedule value (LOCAL time): cron expr | interval ms | once "2026-02-01T15:30:00" (no Z).',
-          ),
-        context_mode: z
-          .enum(['group', 'isolated'])
-          .optional()
-          .describe('New context mode (agent mode)'),
-        execution_type: z
-          .enum(['agent', 'script'])
-          .optional()
-          .describe('New execution type (script is admin only)'),
-        script_command: z
-          .string()
-          .max(4096)
-          .optional()
-          .describe('New shell command (script mode)'),
-        execution_mode: z
-          .enum(['host', 'container'])
-          .optional()
-          .describe('New execution mode (host is admin only)'),
-      },
-      async (args) => {
-        // 改 schedule_type 必须同时给 schedule_value，否则主进程无法据新类型重算 next_run。
-        if (args.schedule_type && !args.schedule_value) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'When changing schedule_type you must also provide a matching schedule_value.',
-              },
-            ],
-            isError: true,
-          };
-        }
-        const data: Record<string, unknown> & { requestId: string } = {
-          type: 'update_task',
-          requestId: newRequestId(),
-          taskId: args.task_id,
-          expectedRevision: args.expected_revision,
-          groupFolder: ctx.groupFolder,
-          isMain: hasCrossGroupAccess,
-          timestamp: new Date().toISOString(),
-        };
-        for (const k of [
-          'prompt',
-          'schedule_type',
-          'schedule_value',
-          'context_mode',
-          'execution_type',
-          'script_command',
-          'execution_mode',
-        ] as const) {
-          if (args[k] !== undefined) data[k] = args[k];
-        }
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            data,
-            'update_task_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to update task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          const nextRun = result.nextRun
-            ? ` 下次触发：${formatIsoLocal(result.nextRun as string)}`
-            : '';
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Task ${args.task_id} updated.${nextRun}`,
-              },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for update confirmation for task ${args.task_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- run_task_now ---
-    tool(
-      'run_task_now',
-      'Run a scheduled task once now without changing its future schedule. A paused task stays paused.',
-      {
-        task_id: z.string().describe('The task ID to run'),
-        idempotency_key: z
-          .string()
-          .optional()
-          .describe(
-            'Stable retry key; reuse it when retrying an uncertain request',
-          ),
-      },
-      async (args) => {
-        const requestId = newRequestId();
-        const idempotencyKey = args.idempotency_key || requestId;
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            {
-              type: 'run_task_now',
-              requestId,
-              taskId: args.task_id,
-              idempotencyKey,
-              timestamp: new Date().toISOString(),
-            },
-            'run_task_now_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to run task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              structuredContent: {
-                success: false,
-                task_id: args.task_id,
-                error: result.error || 'Unknown error',
-                existing_run_id: result.runId ?? null,
-                idempotency_key: idempotencyKey,
-              },
-              isError: true,
-            };
-          }
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Task queued. run_id=${result.runId ?? '?'}. This one-time run does not change the future schedule.`,
-              },
-            ],
-            structuredContent: {
-              success: true,
-              task_id: args.task_id,
-              run_id: result.runId ?? null,
-              status: 'queued',
-              idempotency_key: idempotencyKey,
-            },
-          };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout while starting task ${args.task_id}. Retry with idempotency_key=${idempotencyKey} or inspect task runs first.`,
-              },
-            ],
-            structuredContent: {
-              success: false,
-              task_id: args.task_id,
-              uncertain: true,
-              idempotency_key: idempotencyKey,
-            },
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- stop_task_run ---
-    tool(
-      'stop_task_run',
-      'Stop one queued or running occurrence. This does not pause future scheduled runs.',
-      {
-        run_id: z
-          .string()
-          .describe('Run ID returned by run_task_now/list_task_runs'),
-      },
-      async (args) => {
-        const requestId = newRequestId();
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            {
-              type: 'stop_task_run',
-              requestId,
-              runId: args.run_id,
-              timestamp: new Date().toISOString(),
-            },
-            'stop_task_run_result',
-          );
-          return result.success
-            ? {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `Run ${args.run_id} stopped. Future task schedules are unchanged.`,
-                  },
-                ],
-              }
-            : {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `Failed to stop run ${args.run_id}: ${result.error || 'Unknown error'}`,
-                  },
-                ],
-                isError: true,
-              };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for stop confirmation for run ${args.run_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- restore_task ---
-    tool(
-      'restore_task',
-      'Restore a soft-deleted task as paused. It will not run until explicitly resumed.',
-      {
-        task_id: z.string(),
-        expected_revision: z.number().int().positive(),
-      },
-      async (args) => {
-        const requestId = newRequestId();
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            {
-              type: 'restore_task',
-              requestId,
-              taskId: args.task_id,
-              expectedRevision: args.expected_revision,
-              timestamp: new Date().toISOString(),
-            },
-            'restore_task_result',
-          );
-          return result.success
-            ? {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `Task ${args.task_id} restored as paused (revision ${result.revision ?? '?'}).`,
-                  },
-                ],
-              }
-            : {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `Failed to restore task ${args.task_id}: ${result.error || 'Unknown error'}`,
-                  },
-                ],
-                isError: true,
-              };
-        } catch {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: `Timeout waiting for restore confirmation for task ${args.task_id}.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      },
-    ),
-
-    // --- list_task_runs ---
-    tool(
-      'list_task_runs',
-      'List recent occurrences for a scheduled task, including attempts and notification state.',
-      {
-        task_id: z.string(),
-        limit: z.number().int().min(1).max(50).default(20),
-      },
-      async (args) => {
-        const requestId = newRequestId();
-        try {
-          const result = await pollIpcResult(
-            TASKS_DIR,
-            {
-              type: 'list_task_runs',
-              requestId,
-              taskId: args.task_id,
-              limit: args.limit,
-              timestamp: new Date().toISOString(),
-            },
-            'list_task_runs_result',
-          );
-          if (!result.success) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Failed to list runs: ${result.error || 'Unknown error'}`,
-                },
-              ],
-              isError: true,
-            };
-          }
-          const runs = (result.runs || []) as Array<Record<string, unknown>>;
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text:
-                  runs.length === 0
-                    ? 'No task runs found.'
-                    : runs
-                        .map(
-                          (run) =>
-                            `- [${String(run.id)}] ${String(run.status)} trigger=${String(run.trigger_type)} attempt=${String(run.attempt)} scheduled=${formatIsoLocal(String(run.scheduled_for))} notification=${String(run.notification_status)}`,
-                        )
-                        .join('\n'),
-              },
-            ],
-          };
-        } catch {
-          return {
-            content: [
-              { type: 'text' as const, text: 'Timeout listing task runs.' },
-            ],
-            isError: true,
-          };
-        }
-      },
+    // --- automations ---
+    ...createAutomationTools((request, resultPrefix) =>
+      pollIpcResult(
+        TASKS_DIR,
+        request as unknown as Record<string, unknown> & { requestId: string },
+        resultPrefix,
+      ),
     ),
 
     // --- register_group ---
@@ -2876,7 +2005,7 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
     );
   }
 
-  if (ctx.ownerProfileEnabled && !ctx.isScheduledTask && !ctx.currentTaskId) {
+  if (ctx.ownerProfileEnabled) {
     tools.push(
       tool(
         'happyclaw_owner_profile',
@@ -2935,91 +2064,88 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
   }
 
   // Optional zero-summary window switch. Does not replace SDK auto-compact.
-  // Scheduled/task turns already isolate context; do not let them reset the
-  // interactive session that owns this workspace.
-  if (!ctx.isScheduledTask && !ctx.currentTaskId) {
-    tools.push(
-      tool(
-        'fresh_window',
-        'Open a clean new SDK session/window without summarizing history. Use when a stage of work is complete or context pressure is high and you want a structured handoff (notes + next focus + a light git snapshot) instead of continuing in the current window. Old history stays in the database. This does not disable auto-compact. After a successful submit the current session is replaced; do not keep working in this window.',
-        {
-          notes: z
-            .string()
-            .trim()
-            .min(1)
-            .describe(
-              'What was accomplished, decided, or left unfinished. Do not dump or summarize the full transcript.',
-            ),
-          next_focus: z
-            .string()
-            .trim()
-            .min(1)
-            .optional()
-            .describe('What the next window should do first.'),
-        },
-        async (args) => {
-          const snapshot = await captureWorkspaceSnapshot(ctx.workspaceGroup);
-          const handoff = formatFreshWindowHandoff({
-            notes: args.notes,
-            nextFocus: args.next_focus,
-            snapshot,
-          });
-          const requestId = newRequestId();
-          const data: Record<string, unknown> & { requestId: string } = {
-            type: 'fresh_window',
-            chatJid: ctx.chatJid,
-            groupFolder: ctx.groupFolder,
-            notes: args.notes,
-            next_focus: args.next_focus,
-            handoff,
-            requestId,
-            timestamp: new Date().toISOString(),
-          };
-          try {
-            const result = await pollIpcResult(
-              TASKS_DIR,
-              data,
-              'fresh_window_result',
-              30_000,
-            );
-            if (!result.success) {
-              return {
-                content: [
-                  {
-                    type: 'text' as const,
-                    text: `零摘要换窗失败：${typeof result.error === 'string' ? result.error : 'host rejected the request'}`,
-                  },
-                ],
-                isError: true,
-              };
-            }
-          } catch (err) {
-            console.warn(
-              '[fresh_window] IPC poll did not confirm host acceptance',
-              err,
-            );
+  // The host decides whether the current turn may switch the window.
+  tools.push(
+    tool(
+      'fresh_window',
+      'Open a clean new SDK session/window without summarizing history. Use when a stage of work is complete or context pressure is high and you want a structured handoff (notes + next focus + a light git snapshot) instead of continuing in the current window. Old history stays in the database. This does not disable auto-compact. After a successful submit the current session is replaced; do not keep working in this window.',
+      {
+        notes: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            'What was accomplished, decided, or left unfinished. Do not dump or summarize the full transcript.',
+          ),
+        next_focus: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe('What the next window should do first.'),
+      },
+      async (args) => {
+        const snapshot = await captureWorkspaceSnapshot(ctx.workspaceGroup);
+        const handoff = formatFreshWindowHandoff({
+          notes: args.notes,
+          nextFocus: args.next_focus,
+          snapshot,
+        });
+        const requestId = newRequestId();
+        const data: Record<string, unknown> & { requestId: string } = {
+          type: 'fresh_window',
+          chatJid: ctx.chatJid,
+          groupFolder: ctx.groupFolder,
+          notes: args.notes,
+          next_focus: args.next_focus,
+          handoff,
+          requestId,
+          timestamp: new Date().toISOString(),
+        };
+        try {
+          const result = await pollIpcResult(
+            TASKS_DIR,
+            data,
+            'fresh_window_result',
+            30_000,
+          );
+          if (!result.success) {
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `零摘要换窗未确认提交：${err instanceof Error ? err.message : String(err)}`,
+                  text: `零摘要换窗失败：${typeof result.error === 'string' ? result.error : 'host rejected the request'}`,
                 },
               ],
               isError: true,
             };
           }
+        } catch (err) {
+          console.warn(
+            '[fresh_window] IPC poll did not confirm host acceptance',
+            err,
+          );
           return {
             content: [
               {
                 type: 'text' as const,
-                text: '已提交零摘要换窗。新窗口将携带交接说明；历史仍在库中，未做摘要。',
+                text: `零摘要换窗未确认提交：${err instanceof Error ? err.message : String(err)}`,
               },
             ],
+            isError: true,
           };
-        },
-      ),
-    );
-  }
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: '已提交零摘要换窗。新窗口将携带交接说明；历史仍在库中，未做摘要。',
+            },
+          ],
+        };
+      },
+    ),
+  );
 
   // Workspace is the only durable continuity boundary. The model never
   // supplies a workspace, owner, actor, or filesystem path: the host derives
@@ -3088,7 +2214,7 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
   );
 
   // The host decides what a write becomes: the owner's own interactive turns
-  // write memory; any other turn (a group member's, a scheduled run) saves a
+  // write memory; any other turn (a group member's, an automation run) saves a
   // proposal the owner confirms. Spawned and task Agents are refused by the
   // host, SDK sub-agents by the PreToolUse runtime hook.
   tools.push(
@@ -3221,8 +2347,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'feishu_list_members',
   'feishu_get_user',
   'feishu_get_history',
-  'list_tasks',
-  'list_task_runs',
+  'automation_list',
+  'automation_list_runs',
   'discord_get_history',
   'discord_get_channel_info',
   'discord_get_server_info',

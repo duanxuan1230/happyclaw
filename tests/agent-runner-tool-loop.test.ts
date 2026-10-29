@@ -70,8 +70,8 @@ describe('polling calls', () => {
     ['Monitor', { name: 'Monitor', input: { description: 'x' } }, true],
     ['team task list', { name: 'TaskList', input: {} }, true],
     [
-      'scheduled run status',
-      { name: 'mcp__happyclaw__list_task_runs', input: { task_id: 't' } },
+      'automation run status',
+      { name: 'mcp__happyclaw__automation_list_runs', input: { id: 'a' } },
       true,
     ],
     ['background task output file', read('/tmp/tasks/b1a2.output'), true],

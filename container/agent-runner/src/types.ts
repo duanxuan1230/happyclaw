@@ -233,7 +233,6 @@ export interface ContainerInput {
   isHome?: boolean;
   /** Whether this is the admin's home container (full privileges). */
   isAdminHome?: boolean;
-  isScheduledTask?: boolean;
   /**
    * Internal HMAC secret delivered only in the stdin bootstrap. It must remain
    * runner-private and must never be written to IPC, files, env, or prompts.
@@ -241,14 +240,8 @@ export interface ContainerInput {
   workspaceMemoryMutationSigningSecret?: string;
   /** Public identity paired with the runner-private signing secret. */
   workspaceMemoryRunnerInstanceId?: string;
-  /** Isolated task-run namespace selected by the host. */
-  taskRunId?: string;
   /** Claude session/provider namespace selected by the host runner. */
   sessionAgentId?: string;
-  /** If the last unprocessed message was emitted by a scheduled task prompt,
-   * this is that task's ID; used to tag MCP send_message outputs so the host
-   * routes results to the task's configured chat_jid / notify channels. */
-  messageTaskId?: string;
   images?: Array<{ data: string; mimeType?: string }>;
   agentProfile?: {
     id: string;
@@ -312,7 +305,7 @@ export interface ContainerOutput {
    *
    * Proactive mode keeps `result` null and public interactive hosts must never
    * publish this candidate. It crosses the runner boundary only for internal
-   * diagnostics and scheduled-result extraction.
+   * diagnostics and automation result extraction.
    */
   proactiveFinalCandidate?: string;
   newSessionId?: string;
