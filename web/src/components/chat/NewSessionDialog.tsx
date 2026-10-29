@@ -114,7 +114,11 @@ export function NewSessionDialog({
               maxLength={40}
               onChange={(event) => setName(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') void handleCreate();
+                // Enter that confirms an IME candidate is not a submit.
+                if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void handleCreate();
+                }
               }}
               placeholder="留空则根据第一条消息自动命名"
               autoFocus
