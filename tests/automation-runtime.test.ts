@@ -546,7 +546,7 @@ describe('who is calling an automation tool', () => {
       workspaceJid: WORKSPACE,
       sessionJid: TOPIC_SESSION,
       owner: { id: OWNER, role: 'member', status: 'active' },
-      activeBatch: registry.activeBatch(scope),
+      turns: registry.activeBatch(scope),
       loadInput: (_jid, id) => (inputs[id] as never) ?? null,
       isOwnerTurn: () => isOwnerTurn,
     });

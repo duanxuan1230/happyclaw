@@ -1932,6 +1932,50 @@ function withdrawQueuedInput(chatJid: string, messageId: string): boolean {
   return true;
 }
 
+/**
+ * A prepared batch holding inputs of runs that ended meanwhile does not
+ * start (true). Every turn of the batch is closed here, before the runner
+ * exists:
+ * - all ended: their turns are cancelled and the batch is committed.
+ * - mixed: only the ended inputs are consumed; the other turns go back to
+ *   retry and the lane reads the rest again, so their prompt is built
+ *   without the ended ones.
+ */
+function withdrawEndedAutomationInputs(
+  laneJid: string,
+  messages: NewMessage[],
+  runtimes: Map<string, ChannelTurnRuntime>,
+  turns: AutomationTurnTracker,
+  commitBatch: () => void,
+): boolean {
+  const ended = messages.filter(isEndedAutomationInput);
+  if (ended.length === 0) return false;
+  const all = ended.length === messages.length;
+  const endedIds = new Set(ended.map((message) => message.id));
+  for (const [inputTurnId, runtime] of runtimes) {
+    if (all || endedIds.has(inputTurnId)) {
+      settleInterruptedChannelTurn(
+        runtimes,
+        inputTurnId,
+        'Automation run ended before its turn started',
+      );
+      continue;
+    }
+    runtime.retry('Batch read again without an ended automation input');
+    runtime.dispose();
+    runtimes.delete(inputTurnId);
+  }
+  if (all) {
+    commitBatch();
+    return true;
+  }
+  // The rest runs in a fresh round; nothing of this one is settled.
+  for (const message of messages) turns.forget(message.id);
+  completeOutOfBandMessages(laneJid, ended);
+  queue.enqueueMessageCheck(laneJid);
+  return true;
+}
+
 /** Queued automation inputs whose run ended leave the queue unexecuted. */
 function withdrawQueuedInputsOfEndedRuns(chatJid: string): void {
   for (const item of listQueuedAutomationFollowUps(chatJid)) {
@@ -7930,7 +7974,10 @@ async function processGroupMessages(
     activeImReplyRoutes.delete(effectiveGroup.folder);
     if (disposition === 'skip_terminal') {
       // The turn already reached its terminal before this attempt.
-      automationTurns.settleSuccess(lastProcessed.id);
+      automationTurns.settleFinishedTurn(
+        lastProcessed.id,
+        channelTurnRuntime.openedStatus,
+      );
       await clearProcessingIndicatorForInput(lastProcessed.id);
       advanceCursors(chatJid, {
         timestamp: lastProcessed.timestamp,
@@ -9023,9 +9070,16 @@ async function processGroupMessages(
       );
     };
     // A run cancelled while this batch was being prepared is not started.
-    // Past this point a cancel finds the batch active and stops the query.
-    if (missedMessages.some(isEndedAutomationInput)) {
-      commitCursor();
+    // Past this point a cancel finds the batch delivered and stops the query.
+    if (
+      withdrawEndedAutomationInputs(
+        chatJid,
+        missedMessages,
+        channelTurnRuntimes,
+        automationTurns,
+        commitCursor,
+      )
+    ) {
       await clearProcessingIndicatorForInput(lastProcessed.id);
       return true;
     }
@@ -13646,16 +13700,23 @@ async function cancelAutomationLaneInput(
     return;
   }
   const folder = resolveEffectiveFolder(laneJid);
-  const executing =
+  const delivered =
     !!folder &&
-    activeAgentBuilderTurns
-      .activeBatch(agentBuilderTurnScope(folder, agentIdOfJid(laneJid)))
-      .some((turn) => turn.messageId === messageId);
+    activeAgentBuilderTurns.hasDeliveredMessage(
+      agentBuilderTurnScope(folder, agentIdOfJid(laneJid)),
+      messageId,
+    );
   if (
-    executing ||
+    delivered ||
     queue.activeQueryExclusivelyCoversMessage(laneJid, messageId)
   ) {
-    queue.interruptQuery(laneJid, undefined, 'stop');
+    // The runner has it, executing or piped behind the current query.
+    // Steer-interrupt the query so its other inputs run again next round,
+    // and close the runner: on exit every unacknowledged delivery returns
+    // to the durable cursor (its IPC copy is discarded), and the next read
+    // drops this input because its run is no longer live.
+    queue.interruptQuery(laneJid);
+    queue.closeStdin(laneJid);
     return;
   }
   const message = getAgentBuilderInputMessage(laneJid, messageId);
@@ -13689,14 +13750,15 @@ function resolveIpcAutomationActor(
     ? `${agent.chat_jid}#agent:${agent.id}`
     : workspaceJid;
   const turnScope = agentBuilderTurnScope(sourceGroup, ipcAgentId);
-  const activeBatch = activeAgentBuilderTurns.activeBatch(turnScope);
-  // Judged against the exact turn the agent is answering: a request that
-  // outlived its turn (timeout, steer) must not borrow the next one.
-  if (
-    !inputTurnId ||
-    activeBatch.length === 0 ||
-    activeBatch.some((turn) => turn.runtimeTurnId !== inputTurnId)
-  ) {
+  // Judged against the turns the runner holds up to the one it names: the
+  // active batch, or a batch already piped to it (a cold start merges those,
+  // a running query syncs to them). A request that outlived its turn
+  // (timeout, steer) names no delivered batch and must not borrow the next.
+  const deliveredTurns = activeAgentBuilderTurns.deliveredTurnsThrough(
+    turnScope,
+    inputTurnId,
+  );
+  if (deliveredTurns.length === 0) {
     throw new AutomationError(409, STALE_AUTOMATION_TURN_ERROR);
   }
   const ownerUserId = sourceGroupEntry?.created_by;
@@ -13704,7 +13766,7 @@ function resolveIpcAutomationActor(
     workspaceJid: agent?.chat_jid ?? workspaceJid,
     sessionJid,
     owner: ownerUserId ? getUserById(ownerUserId) : undefined,
-    activeBatch,
+    turns: deliveredTurns,
     loadInput: getAgentBuilderInputMessage,
     isOwnerTurn: () =>
       !!ownerUserId &&
@@ -16035,7 +16097,10 @@ async function processAgentConversation(
     );
     if (disposition === 'skip_terminal') {
       // The turn already reached its terminal before this attempt.
-      automationTurns.settleSuccess(lastProcessed.id);
+      automationTurns.settleFinishedTurn(
+        lastProcessed.id,
+        agentChannelTurnRuntime.openedStatus,
+      );
       await clearAgentProcessingIndicatorForInput(lastProcessed.id);
       advanceCursors(virtualChatJid, {
         timestamp: lastProcessed.timestamp,
@@ -18385,9 +18450,16 @@ async function processAgentConversation(
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
     // A run cancelled while this batch was being prepared is not started.
-    // Past this point a cancel finds the batch active and stops the query.
-    if (missedMessages.some(isEndedAutomationInput)) {
-      commitCursor();
+    // Past this point a cancel finds the batch delivered and stops the query.
+    if (
+      withdrawEndedAutomationInputs(
+        virtualChatJid,
+        missedMessages,
+        agentChannelTurnRuntimes,
+        automationTurns,
+        commitCursor,
+      )
+    ) {
       await clearAgentProcessingIndicatorForInput(lastProcessed.id);
       return true;
     }

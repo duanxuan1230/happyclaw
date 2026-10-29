@@ -86,7 +86,8 @@ export function deriveAutomationActor(input: {
   sessionJid: string;
   /** The workspace owner's account. */
   owner: { id: string; role: string; status: string } | undefined;
-  activeBatch: AgentBuilderTurnContext[];
+  /** The turns the runner holds up to the one making the call. */
+  turns: AgentBuilderTurnContext[];
   loadInput: (
     chatJid: string,
     messageId: string,
@@ -99,7 +100,7 @@ export function deriveAutomationActor(input: {
     workspaceJid: input.workspaceJid,
     sessionJid: input.sessionJid,
   };
-  const observed = input.activeBatch.map((turn) => ({
+  const observed = input.turns.map((turn) => ({
     turn,
     input: input.loadInput(turn.chatJid, turn.messageId),
   }));

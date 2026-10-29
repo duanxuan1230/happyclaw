@@ -50,18 +50,46 @@ const humanInput = (sender: string): AgentBuilderPersistedInput => ({
   automation_run_id: null,
 });
 
+const automationInput = (
+  runId: string,
+  automationId: string,
+): AgentBuilderPersistedInput =>
+  ({
+    ...humanInput('automation'),
+    source_kind: 'automation_prompt',
+    automation_run_id: runId,
+    attachments: JSON.stringify([
+      {
+        type: 'automation_run_context',
+        automationId,
+        automationName: '日报提醒',
+        runId,
+        text: '',
+      },
+    ]),
+  }) as AgentBuilderPersistedInput;
+
 /** processTaskIpc with a fake automation service that records its actor. */
-function ipcHost(inputs: Record<string, AgentBuilderPersistedInput>) {
+function ipcHost(
+  inputs: Record<string, AgentBuilderPersistedInput>,
+  piped: Record<string, AgentBuilderPersistedInput> = {},
+) {
   const registry = new AgentBuilderTurnRegistry();
-  registry.startBatch(
-    agentBuilderTurnScope(FOLDER, SESSION_ID),
-    Object.keys(inputs).map((messageId) => ({
+  const scope = agentBuilderTurnScope(FOLDER, SESSION_ID);
+  const batch = (
+    rows: Record<string, AgentBuilderPersistedInput>,
+    runtimeTurnId: string,
+  ) =>
+    Object.keys(rows).map((messageId) => ({
       chatJid: SESSION,
       messageId,
-      runtimeTurnId: 'delivery-1',
-      automationRunId: inputs[messageId].automation_run_id,
-    })),
-  );
+      runtimeTurnId,
+      automationRunId: rows[messageId].automation_run_id,
+    }));
+  registry.startBatch(scope, batch(inputs, 'delivery-1'));
+  // Inputs piped to the runner while delivery-1 runs.
+  registry.enqueueBatch(scope, batch(piped, 'delivery-2'));
+  const allInputs = { ...inputs, ...piped };
   const handleIpc = vi.fn(
     async (_actor: unknown, request: { requestId: string }) => ({
       requestId: request.requestId,
@@ -88,7 +116,7 @@ function ipcHost(inputs: Record<string, AgentBuilderPersistedInput>) {
     activeAgentBuilderTurns: registry,
     agentBuilderTurnScope,
     getAgentBuilderInputMessage: (_jid: string, id: string) =>
-      inputs[id] ?? null,
+      allInputs[id] ?? null,
     skillMutationTurnRejection,
     deriveAutomationActor,
     handleAutomationIpc,
@@ -163,20 +191,7 @@ describe('automation tools over task IPC', () => {
 
   test('an automation run turn acts as that run', async () => {
     const host = ipcHost({
-      'automation-run-r1': {
-        ...humanInput('automation'),
-        source_kind: 'automation_prompt',
-        automation_run_id: 'r1',
-        attachments: JSON.stringify([
-          {
-            type: 'automation_run_context',
-            automationId: 'auto-1',
-            automationName: '日报提醒',
-            runId: 'r1',
-            text: '',
-          },
-        ]),
-      } as AgentBuilderPersistedInput,
+      'automation-run-r1': automationInput('r1', 'auto-1'),
     });
     await host.send({
       type: 'automation_complete',
@@ -213,6 +228,61 @@ describe('automation tools over task IPC', () => {
       ]);
     },
   );
+
+  test.each([
+    // A cold start merges inputs piped during boot into the first turn; a
+    // running query syncs to a piped input. Either way the runner names
+    // the piped delivery before the host promotes it.
+    ['merged at a cold start', { m1: humanInput('ou_owner') }],
+    ['synced into the running query', { m0: humanInput('ou_owner') }],
+  ])(
+    "the owner's request from a turn %s is the owner's",
+    async (_label, active) => {
+      const host = ipcHost(active, { m2: humanInput('ou_owner') });
+      await host.send({ type: 'automation_list', inputTurnId: 'delivery-2' });
+      expect(host.handleIpc.mock.calls[0][0]).toMatchObject({
+        kind: 'owner_turn',
+        userId: OWNER,
+      });
+    },
+  );
+
+  test('a piped turn behind a member input is not the owner acting alone', async () => {
+    const host = ipcHost(
+      { m1: humanInput('ou_member') },
+      { m2: humanInput('ou_owner') },
+    );
+    await host.send({ type: 'automation_list', inputTurnId: 'delivery-2' });
+    expect(host.handleIpc.mock.calls[0][0]).toMatchObject({
+      kind: 'other_turn',
+    });
+  });
+
+  test('a run piped behind an owner turn shares its context: not that run acting', async () => {
+    const host = ipcHost(
+      { m1: humanInput('ou_owner') },
+      {
+        'automation-run-r3': automationInput('r3', 'auto-3'),
+      },
+    );
+    await host.send({ type: 'automation_list', inputTurnId: 'delivery-2' });
+    expect(host.handleIpc.mock.calls[0][0]).toMatchObject({
+      kind: 'other_turn',
+    });
+  });
+
+  test('a late request after its turn ended is still rejected', async () => {
+    const host = ipcHost(
+      { m1: humanInput('ou_owner') },
+      { m2: humanInput('ou_owner') },
+    );
+    await host.send({ type: 'automation_list', inputTurnId: 'delivery-0' });
+    expect(host.handleIpc).not.toHaveBeenCalled();
+    expect(host.results[0][1]).toMatchObject({
+      success: false,
+      error: '这个请求来自已经结束的一轮，请重新发起',
+    });
+  });
 
   test('old task tools answer with the move to automations', async () => {
     const host = ipcHost({ m1: humanInput('ou_owner') });

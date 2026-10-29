@@ -298,6 +298,13 @@ export function isOwnerProfileOwnerInput(
  * Runner-supplied chat/turn/task claims are not authorization inputs because
  * Agents intentionally have full Bash and write access to their IPC mount.
  */
+/** The (non-empty) batch whose every turn carries this runtimeTurnId. */
+function batchNamedBy(
+  runtimeTurnId: string,
+): (batch: AgentBuilderTurnContext[]) => boolean {
+  return (batch) => batch.every((turn) => turn.runtimeTurnId === runtimeTurnId);
+}
+
 export class AgentBuilderTurnRegistry {
   private readonly active = new Map<string, AgentBuilderTurnContext[]>();
   private readonly queued = new Map<string, AgentBuilderTurnContext[][]>();
@@ -373,6 +380,41 @@ export class AgentBuilderTurnRegistry {
   delete(folder: string): void {
     this.active.delete(folder);
     this.queued.delete(folder);
+  }
+
+  /**
+   * Every turn handed to the runner up to and including the batch with this
+   * runtimeTurnId (the active batch or one already piped behind it), or []
+   * when no delivered batch carries it. A runner answers a piped batch
+   * before the host promotes it, and that answer's context holds every
+   * batch before it.
+   */
+  deliveredTurnsThrough(
+    folder: string,
+    runtimeTurnId: string | null | undefined,
+  ): AgentBuilderTurnContext[] {
+    if (!runtimeTurnId) return [];
+    const batches = this.deliveredBatches(folder);
+    const through = batches.findIndex(batchNamedBy(runtimeTurnId));
+    if (through < 0) return [];
+    return batches
+      .slice(0, through + 1)
+      .flat()
+      .map((turn) => ({ ...turn }));
+  }
+
+  /** The message was handed to this scope's runner (active or piped). */
+  hasDeliveredMessage(folder: string, messageId: string): boolean {
+    return this.deliveredBatches(folder).some((batch) =>
+      batch.some((turn) => turn.messageId === messageId),
+    );
+  }
+
+  private deliveredBatches(folder: string): AgentBuilderTurnContext[][] {
+    return [
+      this.active.get(folder) ?? [],
+      ...(this.queued.get(folder) ?? []),
+    ].filter((batch) => batch.length > 0);
   }
 
   /** The batch executing right now in this runtime scope (a copy). */
@@ -530,14 +572,8 @@ export class AgentBuilderTurnRegistry {
     if (!runtimeTurnId) {
       throw new Error('Owner Profile requires an admitted conversation turn');
     }
-    const batches = [
-      ...(this.active.has(folder) ? [this.active.get(folder)!] : []),
-      ...(this.queued.get(folder) ?? []),
-    ];
-    const exact = batches.find(
-      (batch) =>
-        batch.length > 0 &&
-        batch.every((turn) => turn.runtimeTurnId === runtimeTurnId),
+    const exact = this.deliveredBatches(folder).find(
+      batchNamedBy(runtimeTurnId),
     );
     if (!exact) {
       throw new Error('Owner Profile requires an admitted conversation turn');
