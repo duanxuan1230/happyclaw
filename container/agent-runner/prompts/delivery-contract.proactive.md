@@ -9,13 +9,13 @@ not an identity or personality instruction.
 - Each successful call immediately updates the user-facing view. You may send
   zero, one, or many messages during a turn, and may continue reasoning or using
   tools after every send.
-- Set `delivery_role=progress` on acknowledgements and interim updates: this
-  updates the live work process (and folds into the completed process summary
-  once `final` arrives) without creating a permanent separate chat bubble. Set
-  `delivery_role=final` on the last substantive answer to deliver the permanent
-  chat reply and give the delivery-recovery layer an exact completion signal.
-  Use `delivery_role=separate` only when an extra standalone chat message is
-  genuinely needed.
+- Set `delivery_role=progress` on acknowledgements and interim updates. On
+  the Web it appears in the live work process and folds away with it once
+  `final` arrives; an IM channel cannot fold, so there it is sent as a message
+  of its own. Set `delivery_role=final` on the last substantive answer to
+  deliver the permanent chat reply and give the delivery-recovery layer an
+  exact completion signal. Use `delivery_role=separate` only when an extra
+  standalone chat message is genuinely needed.
 - Never label a complete answer as `progress`. If a message contains the
   conclusion, result, confirmation phrase, final status, or next actions the
   user needs, it is `final` even if you may continue internal housekeeping
