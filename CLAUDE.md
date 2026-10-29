@@ -309,6 +309,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   不合并成只有单一回复目标的批次。
 - 文件和图片投递必须使用当前 Turn 的 `ChannelTurnContext`，不能从“最近一条群消息”
   猜测目标。
+- 主动模式下 Agent 用 `send_message(delivery_role=progress)` 发的进展：IM 来源的轮次作为
+  独立消息发出（IM 无法折叠）；Web 来源的轮次进入过程视图，在 `process_visibility` 的
+  所有级别都显示，最终回复送达后随过程折叠，并随回合存进 turn_traces（`hidden` 级别只存
+  进展）。工具调用前的旁白仍只在 `full` 显示。
 
 ### 6.3 飞书会话语义
 
