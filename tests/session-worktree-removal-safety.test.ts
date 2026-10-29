@@ -181,7 +181,8 @@ describe('initialized submodules need confirmation', () => {
     const refused = await worktrees.removeSessionWorktree(record.agent_id);
     expect(refused).toMatchObject({
       removed: false,
-      risk: { dirtyFiles: 0, submodules: true },
+      // Its .git is a file into the admin dir, not an embedded repository.
+      risk: { dirtyFiles: 0, submodules: true, embeddedRepos: false },
     });
     expect(fs.existsSync(submoduleDir)).toBe(true);
     expect(
@@ -271,6 +272,56 @@ describe('an embedded repository counts as a change', () => {
     await expect(
       worktrees.removeSessionWorktree(record.agent_id, { force: true }),
     ).resolves.toMatchObject({ removed: true });
+  });
+
+  test('a committed, unchanged gitlink still holds the nested history and work', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const record = await worktreeFor(repo);
+    const nested = embeddedRepo(record.worktree_path);
+    git(record.worktree_path, 'add', 'nested');
+    git(record.worktree_path, 'commit', '-qm', 'embed');
+    await expect(
+      worktrees.countWorktreeChanges(record.worktree_path),
+    ).resolves.toBe(0);
+    const embedded = {
+      removed: false,
+      risk: {
+        dirtyFiles: 0,
+        unreadable: false,
+        submodules: false,
+        embeddedRepos: true,
+      },
+    };
+
+    // Clean, but its commits exist only in nested/.git.
+    const refused = await worktrees.removeSessionWorktree(record.agent_id);
+    expect(refused).toMatchObject(embedded);
+    expect(
+      worktrees.dirtyWorktreesConflict(
+        refused && !refused.removed ? [refused.risk] : [],
+      ),
+    ).toMatchObject({
+      error: expect.stringContaining(
+        '包含嵌入的 git 仓库，删除会一并删除其中的提交和改动',
+      ),
+      dirty_worktrees: [{ changed_files: 0, embedded_repos: true }],
+    });
+
+    // Uncommitted work inside it, under a config that runs a command if git
+    // is ever started there: found without running it.
+    const marker = path.join(root, `embedded-ran-${seq}`);
+    const hook = path.join(root, `embedded-hook-${seq}.sh`);
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\ncat\n`);
+    fs.chmodSync(hook, 0o755);
+    git(nested, 'config', 'core.fsmonitor', hook);
+    git(nested, 'config', 'filter.x.clean', hook);
+    fs.writeFileSync(path.join(nested, '.gitattributes'), '*.txt filter=x\n');
+    fs.writeFileSync(path.join(nested, 'n.txt'), 'm\n');
+    await expect(
+      worktrees.removeSessionWorktree(record.agent_id),
+    ).resolves.toMatchObject(embedded);
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(fs.readFileSync(path.join(nested, 'n.txt'), 'utf8')).toBe('m\n');
   });
 });
 

@@ -202,6 +202,7 @@ describe('session worktree lifecycle', () => {
         dirtyFiles: 3,
         unreadable: false,
         submodules: false,
+        embeddedRepos: false,
       },
     });
     expect(fs.existsSync(record.worktree_path)).toBe(true);
@@ -356,12 +357,13 @@ describe('session worktree lifecycle', () => {
     expect(truncated.include_incomplete).toEqual({
       reason: 'list_truncated',
       copied_files: 0,
+      skipped_files: [],
     });
     expect(fs.existsSync(path.join(truncated.worktree_path, 'big'))).toBe(
       false,
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: 'list_truncated', copiedFiles: 0 }),
+      expect.objectContaining({ reason: 'list_truncated', copied_files: 0 }),
       expect.stringContaining('.worktreeinclude'),
     );
 
@@ -377,9 +379,37 @@ describe('session worktree lifecycle', () => {
     expect(oversized.include_incomplete).toEqual({
       reason: 'size_limit',
       copied_files: 0,
+      skipped_files: ['huge.bin'],
     });
     expect(fs.existsSync(path.join(oversized.worktree_path, 'huge.bin'))).toBe(
       false,
+    );
+
+    // An include file over 64 KB is not read at all.
+    fs.rmSync(path.join(repo, 'huge.bin'));
+    fs.writeFileSync(path.join(repo, 'small.env'), 'x\n');
+    fs.writeFileSync(
+      path.join(repo, '.worktreeinclude'),
+      `small.env\n${'# padding\n'.repeat(7000)}`,
+    );
+    fs.appendFileSync(path.join(repo, '.gitignore'), 'small.env\n');
+    warn.mockClear();
+    const unread = await worktrees.createSessionWorktree({
+      group: hostGroup('ws-include-caps', repo),
+      chatJid: 'web:ws-include-caps',
+      agentId: '15151515-0000-0000-0000-000000000000',
+    });
+    expect(unread.include_incomplete).toEqual({
+      reason: 'include_file_too_large',
+      copied_files: 0,
+      skipped_files: [],
+    });
+    expect(fs.existsSync(path.join(unread.worktree_path, 'small.env'))).toBe(
+      false,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'include_file_too_large' }),
+      expect.stringContaining('.worktreeinclude'),
     );
   });
 

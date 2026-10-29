@@ -242,6 +242,9 @@ const WORKTREE_INCLUDE_MAX_FILES = 100;
 const WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const WORKTREE_INCLUDE_TOTAL_MAX_BYTES = 50 * 1024 * 1024;
 
+/** Paths `include_incomplete` names as examples of what was left out. */
+const WORKTREE_INCLUDE_SKIPPED_SAMPLE = 5;
+
 /**
  * Copy the untracked ignored files `.worktreeinclude` names (`.env` and the
  * like) into a new worktree within fixed caps. Returns, and logs, what the
@@ -251,102 +254,126 @@ async function copyWorktreeIncludeFiles(
   repoRoot: string,
   worktreePath: string,
 ): Promise<WorktreeIncludeIncomplete | null> {
-  let shortfall: WorktreeIncludeIncomplete['reason'] | null = null;
-  let copiedCount = 0;
+  let incomplete: WorktreeIncludeIncomplete | null;
   try {
-    const includeFile = path.join(repoRoot, '.worktreeinclude');
-    let includeStat: fs.Stats;
-    try {
-      includeStat = fs.lstatSync(includeFile);
-    } catch {
-      return null;
-    }
-    if (
-      !includeStat.isFile() ||
-      includeStat.isSymbolicLink() ||
-      includeStat.size > WORKTREE_INCLUDE_FILE_MAX_BYTES ||
-      !isRealpathInside(includeFile, repoRoot)
-    ) {
-      return null;
-    }
-    const lsResult = await runGit(
-      repoRoot,
-      [
-        'ls-files',
-        '-z',
-        '--others',
-        '--ignored',
-        '--exclude-from=.worktreeinclude',
-      ],
-      { maxBytes: 256 * 1024 },
-    );
-    // A cut list may end mid-path; copy nothing rather than a guessed subset.
-    if (lsResult.truncated) shortfall = 'list_truncated';
-    const matched = lsResult.truncated
-      ? []
-      : lsResult.stdout.split('\0').filter(Boolean);
-    let totalBytes = 0;
-    for (const relPath of matched) {
-      if (copiedCount >= WORKTREE_INCLUDE_MAX_FILES) {
-        shortfall = 'file_limit';
-        break;
-      }
-      if (
-        !relPath ||
-        path.isAbsolute(relPath) ||
-        path.posix.isAbsolute(relPath) ||
-        relPath.split('/').includes('..') ||
-        relPath.split(path.sep).includes('..')
-      ) {
-        continue;
-      }
-      const srcPath = path.join(repoRoot, relPath);
-      const dstPath = path.join(worktreePath, relPath);
-      if (
-        !isRealpathInside(srcPath, repoRoot) ||
-        !isRealpathInside(dstPath, worktreePath)
-      ) {
-        continue;
-      }
-      let srcStat: fs.Stats;
-      try {
-        srcStat = fs.lstatSync(srcPath);
-      } catch {
-        continue;
-      }
-      if (!srcStat.isFile()) continue;
-      if (
-        srcStat.size > WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES ||
-        totalBytes + srcStat.size > WORKTREE_INCLUDE_TOTAL_MAX_BYTES
-      ) {
-        shortfall = 'size_limit';
-        continue;
-      }
-      try {
-        fs.lstatSync(dstPath);
-        continue;
-      } catch {
-        /* destination does not exist yet */
-      }
-      const dstDir = path.dirname(dstPath);
-      fs.mkdirSync(dstDir, { recursive: true });
-      if (!isRealpathInside(dstDir, worktreePath)) continue;
-      fs.copyFileSync(srcPath, dstPath, fs.constants.COPYFILE_EXCL);
-      copiedCount++;
-      totalBytes += srcStat.size;
-    }
+    incomplete = await copyIncludedFiles(repoRoot, worktreePath);
   } catch (err) {
     logger.warn(
       { err, repoRoot, worktreePath },
       'Failed to copy .worktreeinclude files into session worktree',
     );
+    return null;
   }
-  if (!shortfall) return null;
-  logger.warn(
-    { repoRoot, worktreePath, reason: shortfall, copiedFiles: copiedCount },
-    '.worktreeinclude matched more files than were copied into the worktree',
+  if (incomplete) {
+    logger.warn(
+      { repoRoot, worktreePath, ...incomplete },
+      '.worktreeinclude matched more files than were copied into the worktree',
+    );
+  }
+  return incomplete;
+}
+
+async function copyIncludedFiles(
+  repoRoot: string,
+  worktreePath: string,
+): Promise<WorktreeIncludeIncomplete | null> {
+  const includeFile = path.join(repoRoot, '.worktreeinclude');
+  let includeStat: fs.Stats;
+  try {
+    includeStat = fs.lstatSync(includeFile);
+  } catch {
+    return null;
+  }
+  if (!includeStat.isFile() || !isRealpathInside(includeFile, repoRoot)) {
+    return null;
+  }
+  const nothingCopied = (reason: WorktreeIncludeIncomplete['reason']) => ({
+    reason,
+    copied_files: 0,
+    skipped_files: [],
+  });
+  if (includeStat.size > WORKTREE_INCLUDE_FILE_MAX_BYTES) {
+    return nothingCopied('include_file_too_large');
+  }
+  const lsResult = await runGit(
+    repoRoot,
+    [
+      'ls-files',
+      '-z',
+      '--others',
+      '--ignored',
+      '--exclude-from=.worktreeinclude',
+    ],
+    { maxBytes: 256 * 1024 },
   );
-  return { reason: shortfall, copied_files: copiedCount };
+  // A cut list may end mid-path; copy nothing rather than a guessed subset.
+  if (lsResult.truncated) return nothingCopied('list_truncated');
+  const matched = lsResult.stdout.split('\0').filter(Boolean);
+  let reason: WorktreeIncludeIncomplete['reason'] | null = null;
+  const skipped: string[] = [];
+  let copiedCount = 0;
+  let totalBytes = 0;
+  for (const [index, relPath] of matched.entries()) {
+    if (copiedCount >= WORKTREE_INCLUDE_MAX_FILES) {
+      reason = 'file_limit';
+      skipped.push(
+        ...matched.slice(
+          index,
+          index + WORKTREE_INCLUDE_SKIPPED_SAMPLE - skipped.length,
+        ),
+      );
+      break;
+    }
+    if (
+      !relPath ||
+      path.isAbsolute(relPath) ||
+      path.posix.isAbsolute(relPath) ||
+      relPath.split('/').includes('..') ||
+      relPath.split(path.sep).includes('..')
+    ) {
+      continue;
+    }
+    const srcPath = path.join(repoRoot, relPath);
+    const dstPath = path.join(worktreePath, relPath);
+    if (
+      !isRealpathInside(srcPath, repoRoot) ||
+      !isRealpathInside(dstPath, worktreePath)
+    ) {
+      continue;
+    }
+    let srcStat: fs.Stats;
+    try {
+      srcStat = fs.lstatSync(srcPath);
+    } catch {
+      continue;
+    }
+    if (!srcStat.isFile()) continue;
+    if (
+      srcStat.size > WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES ||
+      totalBytes + srcStat.size > WORKTREE_INCLUDE_TOTAL_MAX_BYTES
+    ) {
+      reason = 'size_limit';
+      if (skipped.length < WORKTREE_INCLUDE_SKIPPED_SAMPLE) {
+        skipped.push(relPath);
+      }
+      continue;
+    }
+    try {
+      fs.lstatSync(dstPath);
+      continue;
+    } catch {
+      /* destination does not exist yet */
+    }
+    const dstDir = path.dirname(dstPath);
+    fs.mkdirSync(dstDir, { recursive: true });
+    if (!isRealpathInside(dstDir, worktreePath)) continue;
+    fs.copyFileSync(srcPath, dstPath, fs.constants.COPYFILE_EXCL);
+    copiedCount++;
+    totalBytes += srcStat.size;
+  }
+  return reason
+    ? { reason, copied_files: copiedCount, skipped_files: skipped }
+    : null;
 }
 
 function worktreePathFor(folder: string, agentId: string): string {
@@ -654,6 +681,11 @@ export interface DirtyWorktree {
   unreadable: boolean;
   /** Initialized submodules, whose local commits go with the worktree. */
   submodules: boolean;
+  /**
+   * Committed gitlinks backed by a repository inside the worktree, whose
+   * commits and changes go with it.
+   */
+  embeddedRepos: boolean;
 }
 
 /** The repository's common git dir (`.git` of the main checkout). */
@@ -728,6 +760,7 @@ async function assessWorktreeRemoval(
     dirtyFiles: 0,
     unreadable: false,
     submodules: hasInitializedSubmodules(record),
+    embeddedRepos: false,
   };
   if (fs.existsSync(record.worktree_path)) {
     // Without its .git file git would walk up into an enclosing repository
@@ -736,15 +769,58 @@ async function assessWorktreeRemoval(
       risk.unreadable = true;
     } else {
       try {
-        risk.dirtyFiles = await countWorktreeChanges(record.worktree_path);
+        [risk.dirtyFiles, risk.embeddedRepos] = await Promise.all([
+          countWorktreeChanges(record.worktree_path),
+          hasEmbeddedRepositories(record.worktree_path),
+        ]);
       } catch {
         risk.unreadable = true;
       }
     }
   }
-  return risk.dirtyFiles > 0 || risk.unreadable || risk.submodules
+  return risk.dirtyFiles > 0 ||
+    risk.unreadable ||
+    risk.submodules ||
+    risk.embeddedRepos
     ? risk
     : null;
+}
+
+/** Index listing cap for the gitlink scan (~300k entries). */
+const GITLINK_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Whether a gitlink in the index is checked out as a repository of its own
+ * inside the worktree (`<path>/.git` is a real directory). Its commits and
+ * uncommitted changes live only there, so they go with the worktree even when
+ * the status shows nothing. A submodule cloned by git has a `.git` file
+ * pointing into the admin dir instead (see hasInitializedSubmodules). Reads
+ * the index and the file system only: git never runs inside the nested
+ * repository, whose config would decide what runs. A listing too large to
+ * read fails, so the worktree counts as unreadable rather than clean.
+ */
+async function hasEmbeddedRepositories(worktreePath: string): Promise<boolean> {
+  const result = await runGit(worktreePath, ['ls-files', '--stage', '-z'], {
+    maxBytes: GITLINK_SCAN_MAX_BYTES,
+  });
+  if (result.truncated) {
+    throw new GitCommandError('git ls-files output exceeded the cap', null, '');
+  }
+  for (const entry of result.stdout.split('\0')) {
+    // `<mode> <object> <stage>\t<path>`; gitlinks have mode 160000.
+    if (!entry.startsWith('160000 ')) continue;
+    const relPath = entry.slice(entry.indexOf('\t') + 1);
+    try {
+      if (
+        fs.lstatSync(path.join(worktreePath, relPath, '.git')).isDirectory()
+      ) {
+        return true;
+      }
+    } catch {
+      /* not checked out, or a submodule's .git file */
+    }
+  }
+  return false;
 }
 
 export type RemoveSessionWorktreeResult =
@@ -781,16 +857,19 @@ export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
   const files = dirty.reduce((sum, item) => sum + item.dirtyFiles, 0);
   const owner = dirty.length === 1 ? '会话' : `${dirty.length} 个会话`;
   const reasons = [
-    ...(files > 0 ? [`${files} 个未提交的改动`] : []),
+    ...(files > 0 ? [`有 ${files} 个未提交的改动`] : []),
     ...(dirty.some((item) => item.unreadable)
       ? ['无法读取状态，可能仍有未提交的改动']
       : []),
     ...(dirty.some((item) => item.submodules)
-      ? ['已初始化的子模块，其中的本地提交会一并丢失']
+      ? ['有已初始化的子模块，其中的本地提交会一并丢失']
+      : []),
+    ...(dirty.some((item) => item.embeddedRepos)
+      ? ['包含嵌入的 git 仓库，删除会一并删除其中的提交和改动']
       : []),
   ];
   return {
-    error: `${owner}的 worktree 有${reasons.join('、')}，确认后才会移除（分支会保留）`,
+    error: `${owner}的 worktree ${reasons.join('；')}，确认后才会移除（分支会保留）`,
     code: 'WORKTREE_DIRTY',
     dirty_worktrees: dirty.map((item) => ({
       session_id: item.agentId,
@@ -798,6 +877,7 @@ export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
       changed_files: item.dirtyFiles,
       unreadable: item.unreadable,
       submodules: item.submodules,
+      embedded_repos: item.embeddedRepos,
     })),
   };
 }
