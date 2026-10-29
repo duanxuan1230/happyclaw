@@ -7326,8 +7326,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const activeWait =
-    typeof getUsageLimitWait === 'function' ? getUsageLimitWait(chatJid) : null;
+  const activeWait = getUsageLimitWait(chatJid);
   if (
     activeWait?.state === 'waiting' &&
     missedMessages.every(
@@ -17070,10 +17069,7 @@ async function processAgentConversation(
   ) {
     pendingWindow = getMessagesSinceBounded(virtualChatJid, sinceCursor);
   } else if (pendingWindow.messages.length > 0) {
-    const activeWait =
-      typeof getUsageLimitWait === 'function'
-        ? getUsageLimitWait(virtualChatJid)
-        : null;
+    const activeWait = getUsageLimitWait(virtualChatJid);
     if (
       activeWait?.state === 'waiting' &&
       pendingWindow.messages.every(
@@ -24732,18 +24728,11 @@ async function main(): Promise<void> {
           ...new Set(
             listPendingUsageLimitWaits().flatMap((wait) => [
               wait.inputKey,
-              ...(wait.scopeKey && typeof listQueuedFollowUps === 'function'
-                ? listQueuedFollowUps(wait.scopeKey).map((item) => item.id)
-                : []),
-              ...(wait.scopeKey &&
-              typeof getMessagesSince === 'function' &&
-              typeof lastCommittedCursor !== 'undefined' &&
-              typeof EMPTY_CURSOR !== 'undefined'
-                ? getMessagesSince(
-                    wait.scopeKey,
-                    lastCommittedCursor[wait.scopeKey] || EMPTY_CURSOR,
-                  ).map((message) => message.id)
-                : []),
+              ...listQueuedFollowUps(wait.scopeKey).map((item) => item.id),
+              ...getMessagesSince(
+                wait.scopeKey,
+                lastCommittedCursor[wait.scopeKey] || EMPTY_CURSOR,
+              ).map((message) => message.id),
             ]),
           ),
         ],

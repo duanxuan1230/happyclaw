@@ -81,13 +81,21 @@ function host(inputs: Record<string, AgentBuilderPersistedInput>) {
   };
   const harness = createRuntimeSourceHarness(globals);
   harness.install('processTaskIpc');
+  /**
+   * A signed create naming `turnId`, from a runner whose launch admitted
+   * `admittedTurnId` as its first turn.
+   */
   const create = async (
     turnId: string,
     taskRunId: string | null = null,
     sign = true,
+    admittedTurnId: string | null = turnId,
   ) => {
     const scope = { groupFolder: FOLDER, agentId: null, taskRunId };
-    const capability = issueWorkspaceMemoryWriteCapability(scope, turnId);
+    const capability = issueWorkspaceMemoryWriteCapability(
+      scope,
+      admittedTurnId,
+    );
     const request: Record<string, unknown> = {
       type: 'workspace_memory',
       operation: 'create',
@@ -174,25 +182,31 @@ describe('what a Workspace Memory write becomes on the host', () => {
     expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
   });
 
-  test('an isolated scheduled task run with omitted turnId falls back to taskRunId for capability issuance', async () => {
-    const { createWorkspaceMemory } = host({});
-    const input: {
-      isScheduledTask?: boolean;
-      taskRunId?: string;
-      turnId?: string;
-    } = {
-      isScheduledTask: true,
-      taskRunId: 'task-run-fallback-1',
-    };
-    const effectiveTurnId =
-      input.turnId ?? (input.isScheduledTask ? input.taskRunId : undefined);
-    expect(effectiveTurnId).toBe('task-run-fallback-1');
+  test('an isolated scheduled run without a turn id writes under its run id', async () => {
+    // Its launch admits the run id as the first turn, and the runner names
+    // that id on its writes.
+    const { create, createWorkspaceMemory } = host({});
+    expect(
+      await create('task-run-fallback-1', 'task-run-fallback-1'),
+    ).toMatchObject({ success: true, proposal: true });
+    expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
+    expect(createWorkspaceMemory).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        proposal: true,
+        sourceType: 'scheduled_task',
+        provenance: expect.objectContaining({
+          sourceId: 'task-run-fallback-1',
+        }),
+      }),
+    );
 
-    const { create } = host({});
-    expect(await create(effectiveTurnId!, input.taskRunId!)).toMatchObject({
-      success: true,
-      proposal: true,
+    // A runner that was admitted no turn cannot write, signature or not.
+    expect(
+      await create('task-run-fallback-2', 'task-run-fallback-2', true, null),
+    ).toMatchObject({
+      success: false,
+      code: 'workspace_memory_invalid_capability',
     });
-    expect(createWorkspaceMemory).toHaveBeenCalledTimes(0);
+    expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
   });
 });

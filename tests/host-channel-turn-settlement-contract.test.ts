@@ -37,10 +37,11 @@ function between(start: string, end: string, from = 0): string {
 describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
   test('the periodic sweep cancels retry_wait Turns older than the bound', () => {
     const cancelStaleRetryWaitChannelTurns = vi.fn(() => 2);
+    // Which inputs a usage-limit wait keeps: usage-limit-wait-park.
     const globals: Record<string, unknown> = {
       logger,
       cancelStaleRetryWaitChannelTurns,
-      listPendingUsageLimitWaits: () => [{ inputKey: 'om_waiting' }],
+      listPendingUsageLimitWaits: () => [],
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('CHANNEL_RETRY_WAIT_TURN_MAX_AGE_MS');
@@ -50,10 +51,6 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
     expect(cancelStaleRetryWaitChannelTurns).toHaveBeenCalledTimes(1);
     const [{ updatedBefore }] = cancelStaleRetryWaitChannelTurns.mock
       .calls[0] as unknown as [{ updatedBefore: string }];
-    // An input waiting for a usage-limit reset keeps its Turn.
-    expect(cancelStaleRetryWaitChannelTurns.mock.calls[0]).toEqual([
-      expect.objectContaining({ keepCorrelationIds: ['om_waiting'] }),
-    ]);
     const age = before - Date.parse(updatedBefore);
     expect(age).toBeGreaterThanOrEqual(6 * 60 * 60 * 1000 - 1000);
     expect(age).toBeLessThanOrEqual(6 * 60 * 60 * 1000 + 1000);
