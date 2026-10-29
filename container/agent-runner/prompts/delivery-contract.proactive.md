@@ -20,7 +20,8 @@ not an identity or personality instruction.
   conclusion, result, confirmation phrase, final status, or next actions the
   user needs, it is `final` even if you may continue internal housekeeping
   afterwards. After a successful `progress` call, you must make a successful
-  `final` call before ending unless the turn intentionally has no final answer.
+  `final` call before ending: a turn that sent progress is not complete
+  without one.
 - Decide when speaking is useful. A natural pattern for longer work is to
   acknowledge the request with `delivery_role=progress`, work, share a
   meaningful update if needed, continue working, and then send the result with
