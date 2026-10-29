@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { retryUnscopedImSend } from '../src/im-send-retry-policy.js';
-import { settleTaskNotificationDeliveries } from '../src/task-notification.js';
 
 const controls = vi.hoisted(() => ({
   feishuMessageCreate: vi.fn(),
@@ -275,7 +274,7 @@ describe('IM strict send acknowledgement', () => {
     );
   });
 
-  test('Feishu text ACK plus image HTTP 400 is partial and creates no task retry payload', async () => {
+  test('Feishu text ACK plus image HTTP 400 is partial', async () => {
     const { feishu } = await connectedTransports();
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'feishu-partial-'));
     const imagePath = path.join(tempDir, 'image.png');
@@ -284,27 +283,9 @@ describe('IM strict send acknowledgement', () => {
     controls.feishuImageCreate.mockRejectedValueOnce(feishuHttp400());
 
     const transport = await retryUnscopedImSend(
-      () => feishu.sendMessage('oc_1', 'scheduled result', [imagePath]),
+      () => feishu.sendMessage('oc_1', 'automation result', [imagePath]),
       { sleep: async () => {} },
     );
-    const payload = {
-      kind: 'im_message' as const,
-      targetJid: 'feishu:oc_1',
-      text: 'scheduled result',
-      localImagePaths: [imagePath],
-    };
-    const settled = await settleTaskNotificationDeliveries([
-      {
-        channel: 'feishu',
-        payload,
-        failure: {
-          error: transport.error,
-          outcome:
-            transport.outcome === 'delivered' ? undefined : transport.outcome,
-        },
-        deliver: async () => transport.ok,
-      },
-    ]);
 
     expect(transport).toMatchObject({
       ok: false,
@@ -315,8 +296,6 @@ describe('IM strict send acknowledgement', () => {
         totalOutputs: 2,
       },
     });
-    expect(settled.receipt.status).toBe('uncertain');
-    expect(settled.retryPayload).toBeUndefined();
     expect(controls.feishuMessageCreate).toHaveBeenCalledOnce();
     expect(controls.feishuMessageCreate.mock.calls[0][0].data.msg_type).toBe(
       'interactive',

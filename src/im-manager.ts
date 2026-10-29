@@ -35,7 +35,10 @@ import type { WhatsAppConnectionState } from './whatsapp.js';
 import { rm } from 'fs/promises';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
-import type { StreamingSession } from './im-channel.js';
+import type {
+  StreamingSession,
+  StreamingSessionOptions,
+} from './im-channel.js';
 import type { StreamingCardLifecycle } from './feishu-streaming-card.js';
 import type { StreamingCardRecord } from './channel-reliability-store.js';
 import {
@@ -1180,6 +1183,7 @@ export class IMConnectionManager {
     onCardCreated?: (messageId: string) => void,
     lifecycle?: StreamingCardLifecycle,
     inputMessageId?: string,
+    options?: StreamingSessionOptions,
   ): Promise<StreamingSession | undefined> {
     const channelType = getChannelType(jid);
     if (!channelType) return undefined;
@@ -1215,6 +1219,7 @@ export class IMConnectionManager {
         onCardCreated,
         lifecycle,
         inputMessageId,
+        options,
       );
     }
     return undefined;

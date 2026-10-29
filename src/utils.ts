@@ -21,7 +21,7 @@ export function stripAgentInternalTags(text: string): string {
 /**
  * True when the agent deliberately answered with nothing but non-empty
  * `<internal>`/`<process>` blocks — a complete, intentionally silent final
- * (e.g. a scheduled pipeline stage confirming "done" without notifying).
+ * (e.g. an automation run confirming "done" without notifying).
  */
 export function isInternalOnlyAgentOutput(
   text: string | null | undefined,
@@ -31,10 +31,6 @@ export function isInternalOnlyAgentOutput(
   // content. Empty or nested-empty blocks leave only whitespace.
   return text.replace(/<\/?(?:internal|process)>/g, '').trim() !== '';
 }
-
-/** Workspace notice for a scheduled run that ended silently on purpose. */
-export const SCHEDULED_TASK_SILENT_COMPLETION_NOTICE =
-  'Agent 已按任务要求以内部确认静默完成，没有面向用户的输出。';
 
 /**
  * Detect whether an agent output is system-maintenance noise that should
@@ -67,11 +63,9 @@ export function isSystemMaintenanceNoise(text: string): boolean {
 }
 
 /**
- * Strip virtual JID suffixes (#task:xxx, #agent:xxx) to get the base JID.
+ * Strip the virtual session suffix (#agent:xxx) to get the base JID.
  */
 export function stripVirtualJidSuffix(jid: string): string {
-  const taskSep = jid.indexOf('#task:');
-  if (taskSep >= 0) return jid.slice(0, taskSep);
   const agentSep = jid.indexOf('#agent:');
   if (agentSep >= 0) return jid.slice(0, agentSep);
   return jid;

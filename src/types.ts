@@ -455,6 +455,13 @@ export interface NewMessage {
   source_kind?: MessageSourceKind | null;
   finalization_reason?: MessageFinalizationReason | null;
   task_id?: string | null;
+  /** automation_runs.id when source_kind='automation_prompt'. */
+  automation_run_id?: string | null;
+  /**
+   * The automation an automation_prompt input belongs to. Derived when a
+   * message is listed or announced to the Web; never persisted.
+   */
+  automation?: { id: string; name: string; runId: string } | null;
   delivery_mode?: FollowUpMode | null;
   delivery_status?: FollowUpStatus | null;
   delivery_run_id?: string | null;
@@ -485,6 +492,9 @@ export interface QueuedFollowUp {
   timestamp: string;
   attachments?: string;
   channel_context?: ChannelTurnContext;
+  source_kind?: MessageSourceKind | null;
+  automation_run_id?: string | null;
+  automation?: NewMessage['automation'];
   delivery_mode: FollowUpMode;
   delivery_status: 'queued' | 'promoting';
   delivery_run_id?: string | null;
@@ -528,8 +538,11 @@ export type MessageSourceKind =
   | 'overflow_partial'
   | 'compact_partial'
   | 'user_command'
+  /** Legacy 定时任务 rows: rendered in history, never replayed. */
   | 'scheduled_task_prompt'
   | 'scheduled_task_result'
+  /** An automation run's input (messages.automation_run_id is set). */
+  | 'automation_prompt'
   | 'legacy'
   | 'auto_continue'
   | 'truncation_continue';
@@ -881,7 +894,11 @@ export interface SubAgent {
     | 'feishu_thread'
     | 'auto_im'
     | 'channel_direct'
+    /** Run session of an automation (fresh or persistent mode). */
+    | 'automation'
     | null;
+  /** automations.id when source_kind='automation'. */
+  automation_id?: string | null;
   thread_id?: string | null;
   root_message_id?: string | null;
   title_source?:

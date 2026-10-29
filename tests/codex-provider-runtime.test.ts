@@ -217,7 +217,6 @@ describe('container launch substitution', () => {
       false,
       undefined,
       undefined,
-      undefined,
       runtimeConfig.resolveProviderById(provider.id),
       undefined,
       undefined,
@@ -268,7 +267,6 @@ describe('container launch substitution', () => {
       } as never,
       false,
       false,
-      undefined,
       undefined,
       undefined,
       // What trySelectPoolProvider hands over for a pinned model.

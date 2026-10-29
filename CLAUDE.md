@@ -61,7 +61,7 @@ Agent Profile（身份、四段 Prompt、能力策略）
 | `src/db.ts`                        | SQLite Schema、迁移和持久化访问器                      |
 | `src/group-queue.ts`               | Session 串行、Runner 生命周期、重试与容量控制          |
 | `src/container-runner.ts`          | Host/Container Runner、挂载、环境与能力快照            |
-| `src/task-scheduler.ts`            | Cron、interval、once 调度和重启恢复                    |
+| `src/automation-runtime.ts`        | 自动化运行接入会话：注入输入、终态回写、Agent 工具 IPC |
 | `src/channel-mount-service.ts`     | 工作区/会话绑定和原生线程路由                          |
 | `src/channel-reliability-store.ts` | Inbox、Turn、Outbox、Streaming Card 的持久状态机       |
 | `src/im-manager.ts`                | 多用户、多账号渠道连接池                               |

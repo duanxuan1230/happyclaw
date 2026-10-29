@@ -233,7 +233,7 @@ describe('the end of a hold or pause', () => {
     await settle();
     const cursor = { timestamp: '2026-10-29T00:00:00.000Z', id: 'om_a' };
     expect(
-      queue.sendMessage(MAIN, 'a', undefined, undefined, MAIN, undefined, {
+      queue.sendMessage(MAIN, 'a', undefined, undefined, MAIN, {
         chatJid: MAIN,
         coveredCursors: [cursor],
         cursor,
@@ -272,7 +272,7 @@ describe('the end of a hold or pause', () => {
     await settle();
     const cursor = { timestamp: '2026-10-29T00:00:00.000Z', id: 'om_b' };
     expect(
-      queue.sendMessage(LANE, 'b', undefined, undefined, LANE, undefined, {
+      queue.sendMessage(LANE, 'b', undefined, undefined, LANE, {
         chatJid: LANE,
         coveredCursors: [cursor],
         cursor,
@@ -339,7 +339,7 @@ describe('deliveries a work-keeping stop left unacknowledged', () => {
     const inject = (jid: string, id: string) => {
       const cursor = { timestamp: '2026-10-29T00:00:00.000Z', id };
       expect(
-        h.queue.sendMessage(jid, id, undefined, undefined, jid, undefined, {
+        h.queue.sendMessage(jid, id, undefined, undefined, jid, {
           chatJid: jid,
           coveredCursors: [cursor],
           cursor,

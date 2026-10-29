@@ -138,6 +138,7 @@ import { makeExpandContext } from './plugin-expander-context.js';
 import type { ExpandContext } from './plugin-expander-context.js';
 import { PLUGIN_EXPANSION_ATTACHMENT_TYPE } from './plugin-expander-sentinel.js';
 import { persistPluginExpansion } from './plugin-expander-store.js';
+import { presentAutomationMessage } from './automation-run-ledger.js';
 import { logger } from './logger.js';
 import { buildPresentedAttachments } from './attachment-thumbnails.js';
 import { createOrderedDispatcher } from './ordered-dispatch.js';
@@ -546,7 +547,9 @@ app.get('/api/follow-ups', authMiddleware, async (c) => {
   if (!canAccessGroup(authUser, group)) {
     return c.json({ error: 'Access denied' }, 403);
   }
-  return c.json({ items: listQueuedFollowUps(chatJid) });
+  return c.json({
+    items: listQueuedFollowUps(chatJid).map(presentAutomationMessage),
+  });
 });
 
 app.post('/api/follow-ups/:messageId/action', authMiddleware, async (c) => {
@@ -969,7 +972,6 @@ async function handleWebUserMessage(
       );
     },
     chatJid,
-    undefined,
     {
       chatJid,
       coveredCursors: [messageCursor],
@@ -1341,7 +1343,6 @@ async function handleAgentConversationMessage(
           receipt?.deliveryId,
           receipt?.cursor,
           receipt?.chatJid,
-          undefined,
           agentId,
         );
       } else {
@@ -1349,7 +1350,6 @@ async function handleAgentConversationMessage(
       }
     },
     virtualChatJid,
-    undefined,
     {
       chatJid: virtualChatJid,
       coveredCursors: [agentMessageCursor],
@@ -2729,7 +2729,7 @@ export function broadcastFollowUpUpdate(
   }
   const jid = normalizeHomeJid(baseChatJid);
   const allowedUserIds = getGroupAllowedUserIds(baseChatJid);
-  const items = listQueuedFollowUps(chatJid);
+  const items = listQueuedFollowUps(chatJid).map(presentAutomationMessage);
   const msg: WsMessageOut = {
     type: 'follow_up_update',
     chatJid: jid,

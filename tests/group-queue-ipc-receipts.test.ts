@@ -79,7 +79,7 @@ function cursor(id: string): { timestamp: string; id: string } {
 
 function inject(id: string, coveredIds: string[] = [id]): Receipt {
   expect(
-    queue.sendMessage(JID, id, undefined, undefined, JID, undefined, {
+    queue.sendMessage(JID, id, undefined, undefined, JID, {
       chatJid: JID,
       coveredCursors: coveredIds.map(cursor),
       cursor: cursor(id),
@@ -138,7 +138,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        'task-proactive',
         undefined,
         undefined,
         undefined,
@@ -160,7 +159,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        'task-proactive',
         undefined,
         undefined,
         undefined,
@@ -184,7 +182,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        undefined,
         undefined,
         {
           schemaVersion: 1,
@@ -211,7 +208,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        undefined,
         undefined,
         {
           schemaVersion: 1,
@@ -240,7 +236,6 @@ describe('GroupQueue IPC delivery receipts', () => {
           undefined,
           undefined,
           `${provider}:chat-1`,
-          undefined,
           undefined,
           {
             schemaVersion: 1,
@@ -283,7 +278,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         sourceJid,
-        undefined,
         undefined,
         channelContext,
         undefined,
@@ -340,7 +334,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         undefined,
-        undefined,
         { feishuCliAccountId: null },
       ),
     ).toBe('no_active');
@@ -371,7 +364,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        undefined,
         undefined,
         {
           schemaVersion: 1,
@@ -547,7 +539,7 @@ describe('GroupQueue IPC delivery receipts', () => {
     ];
 
     expect(
-      queue.sendMessage(JID, 'mixed', undefined, undefined, JID, undefined, {
+      queue.sendMessage(JID, 'mixed', undefined, undefined, JID, {
         chatJid: JID,
         coveredCursors,
         cursor: coveredCursors[1],
@@ -567,7 +559,7 @@ describe('GroupQueue IPC delivery receipts', () => {
     await startRunner();
 
     expect(
-      queue.sendMessage(JID, 'invalid', undefined, undefined, JID, undefined, {
+      queue.sendMessage(JID, 'invalid', undefined, undefined, JID, {
         chatJid: JID,
         coveredCursors: [cursor('m2')],
         cursor: cursor('m1'),
@@ -582,14 +574,14 @@ describe('GroupQueue IPC delivery receipts', () => {
     const second = { ...cursor('m2'), sequence: 11 };
 
     expect(
-      queue.sendMessage(JID, 'invalid', undefined, undefined, JID, undefined, {
+      queue.sendMessage(JID, 'invalid', undefined, undefined, JID, {
         chatJid: JID,
         coveredCursors: [first, second],
         cursor: { ...second, sequence: 99 },
       }),
     ).toBe('no_active');
     expect(
-      queue.sendMessage(JID, 'mixed', undefined, undefined, JID, undefined, {
+      queue.sendMessage(JID, 'mixed', undefined, undefined, JID, {
         chatJid: JID,
         coveredCursors: [first, cursor('m2')],
         cursor: cursor('m2'),
@@ -612,7 +604,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         injected,
         JID,
-        undefined,
         {
           chatJid: JID,
           coveredCursors: [cursor('m1')],
@@ -647,7 +638,6 @@ describe('GroupQueue IPC delivery receipts', () => {
           expect(readPayloads()).toHaveLength(1);
         },
         JID,
-        'scheduled-task',
         {
           chatJid: JID,
           coveredCursors: [cursor('scheduled-prompt')],
@@ -680,7 +670,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        undefined,
         {
           chatJid: JID,
           coveredCursors: [cursor('m1')],
@@ -708,7 +697,6 @@ describe('GroupQueue IPC delivery receipts', () => {
           throw new Error('projection callback failed');
         },
         JID,
-        undefined,
         {
           chatJid: JID,
           coveredCursors: [cursor('m1')],
@@ -733,7 +721,6 @@ describe('GroupQueue IPC delivery receipts', () => {
         undefined,
         undefined,
         JID,
-        undefined,
         {
           chatJid: JID,
           coveredCursors: [cursor('m1')],

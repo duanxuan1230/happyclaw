@@ -1,3 +1,4 @@
+import { automationRunIdOf } from './automation-run-ledger.js';
 import { getChannelType } from './im-channel.js';
 import {
   resolveCompatibleChannelBatchAnchor,
@@ -12,9 +13,14 @@ export function resolveInputChannelReplySource(
   return sourceJid && getChannelType(sourceJid) ? sourceJid : null;
 }
 
+/**
+ * Inputs share a turn only on the same reply route. An automation run's input
+ * is its own route: it never shares a turn with user messages or another run.
+ */
 function messageRouteKey(message: NewMessage): string {
   const context = message.channel_context;
   return [
+    automationRunIdOf(message) ?? '',
     message.source_jid || message.chat_jid,
     context?.provider || '',
     context?.channelAccountId || '',

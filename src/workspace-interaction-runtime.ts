@@ -5,16 +5,15 @@ export type PublicAgentKind = 'main' | 'conversation' | 'spawn';
 
 /**
  * Workspace interaction mode applies only to public, user-facing Agent loops.
- * Scheduled work and fire-and-forget spawn Agents retain the legacy contract.
+ * Fire-and-forget spawn Agents retain the legacy contract.
  */
 export function resolveRuntimeInteractionMode(
   workspaceMode: InteractionMode | null | undefined,
   input: {
     agentKind: PublicAgentKind;
-    scheduledTask?: boolean;
   },
 ): InteractionMode {
-  if (input.scheduledTask || input.agentKind === 'spawn') return 'assistant';
+  if (input.agentKind === 'spawn') return 'assistant';
   return workspaceMode === 'proactive' ? 'proactive' : 'assistant';
 }
 
@@ -115,12 +114,11 @@ export interface FrozenIpcInteractionMode {
  * IPC delivery must use the contract frozen by the runner when the file was
  * written. A later workspace setting change cannot reinterpret an old side
  * effect. Missing values are legacy assistant payloads; malformed values fail
- * validation. Scheduled and spawn outputs are always assistant semantics.
+ * validation. Spawn outputs are always assistant semantics.
  */
 export function resolveFrozenIpcInteractionMode(
   value: unknown,
   input: {
-    scheduledTask: boolean;
     spawnAgent: boolean;
   },
 ): FrozenIpcInteractionMode {
@@ -133,7 +131,7 @@ export function resolveFrozenIpcInteractionMode(
   const payloadMode: InteractionMode =
     value === 'proactive' || value === 'persona' ? 'proactive' : 'assistant';
   return {
-    mode: input.scheduledTask || input.spawnAgent ? 'assistant' : payloadMode,
+    mode: input.spawnAgent ? 'assistant' : payloadMode,
     valid,
     legacyDefaulted,
   };

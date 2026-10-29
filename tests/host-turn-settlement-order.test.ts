@@ -48,9 +48,9 @@ describe('Host turn settlement ordering', () => {
     expect(callback).not.toContain('healthyCompletedInputTurns.add');
   });
 
-  test('initializes IPC watching before scheduler and recovery can spawn runners', () => {
+  test('initializes IPC watching before automations and recovery can spawn runners', () => {
     const watcher = source.lastIndexOf('startIpcWatcher();');
-    const scheduler = source.lastIndexOf('startSchedulerLoop(schedulerDeps);');
+    const scheduler = source.lastIndexOf('automationScheduler?.start();');
     const pendingRecovery = source.lastIndexOf('recoverPendingMessages();');
     const conversationRecovery = source.lastIndexOf(
       'recoverConversationAgents();',

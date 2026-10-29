@@ -148,7 +148,6 @@ function envOf(
     false,
     undefined,
     undefined,
-    undefined,
     selection.resolved,
     undefined,
     agentProfile as never,

@@ -22,14 +22,6 @@ describe('HappyClaw first-wake eligibility', () => {
     ).toBe(false);
     expect(
       isHappyClawBootstrapTurn({
-        turnId: 'scheduled-turn',
-        isHome: true,
-        isDefaultProfile: true,
-        isScheduledTask: true,
-      }),
-    ).toBe(false);
-    expect(
-      isHappyClawBootstrapTurn({
         turnId: 'custom-turn',
         isHome: true,
         isDefaultProfile: false,
@@ -61,12 +53,6 @@ describe('HappyClaw Owner Profile structural runtime eligibility', () => {
         runtimeAgentKind: 'conversation',
       }),
     ).toBe(true);
-    expect(
-      isHappyClawOwnerProfileRuntimeStructurallyEligible({
-        ...warmup,
-        isScheduledTask: true,
-      }),
-    ).toBe(false);
     for (const runtimeAgentKind of ['task', 'spawn'] as const) {
       expect(
         isHappyClawOwnerProfileRuntimeStructurallyEligible({
