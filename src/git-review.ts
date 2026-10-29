@@ -159,6 +159,8 @@ export async function runGit(
      * asked for in their own repository: `worktree add`.
      */
     trustRepoConfig?: boolean;
+    /** Written to stdin, e.g. paths for `--stdin`; stdin is empty otherwise. */
+    input?: string;
   } = {},
 ): Promise<GitRunResult> {
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
@@ -186,10 +188,13 @@ export async function runGit(
       ],
       {
         env: gitChildEnv(configEnv),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
     );
+    // A child that exits before reading all of it is reported by `close`.
+    child.stdin.on('error', () => {});
+    child.stdin.end(options.input ?? '');
     const chunks: Buffer[] = [];
     let size = 0;
     let truncated = false;

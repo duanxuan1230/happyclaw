@@ -509,13 +509,14 @@ worktree 的会话、主会话、定时任务，或自定义目录相同的其�
   git 失败返回 500 `WORKTREE_CREATE_FAILED`。响应与 `GET` 列表的会话带
   `worktree: {"branch", "base_commit", "status": "active" | "broken", "broken_reason"}`
   或 `null`。worktree 丢失或损坏时该会话运行失败并说明原因，不会回退到主仓库。
-  仓库根目录的 `.worktreeinclude` 列出要复制进新 worktree 的被忽略文件（如 `.env`）；
-  该文件超过 64 KB 或匹配列表超过 256 KB（此时一个都不复制）、超过 100 个文件或超过
-  单文件 10 MB / 合计 50 MB 时少复制的部分会记 warn 日志，创建响应的
-  `worktree.include_incomplete` 为 `{"reason": "include_file_too_large" | "list_truncated" |
-"file_limit" | "size_limit", "copied_files", "skipped_files"}`（`skipped_files` 是最多 5 个
-  未复制的路径，前两种原因下为空），完整复制时为 `null`（`GET` 列表不带该字段）。Web 在
-  新建会话后据此弹出不阻塞的提示。
+  仓库根目录的 `.worktreeinclude` 列出要复制进新 worktree 的被忽略文件（如 `.env`）：只复制
+  既匹配它、又被仓库的忽略规则（`.gitignore`、`info/exclude`、`core.excludesFile`）忽略的
+  未跟踪文件。该文件超过 64 KB 或匹配列表超过 256 KB（此时一个都不复制）、超过 100 个文件
+  或超过单文件 10 MB / 合计 50 MB 时少复制的部分会记 warn 日志，创建响应的
+  `worktree.include_incomplete` 为
+  `{"reason": "include_file_too_large" | "list_truncated" | "file_limit" | "size_limit", "copied_files", "skipped_files"}`
+  （`skipped_files` 是最多 5 个未复制的路径，前两种原因下为空），完整复制时为 `null`（`GET`
+  列表不带该字段）。Web 在新建会话后据此弹出不阻塞的提示。
 - 删除带 worktree 的会话会移除 worktree 目录、保留分支。可能丢失内容时返回 409
   `{"code": "WORKTREE_DIRTY", "error", "dirty_worktrees": [{"session_id", "branch", "changed_files", "unreadable", "submodules", "embedded_repos", "detached_commits", "operation_in_progress", "hidden_changes"}]}`，
   `error` 逐条写明原因：

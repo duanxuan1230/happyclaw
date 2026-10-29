@@ -240,6 +240,7 @@ export class SessionWorktreeError extends Error {
 }
 
 const WORKTREE_INCLUDE_FILE_MAX_BYTES = 64 * 1024;
+const WORKTREE_INCLUDE_LIST_MAX_BYTES = 256 * 1024;
 const WORKTREE_INCLUDE_MAX_FILES = 100;
 const WORKTREE_INCLUDE_SINGLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const WORKTREE_INCLUDE_TOTAL_MAX_BYTES = 50 * 1024 * 1024;
@@ -306,11 +307,30 @@ async function copyIncludedFiles(
       '--ignored',
       '--exclude-from=.worktreeinclude',
     ],
-    { maxBytes: 256 * 1024 },
+    { maxBytes: WORKTREE_INCLUDE_LIST_MAX_BYTES },
   );
   // A cut list may end mid-path; copy nothing rather than a guessed subset.
   if (lsResult.truncated) return nothingCopied('list_truncated');
-  const matched = lsResult.stdout.split('\0').filter(Boolean);
+  // `--exclude-from` lists every untracked file the patterns name; only the
+  // ones the repository's own ignore rules (.gitignore, info/exclude,
+  // core.excludesFile) also ignore are copied, so work-in-progress that
+  // happens to match a pattern never lands in someone else's worktree.
+  const candidates = lsResult.stdout.split('\0').filter(Boolean);
+  const ignored =
+    candidates.length === 0
+      ? new Set<string>()
+      : new Set(
+          (
+            await runGit(repoRoot, ['check-ignore', '-z', '--stdin'], {
+              input: `${candidates.join('\0')}\0`,
+              maxBytes: WORKTREE_INCLUDE_LIST_MAX_BYTES,
+              okExitCodes: [0, 1],
+            })
+          ).stdout
+            .split('\0')
+            .filter(Boolean),
+        );
+  const matched = candidates.filter((relPath) => ignored.has(relPath));
   let reason: WorktreeIncludeIncomplete['reason'] | null = null;
   const skipped: string[] = [];
   let copiedCount = 0;
