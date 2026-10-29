@@ -289,18 +289,20 @@ export class GroupQueue {
   private mutationBaseKeyAliases = new Map<string, string>();
   private nextMutationPauseTokenId = 1;
   private mutationPreserveStopJids = new Set<string>();
-  private mutationStoppedFolders = new Set<string>();
+  /** Lanes (serialization keys) whose latest stop kept their work. */
+  private mutationStoppedLanes = new Set<string>();
   /**
-   * Exact lanes held by holdLane(), each with the folders its stops marked.
-   * Unlike a mutation pause this holds one lane, never its workspace family.
+   * Exact lanes held by holdLane(), with how many holders each has. Unlike a
+   * mutation pause this holds one lane, never its workspace family.
    */
-  private heldLanes = new Map<string, Set<string>>();
-  // 记录最近一次 stopGroup 的时间戳（毫秒）。runForGroup finally 块会用它来
-  // 决定是否跳过自动 drainGroup —— stopGroup 中清空 pendingMessages 之后，
-  // hasIpcInjectedMessages 重新置 pendingMessages=true，会让用户的 'stop' 之后
-  // 容器立即又被拉起来。同时让主消息循环在 OOM 计数前看一眼这个标志，避免
-  // 把 user-stopped (SIGKILL → 137) 误判为真实 OOM 触发会话重置。
-  private recentlyStoppedFolders = new Map<string, number>();
+  private heldLanes = new Map<string, number>();
+  // 记录每个 lane（序列化 key）最近一次 stopGroup 的时间戳（毫秒）。runForGroup
+  // finally 块会用它来决定是否跳过自动 drainGroup —— stopGroup 中清空
+  // pendingMessages 之后，hasIpcInjectedMessages 重新置 pendingMessages=true，
+  // 会让用户的 'stop' 之后容器立即又被拉起来。同时让主消息循环在 OOM 计数前
+  // 看一眼这个标志，避免把 user-stopped (SIGKILL → 137) 误判为真实 OOM 触发
+  // 会话重置。按 lane 记录：停一个会话不影响同一工作区的其他 lane。
+  private recentlyStoppedLanes = new Map<string, number>();
   private static RECENTLY_STOPPED_WINDOW_MS = 30_000;
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
@@ -569,13 +571,19 @@ export class GroupQueue {
    * it, while the main session and the other sessions keep running.
    */
   holdLane(groupJid: string): void {
-    if (!this.heldLanes.has(groupJid)) this.heldLanes.set(groupJid, new Set());
+    this.heldLanes.set(groupJid, (this.heldLanes.get(groupJid) ?? 0) + 1);
   }
 
-  /** Release a held lane as it was: its waiting work runs. */
+  /**
+   * Release one hold. With none left the lane is as it was: deliveries its
+   * stopped runner had not acknowledged are replayed and its work runs.
+   */
   releaseLane(groupJid: string): void {
     if (!this.releaseLaneHold(groupJid)) return;
     const state = this.groups.get(groupJid);
+    if (state && !state.active) {
+      this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+    }
     if (state && (state.pendingMessages || state.pendingTasks.length > 0)) {
       this.waitingGroups.add(groupJid);
     }
@@ -584,26 +592,57 @@ export class GroupQueue {
 
   /**
    * A held lane's session is gone: drop its work and run its discard hook
-   * (ending a usage-limit wait, cancelling parked input), as a plain stop does.
+   * (ending a usage-limit wait, cancelling parked input), as a plain stop
+   * does. The lane stays held while another holder has it.
    */
   discardHeldLane(groupJid: string): void {
-    if (!this.releaseLaneHold(groupJid)) return;
+    if (!this.heldLanes.has(groupJid)) return;
     this.discardLaneWork(groupJid, this.getGroup(groupJid));
+    this.releaseLaneHold(groupJid);
+    this.drainWaiting();
   }
 
+  /** Drop one hold; true when it was the last. */
   private releaseLaneHold(groupJid: string): boolean {
-    const folders = this.heldLanes.get(groupJid);
-    if (!folders) return false;
+    const holders = this.heldLanes.get(groupJid);
+    if (!holders) return false;
+    if (holders > 1) {
+      this.heldLanes.set(groupJid, holders - 1);
+      return false;
+    }
     this.heldLanes.delete(groupJid);
     this.mutationPreserveStopJids.delete(groupJid);
-    // The stop's markers outlive it only where a workspace mutation still
-    // holds the folder; otherwise the lane's next runner starts afresh.
-    for (const folder of folders) {
-      if (this.mutationPauseCounts.has(folder)) continue;
-      this.mutationStoppedFolders.delete(folder);
-      this.recentlyStoppedFolders.delete(folder);
+    // The stop's markers outlive the hold only while a workspace mutation
+    // also holds the lane; otherwise its next runner starts afresh.
+    if (!this.mutationPauseCounts.has(this.getMutationPauseKey(groupJid))) {
+      this.clearStopMarkers(groupJid);
     }
     return true;
+  }
+
+  private clearStopMarkers(groupJid: string): void {
+    const lane = this.getSerializationKey(groupJid);
+    this.mutationStoppedLanes.delete(lane);
+    this.recentlyStoppedLanes.delete(lane);
+  }
+
+  /**
+   * After a stop that kept the lane's work: remove the files of IPC
+   * deliveries the runner had not acknowledged but keep their receipts, so
+   * the outcome decides — replayed when the lane is released, committed as
+   * abandoned when its work is discarded. Falls back to replaying now when
+   * the files cannot be removed.
+   */
+  private parkUnacknowledgedIpcDeliveries(
+    groupJid: string,
+    state: GroupState,
+  ): void {
+    if (!state.pendingIpcDeliveries || state.pendingIpcDeliveries.size === 0)
+      return;
+    const ids = new Set(state.pendingIpcDeliveries.keys());
+    if (!this.discardDeliveryIpcFiles(state, ids)) {
+      this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+    }
   }
 
   /** Drop a lane's queued work and run its discard hook, as stopGroup does. */
@@ -661,9 +700,14 @@ export class GroupQueue {
     // stop classification during forced quiesce). Clear them before draining
     // the replacement runner; otherwise its normal exit within 30s would be
     // mistaken for the old mutation stop and skip IPC recovery/auto-drain.
-    for (const key of releasedKeys) {
-      if (!this.mutationStoppedFolders.delete(key)) continue;
-      this.recentlyStoppedFolders.delete(key);
+    for (const [jid, state] of this.groups) {
+      if (!releasedKeys.has(this.getMutationPauseKey(jid))) continue;
+      if (this.heldLanes.has(jid)) continue;
+      const lane = this.getSerializationKey(jid);
+      if (this.mutationStoppedLanes.delete(lane)) {
+        this.recentlyStoppedLanes.delete(lane);
+      }
+      if (!state.active) this.recoverUnacknowledgedIpcDeliveries(jid, state);
     }
 
     for (const [jid, state] of this.groups) {
@@ -714,11 +758,11 @@ export class GroupQueue {
       }
       this.discardLaneWork(jid, state);
       this.mutationPreserveStopJids.delete(jid);
-    }
-
-    for (const key of releasedKeys) {
-      if (this.mutationStoppedFolders.delete(key)) {
-        this.recentlyStoppedFolders.delete(key);
+      if (releasedKeys.has(this.getMutationPauseKey(jid))) {
+        const lane = this.getSerializationKey(jid);
+        if (this.mutationStoppedLanes.delete(lane)) {
+          this.recentlyStoppedLanes.delete(lane);
+        }
       }
     }
     // Terminal tombstones and base aliases intentionally survive final token
@@ -1041,30 +1085,34 @@ export class GroupQueue {
   }
 
   /**
-   * Whether stopGroup was issued for this folder in the recent window.
+   * Whether stopGroup was issued for this lane (its serialization key, so
+   * the JIDs sharing one runner count as one lane) in the recent window.
    * Used by:
    *   1. runForGroup finally — skip pendingMessages re-arm + drainGroup
    *   2. main loop OOM handler — don't count user-stopped 137 as OOM
    *   3. anything else that needs to suppress auto-restart shortly after a stop
    */
-  isRecentlyStopped(folder: string): boolean {
-    const ts = this.recentlyStoppedFolders.get(folder);
+  isRecentlyStopped(groupJid: string): boolean {
+    const lane = this.getSerializationKey(groupJid);
+    const ts = this.recentlyStoppedLanes.get(lane);
     if (!ts) return false;
     if (Date.now() - ts > GroupQueue.RECENTLY_STOPPED_WINDOW_MS) {
-      this.recentlyStoppedFolders.delete(folder);
+      this.recentlyStoppedLanes.delete(lane);
       return false;
     }
     return true;
   }
 
   /**
-   * Describe the latest explicit stop for the active folder. Ordinary user or
-   * lifecycle stops discard the interrupted input; capability mutations park
-   * it so the replacement runtime can replay under the committed policy.
+   * Describe the latest explicit stop of this lane. Ordinary user or
+   * lifecycle stops discard the interrupted input; capability mutations and
+   * held lanes park it so the replacement runtime can replay it.
    */
-  getRecentStopDisposition(folder: string): 'none' | 'discard' | 'preserve' {
-    if (!this.isRecentlyStopped(folder)) return 'none';
-    return this.mutationStoppedFolders.has(folder) ? 'preserve' : 'discard';
+  getRecentStopDisposition(groupJid: string): 'none' | 'discard' | 'preserve' {
+    if (!this.isRecentlyStopped(groupJid)) return 'none';
+    return this.mutationStoppedLanes.has(this.getSerializationKey(groupJid))
+      ? 'preserve'
+      : 'discard';
   }
 
   private isHostMode(groupJid: string): boolean {
@@ -2413,7 +2461,7 @@ export class GroupQueue {
     // 应该在这里重新点亮 pendingMessages，否则 stopGroup 之后的 drainGroup 路径
     // 会拉起一个新 runner。
     if (
-      this.isRecentlyStopped(state.groupFolder) &&
+      this.isRecentlyStopped(groupJid) &&
       !this.mutationPreserveStopJids.has(groupJid)
     ) {
       return;
@@ -2763,6 +2811,13 @@ export class GroupQueue {
     }
   }
 
+  private markStopped(groupJid: string, preserveQueuedWork: boolean): void {
+    const lane = this.getSerializationKey(groupJid);
+    if (preserveQueuedWork) this.mutationStoppedLanes.add(lane);
+    else this.mutationStoppedLanes.delete(lane);
+    this.recentlyStoppedLanes.set(lane, Date.now());
+  }
+
   /**
    * Force-stop a group's active container and clear queued work.
    * Returns a promise that resolves when the container has fully exited
@@ -2810,15 +2865,8 @@ export class GroupQueue {
     }
     // 标记 stop 时间：runForGroup finally + index.ts OOM 计数 + 主消息循环
     // 都用这个时间窗判断 user-stopped vs 真 OOM / IPC-injected drain。
-    if (requestedState.groupFolder) {
-      if (preserveQueuedWork) {
-        this.mutationStoppedFolders.add(requestedState.groupFolder);
-        this.heldLanes.get(groupJid)?.add(requestedState.groupFolder);
-      } else {
-        this.mutationStoppedFolders.delete(requestedState.groupFolder);
-      }
-      this.recentlyStoppedFolders.set(requestedState.groupFolder, Date.now());
-    }
+    if (requestedState.groupFolder)
+      this.markStopped(groupJid, preserveQueuedWork);
     const activeRunner = this.findActiveRunnerFor(groupJid);
     const targetJid = activeRunner || groupJid;
     const state = this.getGroup(targetJid);
@@ -2836,15 +2884,7 @@ export class GroupQueue {
     if (preserveQueuedWork) {
       this.mutationPreserveStopJids.add(targetJid);
     }
-    if (state.groupFolder) {
-      if (preserveQueuedWork) {
-        this.mutationStoppedFolders.add(state.groupFolder);
-        this.heldLanes.get(groupJid)?.add(state.groupFolder);
-      } else {
-        this.mutationStoppedFolders.delete(state.groupFolder);
-      }
-      this.recentlyStoppedFolders.set(state.groupFolder, Date.now());
-    }
+    if (state.groupFolder) this.markStopped(targetJid, preserveQueuedWork);
     if (!preserveQueuedWork) {
       this.waitingGroups.delete(groupJid);
       this.waitingGroups.delete(targetJid);
@@ -3036,7 +3076,7 @@ export class GroupQueue {
     // the old discard marker before processGroupMessages starts; mutation
     // markers are removed by resumeGroupsAfterMutation before reaching here.
     if (state.stopRequested) {
-      this.recentlyStoppedFolders.delete(this.getSerializationKey(groupJid));
+      this.recentlyStoppedLanes.delete(this.getSerializationKey(groupJid));
     }
     state.stopRequested = false;
     const isHostMode = this.isHostMode(groupJid);
@@ -3120,7 +3160,7 @@ export class GroupQueue {
       const exitFolder = state.groupFolder;
       const isStopRequested =
         state.stopRequested ||
-        (exitFolder ? this.isRecentlyStopped(exitFolder) : false);
+        (exitFolder ? this.isRecentlyStopped(groupJid) : false);
       if (state.groupFolder) {
         try {
           this.cleanupIpcSentinels(
@@ -3131,7 +3171,11 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        if (this.mutationPreserveStopJids.has(groupJid)) {
+          this.parkUnacknowledgedIpcDeliveries(groupJid, state);
+        } else {
+          this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        }
         this.recoverUnconsumedIpc(groupJid, state, 'agent exit');
       }
       // If messages were IPC-injected during this run, always mark pending
@@ -3331,7 +3375,11 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        if (this.mutationPreserveStopJids.has(groupJid)) {
+          this.parkUnacknowledgedIpcDeliveries(groupJid, state);
+        } else {
+          this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
+        }
         this.recoverUnconsumedIpc(groupJid, state, 'task exit');
       }
       const unfinishedQueryId = state.queryId;
@@ -3499,6 +3547,8 @@ export class GroupQueue {
       if (state.pendingMessages || state.pendingTasks.length > 0) {
         this.waitingGroups.add(groupJid);
       }
+      // The slot a paused lane's runner just gave up serves the others.
+      this.drainWaiting();
       return;
     }
     const activeRunner = this.findActiveRunnerFor(groupJid);

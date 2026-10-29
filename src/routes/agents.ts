@@ -15,6 +15,7 @@ import {
   dirtyWorktreesConflict,
   findDirtySessionWorktrees,
   refreshSessionWorktreeStatus,
+  forgetSessionWorktree,
   removeSessionWorktree,
   toSessionWorktreePayload,
   WorktreeUnavailableError,
@@ -480,6 +481,7 @@ async function releaseSessionWorktree(
     await queue?.stopGroup(laneJid, { force: true, preserveQueuedWork: true });
     const result = await removeSessionWorktree(input.sessionId, {
       force: input.force,
+      keepRecord: true,
     });
     if (result && !result.removed) {
       return refuse(c.json(dirtyWorktreesConflict([result.risk]), 409));
@@ -962,6 +964,7 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     clearSessionChannelOwner(group.folder, agentId);
 
     deleteAgent(agentId);
+    forgetSessionWorktree(agentId);
   } finally {
     // The worktree is gone: whatever happened above, the lane's work must
     // not run on without it.
@@ -1096,6 +1099,7 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
     deleteSession(group.folder, sessionId);
     clearSessionChannelOwner(group.folder, sessionId);
     deleteAgent(sessionId);
+    forgetSessionWorktree(sessionId);
   } finally {
     // The worktree is gone: whatever happened above, the lane's work must
     // not run on without it.
