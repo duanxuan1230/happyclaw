@@ -94,9 +94,9 @@ Public：
 - `GET /api/groups/:jid/context-usage`，会话当前的上下文占用（输入框旁的圆环）
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
   Runtime Session、子对话、`data/groups/{folder}` 工作目录、会话 worktree 目录及
-  Workspace Memory（含版本历史和 Home Owner Profile），关联定时任务停止并移入回收站；
-  保留工作区外壳、`data/extra/`、任务运行历史、worktree 分支和宿主机模式的自定义
-  工作目录
+  Workspace Memory（含版本历史和 Home Owner Profile）；自动化保留，重建期间暂停，
+  排队或运行中的运行记为已终止，绑定已删会话的自动化保持暂停；保留工作区外壳、
+  `data/extra/`、自动化运行历史、worktree 分支和宿主机模式的自定义工作目录
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
 - `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要、执行轨迹与有序步骤
@@ -114,8 +114,7 @@ Public：
 3 次、单次不超过 7 天，超出则按原方式失败；新消息、`send_now`（`promote`）立即结束
 等待并与排队输入合批，`/break`、取消最后一条排队输入、停止、`/clear`、`/fresh`、删除
 工作区或会话取消等待。来源是 IM 的输入在开始等待时收到一条说明（同一输入只发一次）。
-定时任务的独立运行改为 `task_runs.status = 'retry_wait'`，`available_at` 为继续时刻，
-不消耗运行的重试预算。
+自动化的输入与其他输入一样留在队列里等待，运行保持 `queued`。
 
 `model-selection` 以 `agentId`（GET 查询参数、PUT 请求体）区分 Runtime Session，
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
@@ -481,7 +480,7 @@ hook）。HappyClaw 本身不访问网络，但 LFS 或 partial clone 仓库在 
 "not_git_repo" | "repo_has_no_commits", "message": "…"}`。
 
 `workdir/peers` 列出与该会话共用工作目录、且正在运行一轮的其他会话（同工作区未用
-worktree 的会话、主会话、定时任务，或自定义目录相同的其他工作区），只提示不限制：
+worktree 的会话、主会话，或自定义目录相同的其他工作区），只提示不限制：
 `{"peers": [{"workspace_jid": "web:…", "workspace_name": "Repo", "kind": "main" |
 "session" | "task", "session_id": null, "session_name": null}], "hidden_count": 0}`；
 调用者看不到的工作区只计入 `hidden_count`。
@@ -903,7 +902,7 @@ minimalClientVersion?, availableInPlans?, serviceTiers }`（字段取自官方
 - `GET|PUT /api/config/system`
 - `GET|PUT /api/config/host-integration`，仅 admin；包含
   `adminHostOnlyMode`。从 `false` 切到 `true` 时会停稳管理员工作区运行器，并把
-  active admin 拥有的工作区和定时任务持久迁移为 Host；普通成员数据不变
+  active admin 拥有的工作区持久迁移为 Host；普通成员数据不变
 - `GET /api/config/external-resources`
 - `GET /api/config/external-resources/rule`
 - `GET|PUT /api/config/registration`
@@ -1099,7 +1098,7 @@ POST、PATCH 和 DELETE 均返回
 
 ### 待确认的记忆
 
-群聊成员的轮次和定时任务写入的记忆以 `status: "proposed"` 保存，不参与召回、目录和
+群聊成员的轮次和自动化运行写入的记忆以 `status: "proposed"` 保存，不参与召回、目录和
 搜索；`GET .../items?status=proposed` 列出它们。owner 的回答：
 
 - `POST /api/memory/workspaces/:workspaceJid/items/:itemId/confirm`

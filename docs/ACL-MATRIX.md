@@ -203,7 +203,7 @@ Agent Runtime 的 Workspace Memory MCP 还叠加执行上下文策略：
 | ------------------------------------------------ | ---- | ---------------------------------- |
 | 顶层 Main/Runtime Session，批次全部是 owner 输入 | 允许 | 按 Workspace ACL                   |
 | 顶层 Main/Runtime Session，含非 owner 输入       | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
-| Scheduled Run（group 或 isolated）               | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| 自动化运行的轮次                                 | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
 | Spawn/Task 会话、SDK Task Sub-Agent              | 允许 | 拒绝                               |
 
 owner 输入的判定在宿主：Web 输入的 sender 等于 owner 用户 id；IM 输入的发送者 IM id
