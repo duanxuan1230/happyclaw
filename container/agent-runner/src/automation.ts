@@ -489,6 +489,12 @@ export interface AutomationCreateRequest {
   execution?: AutomationExecution;
   scriptCommand?: string | null;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export interface AutomationUpdateRequest {
@@ -511,6 +517,12 @@ export interface AutomationUpdateRequest {
     >
   >;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export interface AutomationIdRequest {
@@ -522,6 +534,12 @@ export interface AutomationIdRequest {
   requestId: string;
   id: string;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export interface AutomationCompleteRequest {
@@ -531,12 +549,24 @@ export interface AutomationCompleteRequest {
   /** Shown as the status reason, e.g. 「第 1–29 集已全部下载」. */
   reason: string;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export interface AutomationListRequest {
   type: 'automation_list';
   requestId: string;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export interface AutomationListRunsRequest {
@@ -545,6 +575,12 @@ export interface AutomationListRunsRequest {
   id: string;
   limit?: number;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 /** Acts on the automation run this turn belongs to; no id needed. */
@@ -552,6 +588,12 @@ export interface AutomationCurrentRunRequest {
   type: 'automation_notify_current_run' | 'automation_silence_current_run';
   requestId: string;
   timestamp: string;
+  /**
+   * The input turn the calling agent is answering. The host acts only when
+   * it matches the batch being processed; a late request (timeout, steer)
+   * is rejected instead of being judged against a later turn.
+   */
+  inputTurnId?: string | null;
 }
 
 export type AutomationIpcRequest =

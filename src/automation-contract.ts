@@ -100,6 +100,19 @@ export interface AutomationRuntimeDeps {
     sessionJid: string;
     inputMessageId: string;
   }): boolean;
+  /**
+   * Where a run's replies and notices go, resolved at fire time so a later
+   * unbind, rebind or target change can never send into a stale chat:
+   * `preferredRouteJid` (the creating turn's source, e.g. a Feishu topic)
+   * when it still routes to `sessionJid` (bound) or to a session of the
+   * automation's workspace (fresh/persistent notices); otherwise the
+   * session's only IM binding; otherwise null (Web only).
+   */
+  resolveDeliveryRoute(req: {
+    automation: Automation;
+    sessionJid: string | null;
+    preferredRouteJid: string | null;
+  }): string | null;
   /** True if the session JID resolves to a live Main or Runtime Session. */
   sessionExists(sessionJid: string): boolean;
   /** Hide an old fresh-mode run session (status completed); keeps history. */
