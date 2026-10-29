@@ -236,7 +236,16 @@ describe('Agent names', () => {
   });
 
   test('invisible characters neither pass validation nor dodge the check', async () => {
-    for (const name of ['Re\u200bviewer', 'Rev\u00adiewer', 'Re\u2060view']) {
+    for (const name of [
+      'Re\u200bviewer',
+      'Rev\u00adiewer',
+      'Re\u2060view',
+      'Re\ufeffviewer',
+      'Re\u180eviewer',
+      'Re\u034fviewer',
+      'Reviewer \u202egnp.exe',
+      'Re\u2066viewer\u2069',
+    ]) {
       const res = await call('/', { method: 'POST', body: { name } });
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({
@@ -251,7 +260,7 @@ describe('Agent names', () => {
     });
     const rename = await call(`/${target.id}`, {
       method: 'PATCH',
-      body: { name: 'Visi\u200dble 2' },
+      body: { name: 'Visi\u202able 2' },
     });
     expect(await rename.json()).toMatchObject({ code: 'INVALID_NAME' });
     // A stored or Builder-written name with them still collides.
@@ -265,6 +274,39 @@ describe('Agent names', () => {
 });
 
 describe('field-level validation errors', () => {
+  test('emoji names keep their joiners and variation selectors, through export and import', async () => {
+    for (const name of ['❤️ 助手', '👨‍💻 Coder', '☺︎ Plain']) {
+      const res = await call('/', { method: 'POST', body: { name } });
+      expect(res.status).toBe(201);
+      const created = (await res.json()).profile;
+      expect(created.name).toBe(name);
+      const exported = await (await call(`/${created.id}/export`)).json();
+      expect(exported.agent.name).toBe(name);
+      const imported = await call('/import', {
+        method: 'POST',
+        body: { data: exported, name: `${name} 2` },
+      });
+      expect(imported.status).toBe(201);
+      expect((await imported.json()).profile.name).toBe(`${name} 2`);
+    }
+    // Uniqueness still ignores the joiners and selectors.
+    expect(db.findAgentProfileNameConflict(MEMBER, '❤ 助手')).toMatchObject({
+      name: '❤️ 助手',
+    });
+  });
+
+  test('a name with nothing visible in it is refused', async () => {
+    for (const name of ['\u200d', '\ufe0f\u200d', '\u3164']) {
+      const res = await call('/', { method: 'POST', body: { name } });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: '名称至少需要一个可见字符',
+        code: 'INVALID_NAME',
+        field: 'name',
+      });
+    }
+  });
+
   test('name the prompt section that is over the limit', async () => {
     const res = await call('/', {
       method: 'POST',

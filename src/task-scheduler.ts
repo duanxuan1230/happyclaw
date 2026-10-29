@@ -67,6 +67,7 @@ import {
   TaskRunAtomicNotificationPayload,
   TaskRunNotificationReceipt,
   updateTaskRunLog,
+  deleteTaskRunLog,
   pauseTaskAfterRun,
   setSession,
   deleteSession,
@@ -126,10 +127,7 @@ import {
   markUsageLimitWaitResumed,
   type TaskFailureNoticeState,
 } from './runtime-state-store.js';
-import {
-  formatUsageLimitResumeTime,
-  usageLimitWaitScopeKey,
-} from './usage-limit-wait.js';
+import { usageLimitWaitScopeKey } from './usage-limit-wait.js';
 
 export function shouldFinalizeScheduledRunOutput(
   output: Pick<
@@ -1264,6 +1262,26 @@ async function runTaskInner(
     deps.queue.closeStdin(effectiveJid);
   };
 
+  /**
+   * The run paused (a usage-limit wait), it did not end: drop its log line so
+   * the resumed attempt writes the only one, and the history never shows a
+   * failure that wasn't.
+   */
+  const discardRunLog = () => {
+    if (runLogFinalized) return;
+    runLogFinalized = true;
+    try {
+      deleteTaskRunLog(runLogId);
+    } catch (err) {
+      logger.error(
+        { taskId: task.id, runLogId, err },
+        'Failed to drop the log line of a paused run',
+      );
+    }
+    if (idleTimer) clearTimeout(idleTimer);
+    deps.queue.closeStdin(effectiveJid);
+  };
+
   // Use a run-scoped Claude session in the same workspace folder. Reusing
   // `task:${task.id}` would let isolated scheduled tasks accumulate context
   // across runs, which contradicts the default isolated semantics.
@@ -1463,8 +1481,7 @@ async function runTaskInner(
             isScheduledTask: true,
           }),
         );
-        error = `模型服务额度已用尽，预计 ${formatUsageLimitResumeTime(resumeAt)} 自动重试本次运行。`;
-        lastOutputTime = Date.now();
+        discardRunLog();
         logger.warn(
           { taskId: task.id, runId: durableRun.id, resumeAt },
           'Scheduled run waits for a usage-limit reset',

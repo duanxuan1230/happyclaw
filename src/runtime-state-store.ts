@@ -7,7 +7,7 @@
  * db.ts binds this module to its connection; no other module touches these
  * tables directly.
  */
-import type { UsageQueryFilters } from './db.js';
+import { buildUsageWhere, type UsageQueryFilters } from './db.js';
 import { keyPrefixRange } from './sql-key-prefix.js';
 
 interface SqliteRunResult {
@@ -422,27 +422,6 @@ export interface UsageCacheRateRow {
   hitRate: number | null;
 }
 
-function buildCacheWhere(filters: UsageQueryFilters): {
-  sql: string;
-  params: unknown[];
-} {
-  // Mirrors db.ts buildUsageWhere (not exported), so /cache and /stats agree.
-  const conditions = ['r.usage_date >= ?', 'r.usage_date <= ?'];
-  const params: unknown[] = [filters.from, filters.to];
-  const add = (column: string, value?: string) => {
-    if (!value) return;
-    conditions.push(`${column} = ?`);
-    params.push(value);
-  };
-  add('r.user_id', filters.userId);
-  add('r.model', filters.model);
-  if (filters.agentId === '__main__') conditions.push('r.agent_id IS NULL');
-  else add('r.agent_id', filters.agentId);
-  add('r.group_folder', filters.groupFolder);
-  add('r.source', filters.source);
-  return { sql: conditions.join(' AND '), params };
-}
-
 /** Prompt-cache hit rates of usage_records by day, model and connection. */
 export function getUsageCacheRates(filters: UsageQueryFilters): {
   summary: Omit<UsageCacheRateRow, 'key'>;
@@ -450,7 +429,7 @@ export function getUsageCacheRates(filters: UsageQueryFilters): {
   models: UsageCacheRateRow[];
   connections: UsageCacheRateRow[];
 } {
-  const where = buildCacheWhere(filters);
+  const where = buildUsageWhere(filters);
   const select = `COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
     COALESCE(SUM(r.cache_creation_input_tokens), 0) AS cache_creation_tokens,
     COALESCE(SUM(r.cache_read_input_tokens), 0) AS cache_read_tokens`;

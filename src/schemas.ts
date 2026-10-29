@@ -427,15 +427,28 @@ function validatePromptModeCompatibility(
 
 /** Per-Agent name limit, in UTF-16 code units. */
 export const AGENT_NAME_MAX_CHARS = 80;
+/**
+ * Invisible characters that only serve to make two names look the same:
+ * zero-width space and word joiner, soft hyphen, BOM, Mongolian vowel
+ * separator, combining grapheme joiner, and bidi embedding / isolate
+ * controls. Emoji joiners (ZWJ) and variation selectors stay allowed: they
+ * are how names such as "❤️ 助手" or "👨‍💻 Coder" are written. Uniqueness
+ * still ignores every default-ignorable code point.
+ */
+const DECEPTIVE_NAME_CHARACTERS =
+  /[\u00AD\u034F\u180E\u200B\u2060\uFEFF\u202A-\u202E\u2066-\u2069]/u;
 const AgentProfileNameSchema = z
   .string()
   .trim()
   .min(1)
   .max(AGENT_NAME_MAX_CHARS)
-  // Invisible characters would let two names look the same.
   .refine(
-    (name) => !/\p{Default_Ignorable_Code_Point}/u.test(name),
+    (name) => !DECEPTIVE_NAME_CHARACTERS.test(name),
     '名称不能包含不可见字符',
+  )
+  .refine(
+    (name) => /[^\p{Default_Ignorable_Code_Point}\s]/u.test(name),
+    '名称至少需要一个可见字符',
   );
 
 /**

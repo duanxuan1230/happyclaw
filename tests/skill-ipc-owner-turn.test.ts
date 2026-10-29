@@ -13,6 +13,7 @@ import {
   SKILL_MUTATION_TASK_RUN_REJECTION,
   skillMutationTurnRejection,
 } from '../src/skill-ipc-authorization.js';
+import { isWorkspaceMemoryOwnerTurn } from '../src/workspace-memory-ipc.js';
 
 const FOLDER = 'home-owner';
 const OWNER = 'owner-1';
@@ -105,6 +106,70 @@ describe('install_skill / uninstall_skill only from the owner’s own turn', () 
     expect(check({ m1: input('ou_claimer', 'feishu:oc_claimed') })).toBe(
       SKILL_MUTATION_NON_OWNER_REJECTION,
     );
+  });
+
+  test('agrees with Workspace Memory writes on who the owner is', () => {
+    const chat = 'feishu:oc_claims';
+    for (const claim of [
+      'configured',
+      'trusted_direct',
+      'auto_feishu',
+      'explicit',
+    ]) {
+      groups[chat] = {
+        created_by: OWNER,
+        owner_im_id: 'ou_claimed',
+        owner_claim_source: claim,
+      };
+      for (const message of [
+        input('ou_claimed', chat),
+        input('ou_member', chat),
+        input(OWNER, WEB_JID),
+        input('someone-else', WEB_JID),
+      ]) {
+        const registry = new AgentBuilderTurnRegistry();
+        const scope = agentBuilderTurnScope(FOLDER, null);
+        registry.startBatch(scope, [
+          {
+            chatJid: WEB_JID,
+            messageId: 'm1',
+            runtimeTurnId: 'm1',
+            scheduledTaskId: null,
+          },
+        ]);
+        const load = () => message;
+        const lookup = {
+          getGroup: (jid: string) => groups[jid.split('#')[0]],
+          getFolderJids: () => [chat, WEB_JID],
+          getChannelType: (jid: string) =>
+            jid.startsWith('feishu:') ? 'feishu' : null,
+        };
+        const skillAllowed =
+          skillMutationTurnRejection({
+            registry,
+            sourceFolder: FOLDER,
+            turnScope: scope,
+            isolatedTaskRun: false,
+            ownerUserId: OWNER,
+            loadPersistedInput: load,
+            ...lookup,
+          }) === null;
+        const memoryWrites = isWorkspaceMemoryOwnerTurn({
+          ownerUserId: OWNER,
+          workspaceJids: lookup.getFolderJids(),
+          channelType: lookup.getChannelType,
+          registration: lookup.getGroup,
+          requireActiveOwnerTurn: (isOwnerInput) =>
+            registry.requireOwnerHumanTurn(scope, load, isOwnerInput),
+        });
+        expect([claim, message.sender, skillAllowed]).toEqual([
+          claim,
+          message.sender,
+          memoryWrites,
+        ]);
+      }
+    }
+    delete groups[chat];
   });
 
   test('scheduled, isolated-task and turn-less requests are refused', () => {

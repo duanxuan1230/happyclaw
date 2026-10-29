@@ -4539,7 +4539,7 @@ export interface UsageQueryFilters {
   source?: string;
 }
 
-function buildUsageWhere(filters: UsageQueryFilters): {
+export function buildUsageWhere(filters: UsageQueryFilters): {
   sql: string;
   params: unknown[];
 } {
@@ -8357,6 +8357,11 @@ export function updateTaskRunLog(
     updates.error,
     id,
   );
+}
+
+/** Drop one run log, e.g. a run that paused instead of ending. */
+export function deleteTaskRunLog(id: number): void {
+  prepareCached('DELETE FROM task_run_logs WHERE id = ?').run(id);
 }
 
 export function cleanupStaleRunningLogs(): number {
