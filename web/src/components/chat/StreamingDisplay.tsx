@@ -32,7 +32,10 @@ import {
 import { useThrottledValue } from '../../hooks/useThrottledValue';
 import { useAfterDelay, useTick } from '../../hooks/useTick';
 import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
-import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  isProgressStep,
+  normalizeProcessVisibility,
+} from '../../lib/process-visibility';
 import { DEEP_THINKING_STATUS, isCompactingStatus } from '../../lib/run-phase';
 import {
   answerStart,
@@ -587,10 +590,11 @@ export function StreamingDisplay({
   if (effectiveInteractionMode === 'proactive') {
     if (
       !isWaiting ||
-      processVisibility === 'hidden' ||
       quiet ||
       !streaming ||
-      streaming.interrupted
+      streaming.interrupted ||
+      // `hidden` shows a panel only for the progress the Agent sent.
+      (processVisibility === 'hidden' && !streaming.steps?.some(isProgressStep))
     ) {
       return null;
     }

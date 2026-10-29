@@ -14,9 +14,10 @@
 // proactive workspace never streams answer text, `hidden` shows only the run
 // lifecycle, `activity` strips tool output and reasoning, `full` adds the
 // reasoning and the narration written before a tool call, never the text that
-// ends a turn), what a reconnecting client is handed mid-run, what is stored for
-// a settled turn and who may read it, and that a client that was handed the
-// proactive reply mid-turn is told when its trace is stored.
+// ends a turn; every level shows the progress a proactive Agent sent), what a
+// reconnecting client is handed mid-run, what is stored for a settled turn and
+// who may read it, and that a client that was handed the proactive reply
+// mid-turn is told when its trace is stored.
 //
 // Usage:
 //   npm run build:all
@@ -49,6 +50,7 @@ const THINK2 =
 const NARRATION = `Let me run the demo command first (${NONCE}).`;
 const ANSWER = `DEMO_DONE_${NONCE}`;
 const PROACTIVE_TEXT = `DEMO_PROACTIVE_${NONCE}`;
+const PROGRESS_TEXT = `DEMO_PROGRESS_${NONCE}`;
 const SENTINEL = '<!--HAPPYCLAW_PROACTIVE_FINAL_DELIVERED-->';
 const CLOSING_THOUGHT =
   '**Nothing more**\n\nThe reply is sent; the turn can end.';
@@ -195,8 +197,22 @@ function startStub() {
         blocks = [{ type: 'text', text: 'ok' }]; // background / housekeeping call
       } else {
         state.agentRequests += 1;
-        const round = roundOf(body.messages || []);
-        if (round === 0 && state.script === 'facts') {
+        // A proactive demo turn first acknowledges with a progress statement,
+        // then goes on as the other scripts do, one round later.
+        const acknowledges =
+          state.mode === 'proactive' && state.script === 'demo';
+        const round = roundOf(body.messages || []) - (acknowledges ? 1 : 0);
+        if (round === -1) {
+          blocks = [
+            {
+              type: 'tool_use',
+              id: `toolu_progress_${n}`,
+              name: 'mcp__happyclaw__send_message',
+              input: { text: PROGRESS_TEXT, delivery_role: 'progress' },
+            },
+          ];
+          stop = 'tool_use';
+        } else if (round === 0 && state.script === 'facts') {
           blocks = [
             {
               type: 'tool_use',
@@ -486,10 +502,13 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
     ? waitUntil(
         () =>
           conn.events.some(
-            (e) => mine(e) && e.event?.eventType === 'tool_use_start',
+            (e) =>
+              mine(e) &&
+              e.event?.eventType === 'tool_use_start' &&
+              e.event?.toolName === 'Bash',
           ),
         90_000,
-        'tool_use_start on WS1',
+        'the Bash tool_use_start on WS1',
       )
     : waitUntil(
         () => conn.events.some((e) => mine(e) && e.type === 'run_started'),
@@ -567,14 +586,38 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
   if (expect.onlyLifecycleStatus) {
     const odd = streamEvents.filter(
       (e) =>
-        e.eventType !== 'status' ||
-        !['requesting', 'idle', 'interrupted'].includes(e.statusText),
+        !(e.eventType === 'commentary' && e.progress === true) &&
+        (e.eventType !== 'status' ||
+          !['requesting', 'idle', 'interrupted'].includes(e.statusText)),
     );
     check(
       label,
-      'only requesting/idle/interrupted status reaches the Web',
+      'only requesting/idle/interrupted status and the progress the Agent sent reach the Web',
       odd.length === 0,
       JSON.stringify(odd.slice(0, 2)),
+    );
+  }
+  if (interaction === 'proactive') {
+    const sent = streamEvents.filter(
+      (e) => e.eventType === 'commentary' && e.progress === true,
+    );
+    check(
+      label,
+      'the progress the Agent sent reaches the Web once, whole, at this level',
+      sent.length === 1 &&
+        sent[0].text === PROGRESS_TEXT &&
+        sent[0].inputTurnId === sent[0].turnId,
+      JSON.stringify(sent),
+    );
+    check(
+      label,
+      'and is no chat message: the Web turn keeps it in its process',
+      !live.some(
+        (e) =>
+          e.type === 'new_message' &&
+          e.message?.content?.includes(PROGRESS_TEXT),
+      ),
+      '',
     );
   }
   if (expect.thinkingText) {
@@ -589,7 +632,9 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       JSON.stringify(joined.slice(0, 80)),
     );
   }
-  const notes = streamEvents.filter((e) => e.eventType === 'commentary');
+  const notes = streamEvents.filter(
+    (e) => e.eventType === 'commentary' && !e.progress,
+  );
   if (expect.narration) {
     const joined = notes.map((e) => e.text).join('\n');
     check(
@@ -735,6 +780,14 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
     !!finalMsg,
     `agent messages: ${JSON.stringify(agentMessages.map((m) => m.content?.slice(0, 40)))}`,
   );
+  if (interaction === 'proactive') {
+    check(
+      label,
+      'the progress was stored as no message of its own',
+      !agentMessages.some((m) => m.content?.includes(PROGRESS_TEXT)),
+      JSON.stringify(agentMessages.map((m) => m.content?.slice(0, 40))),
+    );
+  }
   // Every frame of the turn names the input it answers, the reply's turn_id:
   // what lets the Web settle the live card in place while the run closes.
   const frames = live.filter((e) => e.type === 'stream_event');
@@ -822,7 +875,22 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       r.status === 200,
       `HTTP ${r.status} ${JSON.stringify(r.json)?.slice(0, 160)}`,
     );
-    if (r.status === 200) {
+    if (r.status === 200 && expect.trace === 'progress-only') {
+      const t = r.json;
+      check(
+        label,
+        'the stored turn holds the progress alone: no reasoning, timing or trace rows',
+        t.thinking === '' &&
+          t.thinking_duration_ms === null &&
+          Array.isArray(t.trace) &&
+          t.trace.length === 0 &&
+          t.steps.length === 1 &&
+          t.steps[0].kind === 'text' &&
+          t.steps[0].progress === true &&
+          t.steps[0].text === PROGRESS_TEXT,
+        JSON.stringify(t).slice(0, 400),
+      );
+    } else if (r.status === 200) {
       const t = r.json;
       if (expect.trace === 'with-thinking') {
         const i1 = t.thinking.indexOf('Planning the demo');
@@ -1181,10 +1249,13 @@ function checkStoredSteps(label, interaction, expect, t) {
       JSON.stringify(texts),
     );
   } else {
+    const texts = steps.filter((s) => s.kind === 'text');
     check(
       label,
-      'a proactive turn has no text step, its speech tool is no step and no tool output is kept',
-      !steps.some((s) => s.kind === 'text') &&
+      'a proactive turn keeps only the progress it sent as text, its speech tool is no step and no tool output is kept',
+      texts.length === 1 &&
+        texts[0].progress === true &&
+        texts[0].text === PROGRESS_TEXT &&
         !raw.includes(NARRATION) &&
         !raw.includes(PROACTIVE_TEXT) &&
         !raw.includes('send_message') &&
@@ -1278,7 +1349,7 @@ async function main() {
       visibility: 'hidden',
       expect: {
         toolVisible: false,
-        always: ['status'],
+        always: ['status', 'commentary'],
         never: [
           'text_delta',
           'thinking_delta',
@@ -1290,11 +1361,10 @@ async function main() {
           'tool_progress',
           'usage',
           'task_start',
-          'commentary',
         ],
         onlyLifecycleStatus: true,
         snapshot: 'none',
-        trace: 'none',
+        trace: 'progress-only',
       },
     },
     {
@@ -1303,8 +1373,13 @@ async function main() {
       visibility: 'activity',
       expect: {
         toolVisible: true,
-        always: ['tool_use_start', 'thinking_start', 'thinking_end'],
-        never: ['text_delta', 'thinking_delta', 'usage', 'commentary'],
+        always: [
+          'tool_use_start',
+          'thinking_start',
+          'thinking_end',
+          'commentary',
+        ],
+        never: ['text_delta', 'thinking_delta', 'usage'],
         stripped: true,
         thinkingTiming: true,
         snapshot: 'activity',
@@ -1388,10 +1463,29 @@ async function main() {
   const atHidden = await http_('GET', stepsUrl, { cookie });
   check(
     'steps-level',
-    'at hidden the turn is a 404 that carries no step',
-    atHidden.status === 404 &&
-      !JSON.stringify(atHidden.json).includes('thinking'),
-    `HTTP ${atHidden.status} ${JSON.stringify(atHidden.json)?.slice(0, 120)}`,
+    'at hidden the turn shows the progress the Agent sent, and no other step',
+    atHidden.status === 200 &&
+      atHidden.json.steps.length === 1 &&
+      atHidden.json.steps[0].text === PROGRESS_TEXT &&
+      atHidden.json.thinking === '' &&
+      atHidden.json.trace.length === 0 &&
+      !JSON.stringify(atHidden.json).includes('Planning the demo'),
+    `HTTP ${atHidden.status} ${JSON.stringify(atHidden.json)?.slice(0, 200)}`,
+  );
+  const listedAtHidden = await http_(
+    'GET',
+    `/api/groups/${enc(fullRun.jid)}/messages`,
+    { cookie },
+  );
+  check(
+    'steps-level',
+    'and its reply is still listed as carrying a trace',
+    (listedAtHidden.json.messages || []).some(
+      (m) => m.turn_id === fullRun.turnId && m.has_trace === true,
+    ),
+    JSON.stringify(
+      (listedAtHidden.json.messages || []).map((m) => [m.turn_id, m.has_trace]),
+    ),
   );
   check(
     'steps-level',
@@ -1510,16 +1604,20 @@ async function main() {
     `HTTP ${anonPatch.status}`,
   );
 
-  await proactiveReplyInTheBrowser(ctx);
+  await proactiveReplyInTheBrowser(ctx, 'full');
+  await proactiveReplyInTheBrowser(ctx, 'hidden');
 }
 
 /**
  * A proactive turn's reply in the real Web: once the utterance is in the list,
  * its process panel and spinner are gone, while the run (still asking the model
- * whether it is done) can be stopped. Screenshots go to HC_E2E_SHOTS if set.
+ * whether it is done) can be stopped. The progress the Agent sent shows while
+ * the turn works, in the panel and the status bar, folds away with the reply,
+ * and is there again under it, also after a reload. Screenshots go to
+ * HC_E2E_SHOTS if set.
  */
-async function proactiveReplyInTheBrowser(ctx) {
-  const label = 'proactive-reply-browser';
+async function proactiveReplyInTheBrowser(ctx, visibility) {
+  const label = `proactive-reply-browser-${visibility}`;
   console.log(`\n== ${label}`);
   stub.setMode('proactive');
   // Shorter than the wait before a quiet turn shows its spinner again (3s).
@@ -1531,7 +1629,7 @@ async function proactiveReplyInTheBrowser(ctx) {
       execution_mode: 'host',
       agent_profile_id: ctx.profileId,
       interaction_mode: 'proactive',
-      process_visibility: 'full',
+      process_visibility: visibility,
     },
   });
   if (created.status >= 300)
@@ -1563,35 +1661,44 @@ async function proactiveReplyInTheBrowser(ctx) {
     await editor.waitFor({ timeout: 30_000 });
     // Every frame from here on: is the reply there, the panel, the spinner,
     // the stop button.
-    await page.evaluate((reply) => {
-      window.__frames = [];
-      const tick = () => {
-        const text = document.body.innerText;
-        window.__frames.push({
-          at: performance.now(),
-          reply: text.includes(reply),
-          panel: !!document.querySelector('[data-hc-process-panel]'),
-          // The run status bar, wherever the composer mounts it.
-          spinner: !!document.querySelector('[data-hc-run-status-bar]'),
-          stop: !!document.querySelector('[aria-label="停止当前运行"]'),
-        });
-        if (window.__frames.length < 20_000) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    }, PROACTIVE_TEXT);
+    await page.evaluate(
+      ([reply, progress]) => {
+        window.__frames = [];
+        const tick = () => {
+          const text = document.body.innerText;
+          const panel = document.querySelector('[data-hc-process-panel]');
+          window.__frames.push({
+            at: performance.now(),
+            reply: text.includes(reply),
+            panel: !!panel,
+            panelProgress: !!panel?.textContent?.includes(progress),
+            barProgress:
+              document.querySelector('[data-hc-run-progress]')?.textContent ===
+              progress,
+            progress: text.includes(progress),
+            // The run status bar, wherever the composer mounts it.
+            spinner: !!document.querySelector('[data-hc-run-status-bar]'),
+            stop: !!document.querySelector('[aria-label="停止当前运行"]'),
+          });
+          if (window.__frames.length < 20_000) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      },
+      [PROACTIVE_TEXT, PROGRESS_TEXT],
+    );
     await editor.click();
     await page.keyboard.type('what are you doing');
     await page.keyboard.press('Enter');
     await page.locator('[data-hc-process-panel]').waitFor({ timeout: 90_000 });
     if (shots)
       await page.screenshot({
-        path: path.join(shots, 'proactive-1-working.png'),
+        path: path.join(shots, `proactive-${visibility}-1-working.png`),
       });
     await page.getByText(PROACTIVE_TEXT).waitFor({ timeout: 90_000 });
     if (shots) {
       await sleep(300);
       await page.screenshot({
-        path: path.join(shots, 'proactive-2-replied.png'),
+        path: path.join(shots, `proactive-${visibility}-2-replied.png`),
       });
     }
     await page
@@ -1599,7 +1706,9 @@ async function proactiveReplyInTheBrowser(ctx) {
       .waitFor({ state: 'detached', timeout: 60_000 });
     await sleep(500);
     if (shots)
-      await page.screenshot({ path: path.join(shots, 'proactive-3-done.png') });
+      await page.screenshot({
+        path: path.join(shots, `proactive-${visibility}-3-done.png`),
+      });
     const frames = await page.evaluate(() => window.__frames);
     const first = frames.findIndex((f) => f.reply);
     const after = first >= 0 ? frames.slice(first) : [];
@@ -1624,6 +1733,60 @@ async function proactiveReplyInTheBrowser(ctx) {
       closing.length > 0 && closing.at(-1).at - after[0].at > 1000,
       `${closing.length} frames, ${closing.at(-1)?.at - after[0]?.at}ms`,
     );
+    const before = frames.slice(0, Math.max(first, 0));
+    check(
+      label,
+      'while the turn worked, its progress was in the panel and the status bar',
+      before.some((f) => f.panelProgress) && before.some((f) => f.barProgress),
+      JSON.stringify(before.filter((f) => f.progress).slice(0, 1)),
+    );
+    check(
+      label,
+      'once the reply is in, the progress is folded away',
+      after.length > 0 && after.every((f) => !f.progress),
+      JSON.stringify(after.find((f) => f.progress)),
+    );
+    // Opened under the reply, here and after a reload: read from turn_traces.
+    const openProcess = async () => {
+      const row = page.getByRole('button', { name: /处理过程/ }).last();
+      await row.waitFor({ timeout: 30_000 });
+      await page.waitForFunction(
+        () =>
+          [...document.querySelectorAll('button')].some(
+            (b) => /处理过程/.test(b.textContent ?? '') && !b.disabled,
+          ),
+        undefined,
+        { timeout: 30_000 },
+      );
+      await row.click();
+      await page.getByText(PROGRESS_TEXT).first().waitFor({ timeout: 30_000 });
+    };
+    let reopened = false;
+    try {
+      await openProcess();
+      reopened = true;
+    } catch {
+      /* reported below */
+    }
+    check(
+      label,
+      'opening the process under the reply shows the progress',
+      reopened,
+    );
+    if (shots)
+      await page.screenshot({
+        path: path.join(shots, `proactive-${visibility}-4-opened.png`),
+      });
+    await page.reload();
+    await editor.waitFor({ timeout: 30_000 });
+    let restored = false;
+    try {
+      await openProcess();
+      restored = true;
+    } catch {
+      /* reported below */
+    }
+    check(label, 'and so it does after a reload', restored);
   } finally {
     stub.state.closingDelayMs = 0;
     await browser.close();

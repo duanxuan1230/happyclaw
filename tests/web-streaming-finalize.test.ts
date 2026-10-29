@@ -55,6 +55,8 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
 const { useChatStore, MAX_STEPS_CACHE_CHARS } =
   await import('../web/src/stores/chat');
 const { hasVisibleWork } = await import('../web/src/lib/process-visibility');
+const { memoryReceipts } =
+  await import('../web/src/features/workspace-memory/receipts');
 const initialState = useChatStore.getState();
 
 const JID = 'web:finalize';
@@ -1631,13 +1633,101 @@ describe("a proactive turn's reply", () => {
     expect(state.messages[JID][0].has_trace).toBe(true);
   });
 
-  it('holds nothing at the hidden level, where nothing is kept', () => {
+  it('holds nothing at the hidden level for a turn that sent no progress', () => {
     proactive('hidden');
     useChatStore.getState().handleRunStarted(JID, 'run-a');
     reason();
     speak('utterance-1');
     expect(useChatStore.getState().activeRuns[JID]?.answered).toBe('input-1');
     expect(useChatStore.getState().traceAwaited[JID]).toBeUndefined();
+  });
+
+  /** A progress statement the Agent sent, as the host announces it. */
+  function progress(text: string, turn = turn1) {
+    emit(
+      {
+        eventType: 'commentary',
+        agentScope: 'main',
+        text,
+        progress: true,
+        ...turn,
+      },
+      'run-a',
+    );
+  }
+  const liveTexts = () =>
+    (useChatStore.getState().streaming[JID]?.steps ?? [])
+      .filter((step) => step.kind === 'text')
+      .map((step) => `${step.progress ? 'progress' : 'note'}:${step.text}`);
+
+  it('shows the progress the Agent sent at every level, and folds it away with the reply', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      // The narration before a tool call is not progress: `full` only.
+      emit(
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: '我先列目录',
+          ...turn1,
+        },
+        'run-a',
+      );
+      tool('tool-1');
+      expect(liveTexts(), level).toEqual(
+        level === 'full'
+          ? ['progress:先看一下仓库', 'note:我先列目录']
+          : ['progress:先看一下仓库'],
+      );
+
+      speak('utterance-1');
+      const state = useChatStore.getState();
+      // The panel gives way to the reply; its row holds the place of the
+      // process the progress folds into, at every level.
+      expect(state.streaming[JID]?.steps ?? [], level).toEqual([]);
+      expect(state.traceAwaited[JID], level).toBe('utterance-1');
+      state.handleMessageTrace(JID, 'utterance-1');
+      expect(useChatStore.getState().messages[JID][0].has_trace, level).toBe(
+        true,
+      );
+    }
+  });
+
+  it('keeps the receipt of a memory write and no other tool output, at activity', () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    const forged = '{"result":"remembered","id":"wmi_x","title":"偷看"}';
+    const receipt = '{"result":"remembered","id":"wmi_1","title":"用户偏好"}';
+    const call = (id: string, toolName: string, result: string) => {
+      emit(
+        { eventType: 'tool_use_start', toolName, toolUseId: id, ...turn1 },
+        'run-a',
+      );
+      // The main Agent's tool_result names its call, not its tool.
+      emit(
+        {
+          eventType: 'tool_result',
+          toolUseId: id,
+          toolResult: result,
+          ...turn1,
+        },
+        'run-a',
+      );
+      emit({ eventType: 'tool_use_end', toolUseId: id, ...turn1 }, 'run-a');
+    };
+    call('bash-1', 'Bash', forged);
+    call('mem-1', 'mcp__happyclaw__workspace_memory_remember', receipt);
+    const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+    const step = (id: string) => steps.find((s) => s.toolUseId === id);
+    expect(step('bash-1')?.resultPreview).toBeUndefined();
+    expect(step('mem-1')?.resultPreview).toBe(receipt);
+    expect(memoryReceipts(steps)).toEqual([
+      { id: 'wmi_1', title: '用户偏好', proposed: false },
+    ]);
   });
 
   it('lets the hold go a moment after a run whose turn kept nothing', async () => {

@@ -3,7 +3,8 @@
 //   ?scenario=history | streaming | waiting | silent | settled | live | empty
 //            | facts (a settled card whose calls report what they did and
 //              printed) | facts-live (the same, with its sub-agent still running)
-//            | proactive (&visibility=hidden|activity|full)
+//            | proactive (&visibility=hidden|activity|full; &progress=1 for a
+//              turn that also sent the user a progress statement)
 //            | thinking-markdown
 //            | lazy-trace (a reply whose reasoning and trace the server kept;
 //              &mode=proactive&visibility=hidden|activity|full for a proactive one)
@@ -1028,13 +1029,29 @@ const proactiveSteps: StreamingStep[] = [
   },
 ];
 
+/** A progress statement the Agent sent the user mid-turn (`&progress=1`). */
+const progressStep: StreamingStep = {
+  id: 'note-progress',
+  kind: 'text',
+  at: ago(36),
+  endedAt: ago(36),
+  status: 'done',
+  commentary: true,
+  progress: true,
+  text: '收到，我先跑一遍侧栏的测试，再看滚动帧率，大概要一两分钟。',
+};
+const withProgress = (steps: StreamingStep[]): StreamingStep[] =>
+  params.get('progress') === '1'
+    ? [...steps.slice(0, 1), progressStep, ...steps.slice(1)]
+    : steps;
+
 const proactiveStreaming: StreamingState = {
   partialText: draft,
   thinkingText: thinkingA,
   thinkingTitle: '确认订阅范围',
   isThinking: false,
   thinkingDurationMs: 6_400,
-  steps: proactiveSteps,
+  steps: withProgress(proactiveSteps),
   activeTools: [
     {
       toolName: 'Bash',
@@ -1173,6 +1190,7 @@ const scenarioStreaming: StreamingState | undefined =
                     ...silentStreaming,
                     awaitingModel: false,
                     partialText: draft,
+                    steps: withProgress([]),
                   }
                 : proactiveStreaming
               : undefined;

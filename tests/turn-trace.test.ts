@@ -574,11 +574,60 @@ describe('TurnTraceTracker', () => {
     ]);
   });
 
-  test('a hidden proactive workspace records nothing', () => {
+  test('a hidden proactive workspace records nothing but the progress the Agent sent', () => {
     const { instance, stored } = tracker('proactive', { current: 'hidden' });
     playTurn(instance, 'in-1');
     expect(instance.persist({ chatJid: 'web:a', inputId: 'in-1' })).toBe(false);
     expect(stored).toHaveLength(0);
+
+    playTurn(instance, 'in-2');
+    instance.observe(
+      'in-2',
+      ev('commentary', { agentScope: 'main', text: '正在查', progress: true }),
+      1_050,
+    );
+    expect(instance.persist({ chatJid: 'web:a', inputId: 'in-2' })).toBe(true);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      thinking: '',
+      thinkingDurationMs: null,
+      traceJson: '[]',
+      stepsDropped: 0,
+    });
+    expect(JSON.parse(stored[0].stepsJson!)).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        commentary: true,
+        progress: true,
+        text: '正在查',
+      }),
+    ]);
+  });
+
+  test('activity keeps the progress the Agent sent, and not the narration', () => {
+    const { instance, stored } = tracker('proactive', { current: 'activity' });
+    playTurn(instance, 'in-1');
+    instance.observe(
+      'in-1',
+      ev('commentary', {
+        agentScope: 'main',
+        text: '先确认环境',
+        progress: true,
+      }),
+      1_050,
+    );
+    instance.observe(
+      'in-1',
+      ev('commentary', { agentScope: 'main', text: '我先读文件。' }),
+      1_060,
+    );
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    const texts = JSON.parse(stored[0].stepsJson!).filter(
+      (step: { kind: string }) => step.kind === 'text',
+    );
+    expect(texts).toEqual([
+      expect.objectContaining({ progress: true, text: '先确认环境' }),
+    ]);
   });
 
   test('activity keeps the structure but never the thinking text', () => {
@@ -860,9 +909,7 @@ describe('stored traces and the messages that carry them', () => {
     expect(real.persist({ chatJid: JID, inputId: 'real-1' })).toBe(true);
     const record = db.getTurnTrace(JID, 'real-1')!;
     expect(record.thinking).toBe('先看目录\n\n再总结');
-    expect(
-      presentTurnTrace(record, { visible: true, includeThinking: true }),
-    ).toMatchObject({
+    expect(presentTurnTrace(record, { includeThinking: true })).toMatchObject({
       turn_id: 'real-1',
       thinking: '先看目录\n\n再总结',
       thinking_duration_ms: record.thinking_duration_ms,
@@ -885,21 +932,23 @@ describe('stored traces and the messages that carry them', () => {
     const record = db.getTurnTrace(JID, 'no-steps')!;
     expect(record.steps_json).toBe('[]');
     expect(record.steps_dropped).toBe(0);
-    expect(
-      presentTurnTrace(record, { visible: true, includeThinking: true }),
-    ).toMatchObject({ steps: [], steps_dropped: 0 });
+    expect(presentTurnTrace(record, { includeThinking: true })).toMatchObject({
+      steps: [],
+      steps_dropped: 0,
+    });
   });
 
   test('presenting honours the exposure and survives a damaged trace', () => {
     storeTrace('present-1');
     const record = db.getTurnTrace(JID, 'present-1')!;
-    expect(
-      presentTurnTrace(record, { visible: true, includeThinking: false }),
-    ).toMatchObject({ thinking: '', thinking_duration_ms: 1_200 });
+    expect(presentTurnTrace(record, { includeThinking: false })).toMatchObject({
+      thinking: '',
+      thinking_duration_ms: 1_200,
+    });
     expect(
       presentTurnTrace(
         { ...record, trace_json: '{not json' },
-        { visible: true, includeThinking: true },
+        { includeThinking: true },
       ),
     ).toMatchObject({ thinking: '想了想', trace: [] });
   });
@@ -930,10 +979,7 @@ describe('stored traces and the messages that carry them', () => {
       .getMessagesPage(JID, undefined, 200)
       .filter((m) => wanted.has(m.id));
     expect(listed).toHaveLength(5);
-    const marked = markMessagesWithTrace(listed, {
-      visible: true,
-      includeThinking: true,
-    });
+    const marked = markMessagesWithTrace(listed, { includeThinking: true });
     expect(marked.filter((m) => m.has_trace).map((m) => m.id)).toEqual([
       't2-b',
     ]);
@@ -942,16 +988,111 @@ describe('stored traces and the messages that carry them', () => {
     // holds the true last message
     const olderPage = marked.filter((m) => m.id !== 't2-b');
     expect(
-      markMessagesWithTrace(olderPage, {
-        visible: true,
-        includeThinking: true,
-      }).some((m) => m.has_trace),
+      markMessagesWithTrace(olderPage, { includeThinking: true }).some(
+        (m) => m.has_trace,
+      ),
     ).toBe(false);
 
-    // nothing is flagged where traces are hidden
+    // where the process is hidden, a turn without progress is not flagged
     expect(
-      markMessagesWithTrace(listed, { visible: false, includeThinking: false }),
-    ).toBe(listed);
+      markMessagesWithTrace(listed, {
+        progressOnly: true,
+        includeThinking: false,
+        proactive: true,
+      }).some((m) => m.has_trace),
+    ).toBe(false);
+  });
+
+  test('at hidden, the turns that sent progress are flagged and read as that progress alone', () => {
+    // The tracker of a hidden workspace keeps the progress statements only;
+    // a refresh then finds them on the turn's last reply.
+    const real = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'hidden',
+    });
+    playTurn(real, 'hid-1');
+    real.observe(
+      'hid-1',
+      ev('commentary', {
+        agentScope: 'main',
+        text: '先看日志',
+        progress: true,
+      }),
+      1_050,
+    );
+    // narration is not progress, whatever the level it was sent at
+    real.observe(
+      'hid-1',
+      ev('commentary', { agentScope: 'main', text: '我先读文件。' }),
+      1_060,
+    );
+    storeMessage('hid-1-reply', 'hid-1');
+    storeMessage('hid-2-reply', 'hid-2');
+    storeTrace('hid-2');
+    expect(real.persist({ chatJid: JID, inputId: 'hid-1' })).toBe(true);
+
+    const hidden = {
+      progressOnly: true,
+      includeThinking: false,
+      proactive: true,
+    } as const;
+    const listed = db
+      .getMessagesPage(JID, undefined, 200)
+      .filter((m) => m.id === 'hid-1-reply' || m.id === 'hid-2-reply');
+    expect(
+      markMessagesWithTrace(listed, hidden)
+        .filter((m) => m.has_trace)
+        .map((m) => m.id),
+    ).toEqual(['hid-1-reply']);
+
+    const record = db.getTurnTrace(JID, 'hid-1')!;
+    expect(record.thinking).toBe('');
+    expect(record.trace_json).toBe('[]');
+    expect(presentTurnTrace(record, hidden)).toMatchObject({
+      thinking: '',
+      thinking_duration_ms: null,
+      trace: [],
+      steps: [{ kind: 'text', progress: true, text: '先看日志' }],
+    });
+    expect(presentTurnTrace(record, hidden)!.steps).toHaveLength(1);
+    // a turn without progress shows nothing at all at hidden
+    expect(presentTurnTrace(db.getTurnTrace(JID, 'hid-2')!, hidden)).toBeNull();
+  });
+
+  test('a trace stored at a higher level shows only its progress once hidden', () => {
+    const real = new TurnTraceTracker({
+      mode: 'proactive',
+      getVisibility: () => 'full',
+    });
+    playTurn(real, 'lvl-1');
+    real.observe(
+      'lvl-1',
+      ev('commentary', {
+        agentScope: 'main',
+        text: '已经找到原因',
+        progress: true,
+      }),
+      1_050,
+    );
+    storeMessage('lvl-1-reply', 'lvl-1');
+    expect(real.persist({ chatJid: JID, inputId: 'lvl-1' })).toBe(true);
+    const record = db.getTurnTrace(JID, 'lvl-1')!;
+    const kinds = (exposure: Parameters<typeof presentTurnTrace>[1]) =>
+      presentTurnTrace(record, exposure)!.steps.map((step) =>
+        step.kind === 'text' ? `text:${step.text}` : step.kind,
+      );
+    expect(kinds({ includeThinking: true, proactive: true })).toContain(
+      'text:已经找到原因',
+    );
+    expect(kinds({ includeThinking: false, proactive: true })).toEqual([
+      'thinking',
+      'tool',
+      'thinking',
+      'text:已经找到原因',
+    ]);
+    expect(
+      kinds({ progressOnly: true, includeThinking: false, proactive: true }),
+    ).toEqual(['text:已经找到原因']);
   });
 
   test('deleting the last message of a turn takes its trace along', () => {
@@ -999,21 +1140,20 @@ describe('stored traces and the messages that carry them', () => {
     createWorkspace('expo-activity', 'proactive', 'activity');
     createWorkspace('expo-full', 'proactive', 'full');
     expect(resolveTurnTraceExposure('expo-assistant')).toEqual({
-      visible: true,
       includeThinking: true,
     });
     expect(resolveTurnTraceExposure('expo-hidden')).toEqual({
-      visible: false,
+      progressOnly: true,
       includeThinking: false,
       proactive: true,
     });
     expect(resolveTurnTraceExposure('expo-activity')).toEqual({
-      visible: true,
+      progressOnly: false,
       includeThinking: false,
       proactive: true,
     });
     expect(resolveTurnTraceExposure('expo-full')).toEqual({
-      visible: true,
+      progressOnly: false,
       includeThinking: true,
       proactive: true,
     });
@@ -1021,11 +1161,10 @@ describe('stored traces and the messages that carry them', () => {
     expect(
       resolveTurnTraceExposure('expo-hidden', { agentKind: 'spawn' }),
     ).toEqual({
-      visible: true,
       includeThinking: true,
     });
     // a change takes effect at once, whatever the turn was recorded under
     db.setWorkspaceProcessVisibility('expo-hidden', 'full');
-    expect(resolveTurnTraceExposure('expo-hidden').visible).toBe(true);
+    expect(resolveTurnTraceExposure('expo-hidden').progressOnly).toBe(false);
   });
 });

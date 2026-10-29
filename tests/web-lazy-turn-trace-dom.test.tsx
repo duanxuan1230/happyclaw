@@ -588,10 +588,14 @@ describe('in the timeline layout', () => {
     expect(rowButton('处理过程')).toBeUndefined();
   });
 
-  test('has none at the hidden level', () => {
+  test('at the hidden level, is there only for a reply the server flags', () => {
+    // The server flags a reply there only when its turn sent progress, which
+    // is all that level keeps.
     useChatStore.setState({ groups: { [JID]: proactive('hidden') } });
-    mount(reply({ source_kind: 'sdk_send_message' }));
+    mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
     expect(container?.textContent).not.toContain('处理过程');
+    mount(reply({ source_kind: 'sdk_send_message' }));
+    expect(rowButton('处理过程')).toBeTruthy();
   });
 
   test("is the classic layout's two rows when that is the reader's choice", () => {

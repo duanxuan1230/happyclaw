@@ -13,6 +13,7 @@
 
 import {
   getLastAgentMessageIdForTurn,
+  getTurnTrace,
   getWorkspaceInteractionMode,
   getWorkspaceProcessVisibility,
   listTurnIdsWithTrace,
@@ -32,6 +33,7 @@ import {
 } from './stream-trace.js';
 import {
   capStepsThinkingBytes,
+  isProgressStep,
   parseStoredSteps,
   TurnStepRecorder,
   viewSteps,
@@ -135,17 +137,26 @@ export class TurnTraceAccumulator {
     if (!this.stepsFailed) this.steps.absorb(other.steps, now);
   }
 
-  /** What to store, or null when nothing worth keeping was collected. */
+  /**
+   * What to store, or null when nothing worth keeping was collected.
+   * `progressOnly` keeps the progress statements the Agent sent and nothing
+   * else (a proactive Workspace at `hidden`).
+   */
   toContent(options: {
     includeThinking: boolean;
+    progressOnly?: boolean;
     now?: number;
   }): TurnTraceContent | null {
-    const thinking = options.includeThinking
-      ? capTailByBytes(this.thinking.text, MAX_TURN_TRACE_THINKING_BYTES)
-      : '';
-    const thinkingDurationMs = this.clock.sawThinking
-      ? Math.round(this.clock.totalMs(options.now))
-      : null;
+    const progressOnly = !!options.progressOnly;
+    const thinking =
+      options.includeThinking && !progressOnly
+        ? capTailByBytes(this.thinking.text, MAX_TURN_TRACE_THINKING_BYTES)
+        : '';
+    const thinkingDurationMs =
+      this.clock.sawThinking && !progressOnly
+        ? Math.round(this.clock.totalMs(options.now))
+        : null;
+    const trace = progressOnly ? [] : [...this.trace];
     const settled = this.stepsFailed
       ? { steps: [], dropped: 0 }
       : this.steps.settled(options.now ?? Date.now());
@@ -153,12 +164,13 @@ export class TurnTraceAccumulator {
       viewSteps(settled.steps, {
         includeThinking: options.includeThinking,
         proactive: this.proactive,
+        progressOnly,
       }),
       MAX_TURN_TRACE_THINKING_BYTES,
     );
     if (
       !thinking &&
-      this.trace.length === 0 &&
+      trace.length === 0 &&
       thinkingDurationMs === null &&
       steps.length === 0
     )
@@ -166,9 +178,9 @@ export class TurnTraceAccumulator {
     return {
       thinking,
       thinkingDurationMs,
-      trace: [...this.trace],
+      trace,
       steps,
-      stepsDropped: steps.length > 0 ? settled.dropped : 0,
+      stepsDropped: steps.length > 0 && !progressOnly ? settled.dropped : 0,
     };
   }
 }
@@ -189,11 +201,11 @@ export interface TurnTraceTrackerOptions {
  * Per-run bookkeeping: gathers every turn's trace as stream events arrive and
  * writes it when the turn settles.
  *
- * Assistant turns are always recorded. A proactive turn is recorded only while
- * its Workspace shows some process (`activity` or `full`), and then only from
+ * Assistant turns are always recorded. A proactive turn is recorded only from
  * the events the Web may see at the most permissive level: tool results, the
  * model's answer text and the like never reach the trace, whatever the level
- * is later changed to. `activity` keeps no thinking text.
+ * is later changed to. `activity` keeps no thinking text, and `hidden` only
+ * the progress statements the Agent sent the user.
  */
 export class TurnTraceTracker {
   private readonly turns = new Map<string, TurnTraceAccumulator>();
@@ -203,15 +215,14 @@ export class TurnTraceTracker {
     this.store = options.store ?? upsertTurnTrace;
   }
 
-  private recording(): boolean {
-    return (
-      this.options.mode === 'assistant' ||
-      this.options.getVisibility() !== 'hidden'
-    );
+  private visibility(): ProcessVisibility {
+    return this.options.mode === 'assistant'
+      ? 'full'
+      : this.options.getVisibility();
   }
 
   observe(inputId: string, event: StreamEvent, now: number = Date.now()): void {
-    if (!this.recording()) return;
+    if (this.visibility() === 'hidden' && !isProgressEvent(event)) return;
     const visible =
       this.options.mode === 'assistant'
         ? event
@@ -264,16 +275,10 @@ export class TurnTraceTracker {
         turn = this.turns.get(turnId);
       }
       if (!turn) return false;
-      const visibility =
-        this.options.mode === 'assistant'
-          ? 'full'
-          : this.options.getVisibility();
-      if (visibility === 'hidden') {
-        this.turns.delete(turnId);
-        return false;
-      }
+      const visibility = this.visibility();
       const content = turn.toContent({
         includeThinking: visibility === 'full',
+        progressOnly: visibility === 'hidden',
         now: input.now,
       });
       if (!input.keep) this.turns.delete(turnId);
@@ -302,8 +307,11 @@ export class TurnTraceTracker {
 
 /** What a reader may see of the traces in one Workspace. */
 export interface TurnTraceExposure {
-  /** False hides every trace (a proactive Workspace set to `hidden`). */
-  visible: boolean;
+  /**
+   * Only the progress statements the Agent sent the user, and only of a turn
+   * that has some (a proactive Workspace set to `hidden`).
+   */
+  progressOnly?: boolean;
   /**
    * False blanks the thinking text, and the title and text of thinking steps
    * (`activity`).
@@ -329,11 +337,11 @@ export function resolveTurnTraceExposure(
     options.agentKind === 'spawn' ||
     getWorkspaceInteractionMode(folder) === 'assistant'
   ) {
-    return { visible: true, includeThinking: true };
+    return { includeThinking: true };
   }
   const visibility = getWorkspaceProcessVisibility(folder);
   return {
-    visible: visibility !== 'hidden',
+    progressOnly: visibility === 'hidden',
     includeThinking: visibility === 'full',
     proactive: true,
   };
@@ -379,10 +387,31 @@ function withoutResultDetails(rows: TraceEventRecord[]): TraceEventRecord[] {
   });
 }
 
+/**
+ * The stored trace as `exposure` lets it be read, or null when it shows
+ * nothing (a turn without progress statements, read at `hidden`).
+ */
 export function presentTurnTrace(
   record: TurnTraceRecord,
   exposure: TurnTraceExposure,
-): PresentedTurnTrace {
+): PresentedTurnTrace | null {
+  if (exposure.progressOnly) {
+    const steps = viewSteps(parseStoredSteps(record.steps_json), {
+      includeThinking: false,
+      proactive: true,
+      progressOnly: true,
+    });
+    if (steps.length === 0) return null;
+    return {
+      turn_id: record.turn_id,
+      thinking: '',
+      thinking_duration_ms: null,
+      trace: [],
+      steps,
+      steps_dropped: 0,
+      created_at: record.created_at,
+    };
+  }
   let trace: TraceEventRecord[] = [];
   try {
     const parsed: unknown = JSON.parse(record.trace_json);
@@ -409,6 +438,23 @@ export function presentTurnTrace(
   };
 }
 
+/** A progress statement the Agent sent the user, as the trace records it. */
+function isProgressEvent(event: StreamEvent): boolean {
+  return event.eventType === 'commentary' && !!event.progress;
+}
+
+/**
+ * The stored trace of a turn holds a progress statement. Most hold none, and
+ * a cheap look at the text tells so without parsing their steps.
+ */
+function storesProgress(chatJid: string, turnId: string): boolean {
+  const record = getTurnTrace(chatJid, turnId);
+  return (
+    !!record?.steps_json.includes('"progress":true') &&
+    parseStoredSteps(record.steps_json).some(isProgressStep)
+  );
+}
+
 type ListedMessage = NewMessage & { is_from_me?: boolean | number };
 
 /** Agent-authored, as opposed to a user message or a system notice. */
@@ -428,7 +474,7 @@ export function markMessagesWithTrace<T extends ListedMessage>(
   messages: T[],
   exposure: TurnTraceExposure,
 ): T[] {
-  if (!exposure.visible || messages.length === 0) return messages;
+  if (messages.length === 0) return messages;
   const turnsByChat = new Map<string, Set<string>>();
   for (const message of messages) {
     if (!message.turn_id || !isAgentMessage(message)) continue;
@@ -442,6 +488,7 @@ export function markMessagesWithTrace<T extends ListedMessage>(
   const flagged = new Set<string>();
   for (const [chatJid, turns] of turnsByChat) {
     for (const turnId of listTurnIdsWithTrace(chatJid, [...turns])) {
+      if (exposure.progressOnly && !storesProgress(chatJid, turnId)) continue;
       const lastId = getLastAgentMessageIdForTurn(chatJid, turnId);
       if (lastId) flagged.add(`${chatJid}\0${lastId}`);
     }

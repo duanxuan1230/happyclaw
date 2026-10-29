@@ -190,8 +190,30 @@ export const MEMORY_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'mcp__happyclaw__workspace_memory_update',
 ]);
 
-const MEMORY_RECEIPT_RESULT_RE = /"result":"(remembered|updated|proposed)"/;
-const MEMORY_RECEIPT_ID_RE = /"id":"([^"\\]+)"/;
+/**
+ * The ids of memory write calls seen starting, newest last. A tool's result
+ * does not name its tool, only its call, so this is how a result is known to
+ * be a memory receipt: what any other tool returned, whatever it looks like,
+ * is withheld. Call ids are unique, so one bounded set serves every run.
+ */
+const memoryWriteCalls = new Set<string>();
+const MAX_MEMORY_WRITE_CALLS = 256;
+
+function noteMemoryWriteCall(event: StreamEvent): void {
+  if (
+    event.eventType !== 'tool_use_start' ||
+    !event.toolUseId ||
+    !isMemoryWriteTool(event.toolName) ||
+    memoryWriteCalls.has(event.toolUseId)
+  ) {
+    return;
+  }
+  if (memoryWriteCalls.size >= MAX_MEMORY_WRITE_CALLS) {
+    const oldest = memoryWriteCalls.values().next().value;
+    if (oldest !== undefined) memoryWriteCalls.delete(oldest);
+  }
+  memoryWriteCalls.add(event.toolUseId);
+}
 
 function isLifecycleStatus(statusText: string | null | undefined): boolean {
   return statusText != null && LIFECYCLE_STATUS_TEXTS.has(statusText);
@@ -210,12 +232,7 @@ export function isMemoryWriteTool(toolName: string | undefined): boolean {
 function keepsMemoryWriteReceipt(event: StreamEvent): boolean {
   if (event.eventType !== 'tool_result' || event.toolIsError) return false;
   if (event.toolName) return isMemoryWriteTool(event.toolName);
-  const text = event.toolResult?.trimStart() ?? '';
-  return (
-    text.startsWith('{') &&
-    MEMORY_RECEIPT_RESULT_RE.test(text) &&
-    MEMORY_RECEIPT_ID_RE.test(text)
-  );
+  return !!event.toolUseId && memoryWriteCalls.has(event.toolUseId);
 }
 
 /**
@@ -281,14 +298,16 @@ function withoutModelText(event: StreamEvent): StreamEvent {
  *   `full` also streams the main Agent's and sub-Agents' reasoning summary and
  *   the narration the model wrote before a tool call (`commentary`, which the
  *   host composes from the Runner's text_delta; see process-commentary.ts).
+ *   Every level shows a progress statement the Agent sent the user in a Web
+ *   turn (a `commentary` marked `progress`, see projectProgressForWeb).
  * - Never, at any level: text_delta itself (the model's own answer text, which
  *   reaches the user only through send_message), usage, memory_recall,
  *   prompt_suggestion, raw_sdk_event, notification and unknown event types.
  *
  * Status events in this stream are written by the SDK, the Runner or the host,
- * never by the model (model-authored progress text is announced by
- * TurnOutputCoordinator, which does not pass through here), so beyond the
- * lifecycle ones they are plain phase information and follow `activity`.
+ * never by the model (a proactive turn's progress statement is a `commentary`),
+ * so beyond the lifecycle ones they are plain phase information and follow
+ * `activity`.
  *
  * `context_audit` passes through at every level: broadcastStreamEvent records
  * it for the Agent's context explainability and never forwards it to a
@@ -300,12 +319,15 @@ export function projectSdkStreamEventForWeb(
   event: StreamEvent,
 ): StreamEvent | null {
   if (mode === 'assistant') return event;
+  noteMemoryWriteCall(event);
   const type = event.eventType;
   if (type === 'context_audit') return event;
   if (type === 'status') {
     if (isLifecycleStatus(event.statusText)) return event;
     return visibility === 'hidden' ? null : event;
   }
+  // What the Agent told the user mid-turn (see projectProgressForWeb).
+  if (type === 'commentary' && event.progress) return event;
   if (visibility === 'hidden') return null;
   // The reasoning summary and the narration before a tool call (written by the
   // host, see process-commentary.ts) are the model's words about its work.
@@ -316,57 +338,53 @@ export function projectSdkStreamEventForWeb(
   return withoutModelText(event);
 }
 
-/**
- * The status line announcing a progress statement the Agent wrote
- * (`send_message` with `delivery_role=progress`), or null when the Workspace
- * keeps its process private.
- *
- * Unlike the status events the SDK, the Runner and the host write, this one
- * carries the model's own sentence. It therefore goes through the same gate as
- * every other event instead of relying on the output router never staging
- * progress for a proactive Workspace, which would silently stop being true the
- * day that router changes. And because `activity` promises the structure of
- * the work without any text the model produced, a proactive Workspace shows the
- * sentence only at `full`, the level that shows the model's reasoning too.
- */
-export function projectProgressStatusForWeb(
-  mode: InteractionMode,
-  visibility: ProcessVisibility,
-  text: string,
-  turn: { turnId?: string; sessionId?: string },
-): StreamEvent | null {
-  if (mode === 'proactive' && visibility !== 'full') return null;
-  return projectSdkStreamEventForWeb(mode, visibility, {
-    eventType: 'status',
-    agentScope: 'system',
-    statusText: text.slice(0, 160),
-    summary: text.slice(0, 500),
-    isSynthetic: true,
-    displayLevel: 'primary',
-    turnId: turn.turnId,
-    sessionId: turn.sessionId,
-  });
-}
+/** Most of a progress statement kept on its step, as for narration. */
+const MAX_PROGRESS_CHARS = 4000;
 
 /**
- * The commentary step announcing a progress statement the Agent wrote
- * (`send_message` with `delivery_role=progress`), or null when the Workspace
- * withholds commentary (`hidden` or `activity` in a proactive Workspace).
+ * What a progress statement the Agent wrote becomes once its own turn takes
+ * it in (`send_message` with `delivery_role=progress`, staged by the output
+ * router): `step` is the commentary the turn's trace records (the tracker
+ * applies the Workspace's limits), `web` the events the Web is sent now.
+ *
+ * An Assistant turn shows the statement as a commentary step and as the run's
+ * status line. A proactive turn shows it as a commentary step marked
+ * `progress` at every process visibility: it is the Agent speaking to the
+ * user, not detail of the process, and the Web folds it into the process once
+ * the final lands. It still passes the gate every other event passes.
  */
-export function projectProgressCommentaryForWeb(
+export function projectProgressForWeb(
   mode: InteractionMode,
   visibility: ProcessVisibility,
   text: string,
-  turn: { turnId?: string; inputTurnId?: string; sessionId?: string },
-): StreamEvent | null {
-  return projectSdkStreamEventForWeb(mode, visibility, {
+  turn: { inputTurnId: string; sessionId?: string },
+): { step: StreamEvent; web: StreamEvent[] } {
+  const step: StreamEvent = {
     eventType: 'commentary',
     agentScope: 'main',
-    text: text.slice(0, 4000),
-    turnId: turn.turnId,
+    text: text.slice(0, MAX_PROGRESS_CHARS),
+    turnId: turn.inputTurnId,
     inputTurnId: turn.inputTurnId,
     sessionId: turn.sessionId,
-  });
+    ...(mode === 'proactive' ? { progress: true } : {}),
+  };
+  const web: StreamEvent[] = [];
+  const shown = projectSdkStreamEventForWeb(mode, visibility, step);
+  if (shown) web.push(shown);
+  if (mode === 'assistant') {
+    web.push({
+      eventType: 'status',
+      agentScope: 'system',
+      statusText: text.slice(0, 160),
+      summary: text.slice(0, 500),
+      isSynthetic: true,
+      displayLevel: 'primary',
+      turnId: turn.inputTurnId,
+      inputTurnId: turn.inputTurnId,
+      sessionId: turn.sessionId,
+    });
+  }
+  return { step, web };
 }
 
 /**

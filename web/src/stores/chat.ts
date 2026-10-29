@@ -37,9 +37,11 @@ import {
   normalizeInteractionMode,
 } from '../lib/interaction-mode';
 import {
+  MEMORY_WRITE_TOOLS,
   SPEECH_TOOL_NAME,
   filterProactiveStreamEvent,
   hasVisibleWork,
+  isProgressStep,
   isSpeechToolEvent,
   normalizeProcessVisibility,
   scrubTaskStates,
@@ -1602,14 +1604,16 @@ function proactiveReplyLanded(
 
 /**
  * `traceAwaited` with `reply` as the proactive reply of `runtimeJid` whose
- * trace is coming: only where the process is kept (not at `hidden`).
+ * trace is coming: where the process is kept, and at `hidden` only for a turn
+ * that sent progress statements (all that level keeps).
  */
 function withAwaitedTrace(
   s: ChatState,
   runtimeJid: string,
   reply: Message,
 ): Record<string, string> {
-  return processViewOfRuntime(s, runtimeJid) === 'proactive:hidden'
+  return processViewOfRuntime(s, runtimeJid) === 'proactive:hidden' &&
+    !liveStreamOf(s, runtimeJid)?.steps?.some(isProgressStep)
     ? s.traceAwaited
     : { ...s.traceAwaited, [runtimeJid]: reply.id };
 }
@@ -1713,6 +1717,47 @@ function withoutProcessCaches(
     traceCache: without(s.traceCache),
     stepsCache: without(s.stepsCache),
     turnTraceStatus: without(s.turnTraceStatus),
+    ...withoutStaleTraceFlags(
+      s,
+      jids.filter((jid) => processView(s.groups[jid]) === 'proactive:hidden'),
+    ),
+  };
+}
+
+/**
+ * The replies of workspaces now `hidden`, without the `has_trace` read at
+ * another level. At `hidden` only a turn that sent progress has a trace to
+ * show, and which ones did is the server's to say on the next load.
+ */
+function withoutStaleTraceFlags(
+  s: ChatState,
+  jids: readonly string[],
+): Partial<ChatState> {
+  if (jids.length === 0) return {};
+  const prefixes = jids.map((jid) => `${jid}#agent:`);
+  const unflag = (
+    lists: Record<string, Message[]>,
+    owned: (key: string, list: Message[]) => boolean,
+  ): Record<string, Message[]> => {
+    let next = lists;
+    for (const [key, list] of Object.entries(lists)) {
+      if (!list.some((message) => message.has_trace) || !owned(key, list)) {
+        continue;
+      }
+      if (next === lists) next = { ...lists };
+      next[key] = list.map((message) =>
+        message.has_trace ? { ...message, has_trace: false } : message,
+      );
+    }
+    return next;
+  };
+  return {
+    messages: unflag(s.messages, (jid) => jids.includes(jid)),
+    agentMessages: unflag(s.agentMessages, (_, list) =>
+      list.some((message) =>
+        prefixes.some((prefix) => message.chat_jid.startsWith(prefix)),
+      ),
+    ),
   };
 }
 
@@ -1803,11 +1848,6 @@ function withReplySteps(
   );
 }
 
-const MEMORY_WRITE_TOOL_NAMES = new Set([
-  'mcp__happyclaw__workspace_memory_remember',
-  'mcp__happyclaw__workspace_memory_update',
-]);
-
 /**
  * A step without what its tool or sub-agent returned: the preview of the
  * output and the numbers read from it. A proactive workspace never shows them,
@@ -1818,7 +1858,7 @@ export function withoutToolResults(step: StreamingStep): StreamingStep {
     step.kind === 'tool' &&
     step.status === 'done' &&
     !!step.toolName &&
-    MEMORY_WRITE_TOOL_NAMES.has(step.toolName);
+    MEMORY_WRITE_TOOLS.has(step.toolName);
   if (
     (keepMemoryReceipt || step.resultPreview === undefined) &&
     step.resultFacts === undefined
@@ -2012,20 +2052,53 @@ interface PendingDelta {
 const pendingDeltas = new Map<string, PendingDelta>();
 
 /**
- * The calls of a proactive turn's speech tool, per runtime: its start names
- * the tool, its later events carry only the id of the call. Kept for the
- * run that made them, so a new run starts empty.
+ * Tool calls of one kind, per runtime: a call's start names its tool, its
+ * later events carry only the id of the call. Kept for the run that made them,
+ * so a new run starts empty.
  */
-const speechToolCalls = new Map<
-  string,
-  { runId: string; calls: Set<string> }
->();
-const MAX_SPEECH_CALLS = 64;
+const NO_CALLS: ReadonlySet<string> = new Set();
 
-function speechCallsOf(runtimeJid: string, runId?: string): Set<string> {
-  const entry = speechToolCalls.get(runtimeJid);
-  return entry && entry.runId === (runId ?? '') ? entry.calls : new Set();
+class RunToolCalls {
+  private readonly byRuntime = new Map<
+    string,
+    { runId: string; calls: Set<string> }
+  >();
+
+  constructor(private readonly max: number) {}
+
+  of(runtimeJid: string, runId?: string): ReadonlySet<string> {
+    const entry = this.byRuntime.get(runtimeJid);
+    return entry && entry.runId === (runId ?? '') ? entry.calls : NO_CALLS;
+  }
+
+  remember(
+    runtimeJid: string,
+    runId: string | undefined,
+    ids: Iterable<string>,
+  ): void {
+    const key = runId ?? '';
+    let entry = this.byRuntime.get(runtimeJid);
+    if (!entry || entry.runId !== key) {
+      entry = { runId: key, calls: new Set() };
+      this.byRuntime.set(runtimeJid, entry);
+    }
+    for (const id of ids) {
+      if (entry.calls.size >= this.max) {
+        const oldest = entry.calls.values().next().value;
+        if (oldest !== undefined) entry.calls.delete(oldest);
+      }
+      entry.calls.add(id);
+    }
+  }
 }
+
+/** The calls of a proactive turn's speech tool. */
+const speechToolCalls = new RunToolCalls(64);
+/**
+ * The calls of a proactive turn's memory write tools: only their results are
+ * kept, as the receipts the process links to.
+ */
+const memoryWriteCalls = new RunToolCalls(64);
 
 /** The speech tool's calls in a reconnect snapshot: its rows and running calls. */
 function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
@@ -2034,26 +2107,6 @@ function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
     if (tool.toolName === SPEECH_TOOL_NAME) calls.add(tool.toolUseId);
   }
   return calls;
-}
-
-function rememberSpeechCalls(
-  runtimeJid: string,
-  runId: string | undefined,
-  ids: Iterable<string>,
-): void {
-  const key = runId ?? '';
-  let entry = speechToolCalls.get(runtimeJid);
-  if (!entry || entry.runId !== key) {
-    entry = { runId: key, calls: new Set() };
-    speechToolCalls.set(runtimeJid, entry);
-  }
-  for (const id of ids) {
-    if (entry.calls.size >= MAX_SPEECH_CALLS) {
-      const oldest = entry.calls.values().next().value;
-      if (oldest !== undefined) entry.calls.delete(oldest);
-    }
-    entry.calls.add(id);
-  }
 }
 
 // Match the runner's retry banner (including unknown SDK counters), not user
@@ -2873,7 +2926,10 @@ function applyStreamEvent(
       // step of the process, never the reply: no partial text is involved.
       if (isSubagentEvent(event) || !event.text) break;
       endThinkingBurst(prev, next, at);
-      setSteps(next, addCommentaryStep(stepsOf(next), at, event.text));
+      setSteps(
+        next,
+        addCommentaryStep(stepsOf(next), at, event.text, !!event.progress),
+      );
       break;
     }
     case 'thinking_delta': {
@@ -4661,18 +4717,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // never its model text: whatever else reaches the Web is dropped here,
     // even if the host sent it.
     if (isProactiveRuntime(get(), runtimeJid)) {
+      if (
+        event.eventType === 'tool_use_start' &&
+        event.toolUseId &&
+        MEMORY_WRITE_TOOLS.has(event.toolName ?? '')
+      ) {
+        memoryWriteCalls.remember(runtimeJid, runId, [event.toolUseId]);
+      }
       const allowed = filterProactiveStreamEvent(
         normalizeProcessVisibility(get().groups[chatJid]?.process_visibility),
         event,
+        memoryWriteCalls.of(runtimeJid, runId),
       );
       if (!allowed) return;
       event = allowed;
       // Calling the speech tool is the reply itself, not work to watch: it is
       // neither a step nor the latest tool, and does not count among the tools
       // used. Its start still ends the reasoning before it.
-      if (isSpeechToolEvent(event, speechCallsOf(runtimeJid, runId))) {
+      if (isSpeechToolEvent(event, speechToolCalls.of(runtimeJid, runId))) {
         if (event.eventType === 'tool_use_start' && event.toolUseId) {
-          rememberSpeechCalls(runtimeJid, runId, [event.toolUseId]);
+          speechToolCalls.remember(runtimeJid, runId, [event.toolUseId]);
           // Keep arrival order: reasoning still waiting for its frame came first.
           flushPendingDeltaForRuntime(runtimeJid, set);
           set((s) => {
@@ -6372,7 +6436,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const speech = isProactiveRuntime(get(), runtimeJid)
       ? speechCallsOfSnapshot(snapshot)
       : null;
-    if (speech) rememberSpeechCalls(runtimeJid, runId, speech);
+    if (speech) {
+      speechToolCalls.remember(runtimeJid, runId, speech);
+      // A memory write still running returns its receipt after the snapshot.
+      memoryWriteCalls.remember(
+        runtimeJid,
+        runId,
+        (snapshot.activeTools ?? [])
+          .filter((tool) => MEMORY_WRITE_TOOLS.has(tool.toolName))
+          .map((tool) => tool.toolUseId),
+      );
+    }
     // A proactive workspace's snapshot is cut to the level its owner chose,
     // whatever the host put in it.
     const levelOf = (s: ChatState): ProcessVisibility | null =>

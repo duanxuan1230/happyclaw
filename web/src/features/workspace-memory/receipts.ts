@@ -1,9 +1,5 @@
+import { MEMORY_WRITE_TOOLS } from '@/lib/process-visibility';
 import type { StreamingStep } from '@/lib/stream-steps';
-
-const MEMORY_WRITE_TOOLS: ReadonlySet<string> = new Set([
-  'mcp__happyclaw__workspace_memory_remember',
-  'mcp__happyclaw__workspace_memory_update',
-]);
 
 export interface MemoryReceipt {
   id: string;

@@ -150,8 +150,12 @@ const TRACE = [
   },
 ];
 
-/** The way MessageList feeds a bubble: from the caches of the store. */
-function Row({ message }: { message: Message }) {
+/** The way MessageList feeds a bubble: from the messages and caches of the store. */
+function Row({ message: given }: { message: Message }) {
+  const message =
+    useChatStore((s) =>
+      s.messages[given.chat_jid]?.find((m) => m.id === given.id),
+    ) ?? given;
   const thinking = useChatStore((s) => s.thinkingCache[message.id]);
   const duration = useChatStore((s) => s.thinkingDurationCache[message.id]);
   const trace = useChatStore((s) => s.traceCache[message.id]);
@@ -1107,6 +1111,84 @@ describe('a reply on a phone', () => {
   });
 });
 
+describe('the progress a proactive turn sent, folded into its reply', () => {
+  const PROGRESS_STEPS: StreamingStep[] = [
+    step({
+      id: 'note-p',
+      kind: 'text',
+      commentary: true,
+      progress: true,
+      text: '先跑一遍测试，稍等。',
+    }),
+    step({
+      id: 'note-n',
+      kind: 'text',
+      commentary: true,
+      at: 1_001_000,
+      text: '我先运行 npm test。',
+    }),
+    step({
+      id: 'tool-a',
+      kind: 'tool',
+      at: 1_002_000,
+      endedAt: 1_004_000,
+      toolName: 'Bash',
+      toolUseId: 'a',
+      summary: 'command: npm test',
+      resultPreview: '12 passed',
+    }),
+  ];
+  const at = (level: 'hidden' | 'activity' | 'full') => {
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: level,
+        }),
+      },
+      messages: { [JID]: [reply({ source_kind: 'sdk_send_message' })] },
+    });
+    seed({ steps: PROGRESS_STEPS });
+  };
+  const open = async () => {
+    await mount(reply({ source_kind: 'sdk_send_message' }));
+    // Folded until the reader opens it.
+    expect(text()).not.toContain('先跑一遍测试');
+    await click(summaryRow());
+  };
+
+  it('at hidden lists the progress alone', async () => {
+    at('hidden');
+    await open();
+    expect(text()).toContain('先跑一遍测试，稍等。');
+    expect(text()).not.toContain('npm test');
+    expect(text()).not.toContain('我先运行');
+  });
+
+  it('at activity lists it with the work, without the narration', async () => {
+    at('activity');
+    await open();
+    expect(text()).toContain('先跑一遍测试，稍等。');
+    expect(text()).toContain('npm test');
+    expect(text()).not.toContain('我先运行');
+    expect(text()).not.toContain('12 passed');
+  });
+
+  it('at full lists both', async () => {
+    at('full');
+    await open();
+    expect(text()).toContain('先跑一遍测试，稍等。');
+    expect(text()).toContain('我先运行 npm test。');
+  });
+
+  it('is in the card in the classic layout too, where no other row holds it', async () => {
+    memory.set(LAYOUT_KEY, 'classic');
+    at('activity');
+    await open();
+    expect(text()).toContain('先跑一遍测试，稍等。');
+  });
+});
+
 describe("a proactive reply whose turn's trace is on its way", () => {
   const awaited = () =>
     useChatStore.setState({
@@ -1139,22 +1221,34 @@ describe("a proactive reply whose turn's trace is on its way", () => {
     expect(row()?.disabled).toBe(false);
   });
 
-  it('holds nothing for another reply, or at the hidden level', async () => {
+  it('holds nothing for another reply', async () => {
     awaited();
     await mount(
       reply({ id: 'm2', source_kind: 'sdk_send_message', has_trace: false }),
     );
     expect(row()).toBeUndefined();
-    useChatStore.setState({
-      groups: {
-        [JID]: group({
-          interaction_mode: 'proactive',
-          process_visibility: 'hidden',
-        }),
-      },
-      traceAwaited: { [JID]: 'm1' },
-    });
-    await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
-    expect(row()).toBeUndefined();
   });
+
+  // The store holds it only for such a turn: its progress is what the trace
+  // keeps there. In either layout it is the card's one row.
+  it.each(['timeline', 'classic'] as const)(
+    'at the hidden level, holds the one row of a turn that sent progress (%s)',
+    async (layout) => {
+      memory.set(LAYOUT_KEY, layout);
+      useChatStore.setState({
+        groups: {
+          [JID]: group({
+            interaction_mode: 'proactive',
+            process_visibility: 'hidden',
+          }),
+        },
+        traceAwaited: { [JID]: 'm1' },
+      });
+      await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
+      const rows = [...container.querySelectorAll('button')].filter((el) =>
+        /处理过程|思考过程|执行详情/.test(el.textContent ?? ''),
+      );
+      expect(rows.map((el) => el.textContent?.trim())).toEqual(['处理过程']);
+    },
+  );
 });

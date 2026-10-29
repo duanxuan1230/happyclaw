@@ -221,11 +221,11 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 不经过 quiesce、不重启运行时，正在运行的回合从下一个事件起按新值投影。Assistant
 模式的工作区始终展示完整过程，该字段可以设置但没有效果。三个级别对 Web 的投影：
 
-| 级别       | 广播给 Web 的 Runner 事件                                                                                                                       |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈                                                                          |
-| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；不含任何模型产出的文字 |
-| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                          |
+| 级别       | 广播给 Web 的 Runner 事件                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈，以及进展（见下）                                                                |
+| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；进展以外不含任何模型产出的文字 |
+| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                                  |
 
 `commentary` 由宿主合成，Runner 不会发这个事件：主 Agent 的文字先被扣住，只有紧接着
 调用了工具才作为一条完整的 `commentary`（先于该次调用，带该调用的 `queryRunId`）放行；
@@ -235,15 +235,22 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 消息开头读起的文字才会被扣住，所以中途调高级别时，正在写的那句话的后半截不放行。
 它只广播给 Web，不进入 IM 渠道，也不写入 `turn_traces`；重连快照不含它。
 
+进展是主动模式 Agent 用 `send_message(delivery_role=progress)` 发给用户的话。IM 回合
+（输入有原生渠道回复路由）的进展是一条独立消息，与 `final` 一样经 Turn Outbox 发出并写入
+消息；Web 回合的进展不成为消息，而是一条带 `progress: true` 的 `commentary`，在每个级别
+都广播，并作为 `progress` 步骤写入 `turn_traces`，最终回复送达后由 Web 折叠进该回复的
+处理过程。重连快照同样不含它。
+
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
-只保留 `toolUseId` 与布尔值 `toolIsError`（调用是否失败），工具的 `toolInput`、
+只保留 `toolUseId` 与布尔值 `toolIsError`（调用是否失败；工作区记忆写入工具的回执
+另外保留结果文本，按 `toolUseId` 对应到该调用的 `tool_use_start` 识别），工具的 `toolInput`、
 `toolResultFacts`（见下）、子 Agent 的提示词与 Workflow 的预览文本都会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
 在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
 `agent_status`，使 Task 标签与任务事件一致。
 
 回合结算时，宿主把该回合的思考摘要、思考耗时、执行轨迹和有序步骤写入 `turn_traces`
-（Assistant 模式总是写；主动模式仅当 `process_visibility` 不是 `hidden` 时写，且
+（Assistant 模式总是写；主动模式在 `hidden` 级只写进展步骤，没有进展就不写，
 `activity` 级不保存思考文本，步骤里的思考也不带文本与标题；思考文本最多 64KB，保留
 尾部并以 `…` 开头标记被截断，轨迹最多 200 条，步骤最多 100 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
 表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
