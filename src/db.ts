@@ -8359,6 +8359,11 @@ export function updateTaskRunLog(
   );
 }
 
+/** Drop one run log, e.g. a run that paused instead of ending. */
+export function deleteTaskRunLog(id: number): void {
+  prepareCached('DELETE FROM task_run_logs WHERE id = ?').run(id);
+}
+
 export function cleanupStaleRunningLogs(): number {
   const result = prepareCached(`
     UPDATE task_run_logs SET status = 'error', error = 'Process crashed before completion'
