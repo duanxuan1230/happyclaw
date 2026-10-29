@@ -1697,6 +1697,151 @@ describe("a proactive turn's reply", () => {
     }
   });
 
+  it('keeps the progress when the level is lowered mid-turn', async () => {
+    for (const lowered of ['activity', 'hidden'] as const) {
+      reset();
+      proactive('full');
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      emit(
+        {
+          eventType: 'commentary',
+          agentScope: 'main',
+          text: '我先列目录',
+          ...turn1,
+        },
+        'run-a',
+      );
+      tool('tool-1');
+      await useChatStore.getState().updateProcessVisibility(JID, lowered);
+      expect(liveTexts(), lowered).toEqual(['progress:先看一下仓库']);
+      const live = useChatStore.getState().streaming[JID];
+      expect(live?.inputTurnId, lowered).toBe('input-1');
+      if (lowered === 'hidden') {
+        expect(
+          live?.steps?.every((step) => step.progress),
+          lowered,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the progress through a reconnect at every level', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      progress('先看一下仓库');
+      useChatStore.getState().handleStreamSnapshot(
+        JID,
+        {
+          partialText: '',
+          activeTools: [],
+          recentEvents: [],
+          systemStatus: null,
+          turnId: 'p-1',
+          progress: [{ at: 1_000, text: '先看一下仓库' }],
+        },
+        undefined,
+        'run-a',
+      );
+      expect(liveTexts(), level).toEqual(['progress:先看一下仓库']);
+    }
+  });
+
+  it('rebuilds the progress in a tab that joins the turn, in order, at every level', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      useChatStore.getState().handleStreamSnapshot(
+        JID,
+        {
+          partialText: '',
+          activeTools: [
+            { toolName: 'Bash', toolUseId: 'b1', startTime: 5_000 },
+          ],
+          recentEvents: [],
+          systemStatus: null,
+          turnId: 'p-1',
+          progress: [
+            { at: 1_000, text: '先看一下仓库' },
+            { at: 9_000, text: '找到了，正在改' },
+          ],
+        },
+        undefined,
+        'run-a',
+      );
+      const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+      expect(liveTexts(), level).toEqual([
+        'progress:先看一下仓库',
+        'progress:找到了，正在改',
+      ]);
+      // Between the two, the tool the snapshot was running, where it shows.
+      const order = steps.map((step) =>
+        step.kind === 'text' ? step.text : step.kind,
+      );
+      expect(order, level).toEqual(
+        level === 'hidden'
+          ? ['先看一下仓库', '找到了，正在改']
+          : ['先看一下仓库', 'tool', '找到了，正在改'],
+      );
+    }
+  });
+
+  it('reads the trace flags again once the level is lowered to hidden', async () => {
+    proactive('full');
+    useChatStore.setState({
+      messages: {
+        [JID]: [
+          finalMessage('with-progress', '答', {
+            source_kind: 'sdk_send_message',
+            turn_id: 'input-a',
+            has_trace: true,
+          }),
+          finalMessage('without-progress', '答', {
+            source_kind: 'sdk_send_message',
+            turn_id: 'input-b',
+            has_trace: true,
+          }),
+        ],
+      },
+    });
+    apiGetMock.mockImplementation(async (url: string) =>
+      url.includes('/messages?')
+        ? {
+            messages: [
+              finalMessage('with-progress', '答', {
+                turn_id: 'input-a',
+                has_trace: true,
+              }),
+              finalMessage('without-progress', '答', { turn_id: 'input-b' }),
+            ],
+          }
+        : undefined,
+    );
+    try {
+      await useChatStore.getState().updateProcessVisibility(JID, 'hidden');
+      await vi.waitFor(() =>
+        expect(
+          useChatStore
+            .getState()
+            .messages[JID].filter((m) => m.has_trace)
+            .map((m) => m.id),
+        ).toEqual(['with-progress']),
+      );
+      expect(apiGetMock).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `/api/groups/${encodeURIComponent(JID)}/messages?limit=`,
+        ),
+      );
+    } finally {
+      apiGetMock.mockReset();
+    }
+  });
+
   it('keeps the receipt of a memory write and no other tool output, at activity', () => {
     proactive('activity');
     useChatStore.getState().handleRunStarted(JID, 'run-a');

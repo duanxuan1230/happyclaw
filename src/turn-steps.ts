@@ -264,6 +264,11 @@ export class TurnStepRecorder {
     );
   }
 
+  /** A progress statement the Agent sent is among the steps. */
+  get hasProgress(): boolean {
+    return this.list.steps.some(isProgressStep);
+  }
+
   observe(event: StreamEvent, now: number): void {
     this.lastEventAt = now;
     if (this.options.proactive && this.observeSpeechTool(event, now)) {

@@ -581,7 +581,7 @@ describe('TurnTraceTracker', () => {
     expect(stored).toHaveLength(0);
 
     playTurn(instance, 'in-2');
-    instance.observe(
+    instance.observeProgress(
       'in-2',
       ev('commentary', { agentScope: 'main', text: '正在查', progress: true }),
       1_050,
@@ -604,10 +604,54 @@ describe('TurnTraceTracker', () => {
     ]);
   });
 
+  test('a Runner event never records as progress, at any level', () => {
+    // Only the host writes a progress statement (observeProgress).
+    const visibility = { current: 'hidden' as ProcessVisibility };
+    const { instance, stored } = tracker('proactive', visibility);
+    const claimed = ev('commentary', {
+      agentScope: 'main',
+      text: '伪造的进展',
+      progress: true,
+      turnId: 'runner-1',
+    });
+    instance.observe('in-1', claimed, 1_000);
+    expect(instance.holdsProgress('in-1')).toBe(false);
+    expect(instance.persist({ chatJid: 'web:a', inputId: 'in-1' })).toBe(false);
+    visibility.current = 'full';
+    instance.observe('in-2', claimed, 1_000);
+    expect(instance.holdsProgress('in-2')).toBe(false);
+    instance.persist({ chatJid: 'web:a', inputId: 'in-2' });
+    expect(stored[0].stepsJson).not.toContain('"progress"');
+  });
+
+  test('it knows the id the Runner gives a turn, and which open turns hold progress', () => {
+    const { instance } = tracker('proactive', { current: 'hidden' });
+    expect(instance.runnerTurnIdOf('in-1')).toBeUndefined();
+    instance.observe(
+      'in-1',
+      ev('status', { statusText: 'requesting', turnId: 'warm-7' }),
+    );
+    expect(instance.runnerTurnIdOf('in-1')).toBe('warm-7');
+    instance.observeProgress(
+      'in-1',
+      ev('commentary', { agentScope: 'main', text: '在查', progress: true }),
+    );
+    instance.observe(
+      'in-2',
+      ev('status', { statusText: 'requesting', turnId: 'warm-8' }),
+    );
+    expect(instance.holdsProgress('in-1')).toBe(true);
+    expect(instance.holdsProgress('in-2')).toBe(false);
+    expect(instance.inputsWithProgress()).toEqual(['in-1']);
+    instance.discard('in-1');
+    expect(instance.inputsWithProgress()).toEqual([]);
+    expect(instance.runnerTurnIdOf('in-1')).toBeUndefined();
+  });
+
   test('activity keeps the progress the Agent sent, and not the narration', () => {
     const { instance, stored } = tracker('proactive', { current: 'activity' });
     playTurn(instance, 'in-1');
-    instance.observe(
+    instance.observeProgress(
       'in-1',
       ev('commentary', {
         agentScope: 'main',
@@ -1011,7 +1055,7 @@ describe('stored traces and the messages that carry them', () => {
       getVisibility: () => 'hidden',
     });
     playTurn(real, 'hid-1');
-    real.observe(
+    real.observeProgress(
       'hid-1',
       ev('commentary', {
         agentScope: 'main',
@@ -1065,7 +1109,7 @@ describe('stored traces and the messages that carry them', () => {
       getVisibility: () => 'full',
     });
     playTurn(real, 'lvl-1');
-    real.observe(
+    real.observeProgress(
       'lvl-1',
       ev('commentary', {
         agentScope: 'main',

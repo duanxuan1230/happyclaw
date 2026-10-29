@@ -385,10 +385,12 @@ import {
 } from './im-channel.js';
 import {
   PROACTIVE_TAIL_INTERRUPTION_NOTICE,
+  type ProactiveTurnEnding,
   buildInteractionTextOutboxPayload,
   isProactiveControlPlaneSuccess,
   projectProgressForWeb,
   projectSdkStreamEventForWeb,
+  proactiveClosingNote,
   publishesFrameworkAnswer,
   resolveFrozenIpcInteractionMode,
   resolveRuntimeInteractionMode,
@@ -7952,6 +7954,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             { chatJid, inputTurnId: inputId },
             'Refusing to settle Proactive input after progress/separate output without final',
           );
+          // The turn ended without its final: its progress stays with it.
+          await keepProactiveProgress(inputId, 'failed');
           continue;
         }
         await clearProcessingIndicatorForInput(inputId);
@@ -8242,6 +8246,41 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
     turnTraces.discard(inputId);
   };
+  // A proactive turn that sent progress but ends without a reply (stopped,
+  // steered away, failed, or refused to settle without a final) keeps that
+  // progress with the turn: a short closing note becomes its reply, and the
+  // turn's process hangs on it as on any reply.
+  const keepProactiveProgress = async (
+    inputId: string,
+    ending: ProactiveTurnEnding,
+  ): Promise<void> => {
+    if (!turnTraces.holdsProgress(inputId)) return;
+    try {
+      const replied = [chatJid, resolveIpcOutputWorkspaceJid(chatJid)].some(
+        (jid) => !!jid && !!getLastAgentMessageIdForTurn(jid, inputId),
+      );
+      if (replied) {
+        persistProactiveTurnTrace(inputId);
+        return;
+      }
+      await sendMessage(chatJid, proactiveClosingNote(ending), {
+        sendToIM: false,
+        turnTrace: { tracker: turnTraces, inputId },
+        messageMeta: {
+          turnId: inputId,
+          sessionId: activeSessionId,
+          sourceKind: 'interrupt_partial',
+          finalizationReason: ending === 'failed' ? 'error' : 'interrupted',
+        },
+      });
+      turnTraces.discard(inputId);
+    } catch (err) {
+      logger.warn(
+        { err, chatJid, inputId },
+        'Failed to keep the progress of a proactive turn without a reply',
+      );
+    }
+  };
   let streamInterrupted = false;
   let streamSteered = false;
   let runnerClosedBySteer = false;
@@ -8398,13 +8437,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        const progress = projectProgressForWeb(
-          interactionMode,
-          resolveProcessVisibility(),
-          text,
-          { inputTurnId, sessionId: activeSessionId },
-        );
-        turnTraces.observe(inputTurnId, progress.step);
+        const progress = projectProgressForWeb(interactionMode, text, {
+          inputTurnId,
+          turnId: turnTraces.runnerTurnIdOf(inputTurnId),
+          sessionId: activeSessionId,
+        });
+        turnTraces.observeProgress(inputTurnId, progress.step);
         for (const event of progress.web) broadcastStreamEvent(chatJid, event);
         return true;
       },
@@ -9608,6 +9646,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     'Failed to save interrupted text on status event',
                   );
                 }
+              }
+              if (!publishesFrameworkAnswer(interactionMode)) {
+                await keepProactiveProgress(
+                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
+                  steered ? 'steered' : 'stopped',
+                );
               }
             }
 
@@ -10996,6 +11040,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       streamInterrupted &&
       !sentReply;
     const wasSteered = wasInterrupted && streamSteered;
+    // A proactive turn that sent progress and never got to its reply.
+    if (!publishesFrameworkAnswer(interactionMode)) {
+      const ending: ProactiveTurnEnding = streamInterrupted
+        ? streamSteered
+          ? 'steered'
+          : 'stopped'
+        : 'failed';
+      for (const inputId of turnTraces.inputsWithProgress()) {
+        await keepProactiveProgress(inputId, ending);
+      }
+    }
 
     // ── Streaming card cleanup ──
     if (streamingSession) {
@@ -17582,6 +17637,8 @@ async function processAgentConversation(
             { chatJid, agentId, inputTurnId: inputId },
             'Refusing to settle Proactive agent input after progress/separate output without final',
           );
+          // The turn ended without its final: its progress stays with it.
+          keepProactiveProgress(inputId, 'failed');
           continue;
         }
         await clearAgentProcessingIndicatorForInput(inputId);
@@ -17846,6 +17903,73 @@ async function processAgentConversation(
     }
     turnTraces.discard(inputId);
   };
+  // As in the main session: a proactive turn that sent progress but ends
+  // without a reply gets a closing note to hang its process on.
+  const keepProactiveProgress = (
+    inputId: string,
+    ending: ProactiveTurnEnding,
+  ): void => {
+    if (!turnTraces.holdsProgress(inputId)) return;
+    try {
+      closeProactiveTurn(inputId, ending);
+    } catch (err) {
+      logger.warn(
+        { err, chatJid, agentId, inputId },
+        'Failed to keep the progress of a proactive turn without a reply',
+      );
+    }
+  };
+  const closeProactiveTurn = (
+    inputId: string,
+    ending: ProactiveTurnEnding,
+  ): void => {
+    if (getLastAgentMessageIdForTurn(virtualChatJid, inputId)) {
+      persistProactiveTurnTrace(inputId);
+      return;
+    }
+    const content = proactiveClosingNote(ending);
+    const finalizationReason = ending === 'failed' ? 'error' : 'interrupted';
+    const timestamp = new Date().toISOString();
+    ensureChatExists(virtualChatJid);
+    const id = storeMessageDirect(
+      crypto.randomUUID(),
+      virtualChatJid,
+      'happyclaw-agent',
+      ASSISTANT_NAME,
+      content,
+      timestamp,
+      true,
+      {
+        meta: {
+          turnId: inputId,
+          sessionId: currentAgentSessionId,
+          sourceKind: 'interrupt_partial',
+          finalizationReason,
+        },
+      },
+    );
+    broadcastNewMessage(
+      virtualChatJid,
+      {
+        id,
+        chat_jid: virtualChatJid,
+        sender: 'happyclaw-agent',
+        sender_name: ASSISTANT_NAME,
+        content,
+        timestamp,
+        is_from_me: true,
+        has_trace:
+          turnTraces.persist({ chatJid: virtualChatJid, inputId }) || undefined,
+        turn_id: inputId,
+        session_id: currentAgentSessionId ?? null,
+        sdk_message_uuid: null,
+        source_kind: 'interrupt_partial',
+        finalization_reason: finalizationReason,
+      },
+      agentId,
+    );
+    turnTraces.discard(inputId);
+  };
   let agentStreamInterrupted = false;
   let agentStreamSteered = false;
   let agentInterruptFinalized = false;
@@ -18020,13 +18144,12 @@ async function processAgentConversation(
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        const progress = projectProgressForWeb(
-          interactionMode,
-          resolveProcessVisibility(),
-          text,
-          { inputTurnId, sessionId: currentAgentSessionId },
-        );
-        turnTraces.observe(inputTurnId, progress.step);
+        const progress = projectProgressForWeb(interactionMode, text, {
+          inputTurnId,
+          turnId: turnTraces.runnerTurnIdOf(inputTurnId),
+          sessionId: currentAgentSessionId,
+        });
+        turnTraces.observeProgress(inputTurnId, progress.step);
         for (const event of progress.web) {
           broadcastStreamEvent(chatJid, event, agentId);
         }
@@ -19045,6 +19168,12 @@ async function processAgentConversation(
               'Failed to save interrupted agent text on status event',
             );
           }
+        }
+        if (!publishesFrameworkAnswer(interactionMode)) {
+          keepProactiveProgress(
+            resolveContainerOutputInputTurnId(output, lastProcessed.id),
+            steered ? 'steered' : 'stopped',
+          );
         }
       }
 
@@ -20179,6 +20308,17 @@ async function processAgentConversation(
       !agentInterruptFinalized &&
       (runnerClosedBySteer || !isCursorCommitted());
     const wasSteered = wasInterrupted && agentStreamSteered;
+    // A proactive turn that sent progress and never got to its reply.
+    if (!publishesFrameworkAnswer(interactionMode)) {
+      const ending: ProactiveTurnEnding = agentStreamInterrupted
+        ? agentStreamSteered
+          ? 'steered'
+          : 'stopped'
+        : 'failed';
+      for (const inputId of turnTraces.inputsWithProgress()) {
+        keepProactiveProgress(inputId, ending);
+      }
+    }
 
     // ── Streaming card cleanup ──
     activeHeldCardFinalizers.delete(virtualChatJid);

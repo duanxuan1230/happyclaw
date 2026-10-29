@@ -235,11 +235,17 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 消息开头读起的文字才会被扣住，所以中途调高级别时，正在写的那句话的后半截不放行。
 它只广播给 Web，不进入 IM 渠道，也不写入 `turn_traces`；重连快照不含它。
 
-进展是主动模式 Agent 用 `send_message(delivery_role=progress)` 发给用户的话。IM 回合
-（输入有原生渠道回复路由）的进展是一条独立消息，与 `final` 一样经 Turn Outbox 发出并写入
-消息；Web 回合的进展不成为消息，而是一条带 `progress: true` 的 `commentary`，在每个级别
-都广播，并作为 `progress` 步骤写入 `turn_traces`，最终回复送达后由 Web 折叠进该回复的
-处理过程。重连快照同样不含它。
+进展是主动模式 Agent 用 `send_message(delivery_role=progress)` 发给用户的话，按本轮输入
+的来源渠道（绑定回合时记录）分流。IM 回合的进展是一条独立消息，与 `final` 一样经 Turn
+Outbox 发出并写入消息；IM 回合的回复路由已不可用（输入被撤回、地址缺少渠道账号）时直接
+失败，告诉 Agent 没有送达，不改投 Web。来源未知（没有 `inputTurnId` 或回合已解绑）时按
+独立消息投递。Web 回合的进展不成为消息，而是一条带 `progress: true` 的 `commentary`，只由
+宿主合成（Runner 事件上的 `progress` 标记会被去掉），在每个级别都广播，并作为 `progress`
+步骤写入 `turn_traces`，最终回复送达后由 Web 折叠进该回复的处理过程。重连快照
+`stream_snapshot.snapshot.progress` 按顺序带上本轮已发的进展（`{ at, text }`），中途加入的
+标签页据此在每个级别重建进展步骤。Web 回合发过进展却没有回复就结束（被停止、被引导转向、
+出错或因缺少 `final` 被拒绝结单）时，宿主写一条简短的结束说明（`interrupt_partial`）作为
+本轮回复，进展随本轮轨迹挂在它上面。
 
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
@@ -1211,7 +1217,7 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 - `status_update`
 - `stream_event`
 - `stream_snapshot`，连接建立时推送进行中回合的快照（含推理文本尾部、推理计时、
-  活动工具、子 Agent 状态和轨迹）
+  活动工具、子 Agent 状态、轨迹，以及主动模式 Web 回合已发的进展 `progress`）
 - `active_run_snapshot`，连接建立时推送；`usageLimitWaits[]`
   （`{ chatJid, agentId?, resumeAt, waitCount }`）列出正在等待用量重置的会话
 - `usage_limit_wait`，`{ chatJid, agentId?, resumeAt, waitCount? }`：会话开始等待

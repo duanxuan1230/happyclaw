@@ -8992,6 +8992,33 @@ export function listTurnIdsWithTrace(
   return found;
 }
 
+/**
+ * Which of these turns have a stored trace holding a progress statement (the
+ * flag for message lists at the `hidden` level). Steps are stored as JSON, in
+ * which a quote inside a string value is escaped, so the pattern matches the
+ * `progress` key of a step and nothing a step says.
+ */
+export function listTurnIdsWithProgress(
+  chatJid: string,
+  turnIds: readonly string[],
+): Set<string> {
+  const found = new Set<string>();
+  if (!isDatabaseInitialized() || turnIds.length === 0) return found;
+  const CHUNK = 400;
+  for (let offset = 0; offset < turnIds.length; offset += CHUNK) {
+    const chunk = turnIds.slice(offset, offset + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT turn_id FROM turn_traces
+         WHERE chat_jid = ? AND turn_id IN (${chunk.map(() => '?').join(',')})
+           AND steps_json LIKE '%"progress":true%'`,
+      )
+      .all(chatJid, ...chunk) as Array<{ turn_id: string }>;
+    for (const row of rows) found.add(row.turn_id);
+  }
+  return found;
+}
+
 export function deleteTurnTracesForChat(chatJid: string): number {
   if (!isDatabaseInitialized()) return 0;
   return prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(

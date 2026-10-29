@@ -1198,6 +1198,12 @@ export type WsMessageOut =
         phaseStartedAt?: number;
         /** A tool returned and the model has produced nothing since. */
         awaitingModel?: boolean;
+        /**
+         * The progress statements the Agent sent in this proactive Web turn,
+         * in order, with when each was sent (epoch ms): a tab that joins the
+         * turn rebuilds them as steps at every process visibility.
+         */
+        progress?: Array<{ at: number; text: string }>;
         activeHook?: { hookName: string; hookEvent: string } | null;
         turnId?: string;
       };

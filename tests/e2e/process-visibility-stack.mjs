@@ -169,6 +169,8 @@ function startStub() {
     // A proactive turn's last request, after it spoke: a real model takes a
     // moment (and may reason) to decide it is done.
     closingDelayMs: 0,
+    // A proactive turn that ends after its work without sending its final.
+    skipFinal: false,
     calls: 0,
     agentRequests: 0,
   };
@@ -254,6 +256,8 @@ function startStub() {
             { type: 'thinking', text: THINK2 },
             { type: 'text', text: ANSWER },
           ];
+        } else if (round === 1 && state.skipFinal) {
+          blocks = [{ type: 'text', text: SENTINEL }];
         } else if (round === 1) {
           blocks = [
             { type: 'thinking', text: THINK2 },
@@ -439,6 +443,16 @@ const UNSAFE_TYPES = new Set([
   'prompt_suggestion',
   'raw_sdk_event',
 ]);
+/**
+ * A frame the Runner wrote for the turn (the host's own `idle` names the
+ * input instead): the model's request, its reasoning and its tools.
+ */
+const isRunnerFrame = (e) =>
+  !!e.turnId &&
+  (e.eventType.startsWith('thinking_') ||
+    e.eventType.startsWith('tool_') ||
+    (e.eventType === 'status' && e.statusText === 'requesting'));
+
 const typeCounts = (events) => {
   const counts = {};
   for (const e of events) {
@@ -511,10 +525,17 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
         'the Bash tool_use_start on WS1',
       )
     : waitUntil(
-        () => conn.events.some((e) => mine(e) && e.type === 'run_started'),
+        () =>
+          conn.events.some(
+            (e) =>
+              mine(e) &&
+              (interaction === 'proactive'
+                ? e.event?.eventType === 'commentary' && e.event?.progress
+                : e.type === 'run_started'),
+          ),
         90_000,
-        'run_started on WS1',
-      ).then(() => sleep(1800));
+        'the run (and a proactive turn its progress) on WS1',
+      ).then(() => sleep(interaction === 'proactive' ? 300 : 1800));
   await toolSeen;
   if (expect.toolVisible) await sleep(400);
   // A reconnecting client is sent the in-flight state once its socket opens, so
@@ -604,10 +625,20 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
     check(
       label,
       'the progress the Agent sent reaches the Web once, whole, at this level',
-      sent.length === 1 &&
-        sent[0].text === PROGRESS_TEXT &&
-        sent[0].inputTurnId === sent[0].turnId,
+      sent.length === 1 && sent[0].text === PROGRESS_TEXT,
       JSON.stringify(sent),
+    );
+    // The card it lands on is the one the turn's own frames build.
+    const runnerTurnIds = new Set(
+      streamEvents.filter(isRunnerFrame).map((e) => e.turnId),
+    );
+    check(
+      label,
+      "and carries the turn id of the Runner's own frames",
+      sent.length === 1 &&
+        runnerTurnIds.size === 1 &&
+        runnerTurnIds.has(sent[0].turnId),
+      `${sent[0]?.turnId} vs ${JSON.stringify([...runnerTurnIds])}`,
     );
     check(
       label,
@@ -706,7 +737,30 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
 
   // 2. Reconnect snapshot.
   const snap = snapshotMsg?.snapshot;
-  if (expect.snapshot === 'none') {
+  if (interaction === 'proactive') {
+    check(
+      label,
+      'a reconnecting client is handed the progress the Agent sent, at this level',
+      !!snap &&
+        Array.isArray(snap.progress) &&
+        snap.progress.length === 1 &&
+        snap.progress[0].text === PROGRESS_TEXT &&
+        typeof snap.progress[0].at === 'number',
+      JSON.stringify(snap?.progress),
+    );
+  }
+  if (expect.snapshot === 'progress-only') {
+    check(
+      label,
+      'and nothing else of the process',
+      !!snap &&
+        (snap.activeTools || []).length === 0 &&
+        !snap.thinkingText &&
+        !snap.partialText &&
+        (snap.traceEvents || []).length === 0,
+      JSON.stringify(snap)?.slice(0, 200),
+    );
+  } else if (expect.snapshot === 'none') {
     check(
       label,
       'no in-flight snapshot is sent to a reconnecting client',
@@ -1363,7 +1417,7 @@ async function main() {
           'task_start',
         ],
         onlyLifecycleStatus: true,
-        snapshot: 'none',
+        snapshot: 'progress-only',
         trace: 'progress-only',
       },
     },
@@ -1559,7 +1613,27 @@ async function main() {
     !after.some((e) => e.eventType === 'text_delta'),
     '',
   );
+  // A second turn on a warm Runner: its frames carry the Runner's own turn
+  // id, not the input's. The progress must carry the same, or the Web would
+  // start a new card for it and wipe the one it belongs to.
+  const switchedProgress = after.filter(
+    (e) => e.eventType === 'commentary' && e.progress === true,
+  );
+  const switchedTurnIds = new Set(
+    after.filter(isRunnerFrame).map((e) => e.turnId),
+  );
+  check(
+    'proactive-switch',
+    "the warm turn's progress lands on its own card",
+    switchedProgress.length === 1 &&
+      switchedTurnIds.size === 1 &&
+      switchedTurnIds.has(switchedProgress[0].turnId),
+    `${JSON.stringify(switchedProgress.map((e) => [e.turnId, e.inputTurnId]))} vs ${JSON.stringify([...switchedTurnIds])}`,
+  );
   conn.ws.close();
+
+  await proactiveStopKeepsProgress(ctx);
+  await proactiveNoFinalKeepsProgress(ctx);
 
   await runFactsScenario(ctx, {
     label: 'tool-facts-assistant',
@@ -1606,6 +1680,174 @@ async function main() {
 
   await proactiveReplyInTheBrowser(ctx, 'full');
   await proactiveReplyInTheBrowser(ctx, 'hidden');
+}
+
+/**
+ * A proactive Web turn stopped after it sent progress, at `hidden`: the
+ * progress stays with the turn, on a closing note that carries its trace, and
+ * a later read of the history still finds it.
+ */
+async function proactiveStopKeepsProgress(ctx) {
+  const label = 'stop-keeps-progress';
+  console.log(`\n== ${label}`);
+  stub.setMode('proactive');
+  const created = await http_('POST', '/api/groups', {
+    cookie: ctx.cookie,
+    body: {
+      name: `${label}-${NONCE}`,
+      execution_mode: 'host',
+      agent_profile_id: ctx.profileId,
+      interaction_mode: 'proactive',
+      process_visibility: 'hidden',
+    },
+  });
+  if (created.status >= 300)
+    throw new Error(`create workspace: HTTP ${created.status}`);
+  const jid = created.json.jid;
+  const conn = openWs(ctx.cookie);
+  await conn.ready;
+  const mine = (e) => e.chatJid === jid;
+  conn.ws.send(
+    JSON.stringify({ type: 'send_message', chatJid: jid, content: 'start' }),
+  );
+  await waitUntil(
+    () =>
+      conn.events.some(
+        (e) =>
+          mine(e) &&
+          e.event?.eventType === 'commentary' &&
+          e.event?.progress === true,
+      ),
+    90_000,
+    'the progress on the Web',
+  );
+  const stop = await http_('POST', `/api/groups/${enc(jid)}/interrupt`, {
+    cookie: ctx.cookie,
+  });
+  check(
+    label,
+    'the turn is stopped',
+    stop.status === 200,
+    `HTTP ${stop.status}`,
+  );
+  await waitUntil(
+    () =>
+      conn.events.some(
+        (e) =>
+          mine(e) &&
+          e.type === 'new_message' &&
+          e.message?.source_kind === 'interrupt_partial',
+      ),
+    60_000,
+    'the closing note',
+  );
+  const note = conn.events.find(
+    (e) =>
+      mine(e) &&
+      e.type === 'new_message' &&
+      e.message?.source_kind === 'interrupt_partial',
+  ).message;
+  check(
+    label,
+    'a closing note becomes the reply and carries the trace',
+    note.content === '已停止。' && note.has_trace === true && !!note.turn_id,
+    JSON.stringify(note).slice(0, 300),
+  );
+  const history = await http_('GET', `/api/groups/${enc(jid)}/messages`, {
+    cookie: ctx.cookie,
+  });
+  const stored = (history.json.messages || []).find((m) => m.id === note.id);
+  check(
+    label,
+    'the history still flags it',
+    stored?.has_trace === true,
+    JSON.stringify(stored)?.slice(0, 200),
+  );
+  const trace = await http_(
+    'GET',
+    `/api/groups/${enc(jid)}/turn-traces/${enc(note.turn_id)}`,
+    { cookie: ctx.cookie },
+  );
+  check(
+    label,
+    'and its trace holds the progress, alone at hidden',
+    trace.status === 200 &&
+      trace.json.steps.length === 1 &&
+      trace.json.steps[0].progress === true &&
+      trace.json.steps[0].text === PROGRESS_TEXT,
+    `HTTP ${trace.status} ${JSON.stringify(trace.json)?.slice(0, 200)}`,
+  );
+  conn.ws.close();
+}
+
+/**
+ * A proactive Web turn that sent progress and then ended without its final:
+ * the host refuses to settle it, and the progress still stays with the turn,
+ * on a closing note that says the turn broke off.
+ */
+async function proactiveNoFinalKeepsProgress(ctx) {
+  const label = 'no-final-progress';
+  console.log(`\n== ${label}`);
+  stub.setMode('proactive');
+  stub.state.skipFinal = true;
+  try {
+    const created = await http_('POST', '/api/groups', {
+      cookie: ctx.cookie,
+      body: {
+        name: `${label}-${NONCE}`,
+        execution_mode: 'host',
+        agent_profile_id: ctx.profileId,
+        interaction_mode: 'proactive',
+        process_visibility: 'activity',
+      },
+    });
+    if (created.status >= 300)
+      throw new Error(`create workspace: HTTP ${created.status}`);
+    const jid = created.json.jid;
+    const conn = openWs(ctx.cookie);
+    await conn.ready;
+    const mine = (e) => e.chatJid === jid;
+    conn.ws.send(
+      JSON.stringify({ type: 'send_message', chatJid: jid, content: 'go' }),
+    );
+    const noteOf = () =>
+      conn.events.find(
+        (e) =>
+          mine(e) &&
+          e.type === 'new_message' &&
+          e.message?.source_kind === 'interrupt_partial',
+      )?.message;
+    await waitUntil(() => !!noteOf(), 120_000, 'the closing note');
+    // Let a retry, if any, finish with its final.
+    stub.state.skipFinal = false;
+    const note = noteOf();
+    check(
+      label,
+      'a closing note says the turn broke off, and carries the trace',
+      note.content.startsWith('⚠️ 本轮在给出最终回复前中断') &&
+        note.finalization_reason === 'error' &&
+        note.has_trace === true,
+      JSON.stringify(note).slice(0, 300),
+    );
+    const trace = await http_(
+      'GET',
+      `/api/groups/${enc(jid)}/turn-traces/${enc(note.turn_id)}`,
+      { cookie: ctx.cookie },
+    );
+    check(
+      label,
+      'its trace holds the progress with the work',
+      trace.status === 200 &&
+        trace.json.steps.some(
+          (s) => s.progress === true && s.text === PROGRESS_TEXT,
+        ) &&
+        trace.json.steps.some((s) => s.kind === 'tool'),
+      `HTTP ${trace.status} ${JSON.stringify(trace.json)?.slice(0, 300)}`,
+    );
+    conn.ws.close();
+  } finally {
+    stub.state.skipFinal = false;
+  }
 }
 
 /**

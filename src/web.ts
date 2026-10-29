@@ -2837,6 +2837,8 @@ interface StreamingSnapshotEntry {
   /** Currently-running hook, if any — restored on reconnect so the hook spinner
    *  survives the reconnect instead of silently disappearing. */
   activeHook?: { hookName: string; hookEvent: string } | null;
+  /** The progress statements the Agent sent in this turn, in order. */
+  progress?: Array<{ at: number; text: string }>;
   turnId?: string;
   /** Exact GroupQueue attempt that owns this projection. */
   runId?: string;
@@ -2844,6 +2846,8 @@ interface StreamingSnapshotEntry {
 }
 
 const streamingSnapshots = new Map<string, StreamingSnapshotEntry>();
+/** Progress statements a snapshot keeps; the newest win. */
+const MAX_SNAPSHOT_PROGRESS = 20;
 /** Exact query attempt currently projected for each runtime JID. This is
  * deliberately separate from process lifecycle: a conversation process may
  * stay warm while no query is active. */
@@ -3179,6 +3183,7 @@ export function buildStreamSnapshot(
       snap.activeTools.length === 0 &&
       snap.recentEvents.length === 0 &&
       snap.traceEvents.length === 0 &&
+      !snap.progress?.length &&
       Object.keys(snap.taskStates).length === 0)
   ) {
     return null;
@@ -3201,6 +3206,7 @@ export function buildStreamSnapshot(
       awaitingModel: snap.clock.awaitingModel || undefined,
       activeHook: snap.activeHook,
       turnId: snap.turnId,
+      ...(snap.progress?.length ? { progress: snap.progress } : {}),
     },
   };
 }
@@ -3282,6 +3288,17 @@ function updateStreamingSnapshot(
   snap.isThinking = snap.clock.isThinking;
 
   switch (event.eventType) {
+    case 'commentary':
+      // Only the host writes a progress statement, and only what the Web was
+      // sent reaches here: a joining tab gets it back at every level.
+      if (event.progress && event.text) {
+        snap.progress = [
+          ...(snap.progress ?? []),
+          { at: Date.now(), text: event.text.slice(0, MAX_SNAPSHOT_TEXT) },
+        ].slice(-MAX_SNAPSHOT_PROGRESS);
+      }
+      break;
+
     case 'text_delta':
       if (event.text && !event.parentToolUseId) {
         snap.partialText += event.text;
