@@ -11,7 +11,10 @@ import {
   agentBuilderTurnScope,
   type AgentBuilderPersistedInput,
 } from '../src/agent-builder-turn-auth.js';
-import type { AutomationRunOutcome } from '../src/automation-contract.js';
+import {
+  AutomationError,
+  type AutomationRunOutcome,
+} from '../src/automation-contract.js';
 import * as ledger from '../src/automation-run-ledger.js';
 import {
   deriveAutomationActor,
@@ -96,13 +99,20 @@ function ipcHost(inputs: Record<string, AgentBuilderPersistedInput>) {
       payload: Record<string, unknown>,
     ) => results.push([type, payload]),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    AutomationError,
   };
   const harness = createRuntimeSourceHarness(globals);
+  harness.install('STALE_AUTOMATION_TURN_ERROR');
   harness.install('resolveIpcAutomationActor');
   harness.install('processTaskIpc');
   const send = (request: Record<string, unknown>) =>
     (globals.processTaskIpc as (...args: unknown[]) => Promise<void>)(
-      { requestId: 'req-1', timestamp: '', ...request },
+      {
+        requestId: 'req-1',
+        timestamp: '',
+        inputTurnId: 'delivery-1',
+        ...request,
+      },
       FOLDER,
       false,
       false,
@@ -182,6 +192,28 @@ describe('automation tools over task IPC', () => {
     });
   });
 
+  test.each([
+    ['a turn that already ended', 'delivery-0'],
+    ['no turn at all', undefined],
+  ])(
+    'a request from %s is rejected, not judged by the next turn',
+    async (_label, inputTurnId) => {
+      const host = ipcHost({ m1: humanInput('ou_owner') });
+      await host.send({ type: 'automation_list', inputTurnId });
+      expect(host.handleIpc).not.toHaveBeenCalled();
+      expect(host.results).toEqual([
+        [
+          'automation_list',
+          {
+            requestId: 'req-1',
+            success: false,
+            error: '这个请求来自已经结束的一轮，请重新发起',
+          },
+        ],
+      ]);
+    },
+  );
+
   test('old task tools answer with the move to automations', async () => {
     const host = ipcHost({ m1: humanInput('ou_owner') });
     await host.send({ type: 'schedule_task', prompt: 'x' });
@@ -225,12 +257,7 @@ describe('a Runtime Session turn settles its automation run', () => {
         isRunSilenced: () => false,
       },
     } as unknown as Parameters<typeof ledger.setAutomationRuntimeService>[0]);
-    const automationTurns = new ledger.AutomationTurnTracker();
     const runId = `run-${agentSourceKind}`;
-    automationTurns.remember('input-1', [
-      { source_kind: 'automation_prompt', automation_run_id: runId },
-    ]);
-    automationTurns.recordResult('input-1', '今日无新提交');
     const queue = { closeStdin: vi.fn() };
     const globals: Record<string, unknown> = {
       lastProcessed: { id: 'input-1' },
@@ -240,11 +267,20 @@ describe('a Runtime Session turn settles its automation run', () => {
       activeAgentBuilderTurns: { clearCompleted: vi.fn() },
       healthyAgentCompletedInputTurns: new Set<string>(),
       agentInputUsageProjection: { complete: vi.fn() },
-      automationTurns,
       agent: { source_kind: agentSourceKind },
       queue,
+      AutomationTurnTracker: ledger.AutomationTurnTracker,
     };
     const harness = createRuntimeSourceHarness(globals);
+    // The session's own tracker, with its release-the-runner callback.
+    harness.install('automationTurns', 'processAgentConversation');
+    const automationTurns = globals.automationTurns as InstanceType<
+      typeof ledger.AutomationTurnTracker
+    >;
+    automationTurns.remember('input-1', [
+      { source_kind: 'automation_prompt', automation_run_id: runId },
+    ]);
+    automationTurns.recordResult('input-1', '今日无新提交');
     harness.install('markAgentOutputSettled', 'processAgentConversation');
     const settle = globals.markAgentOutputSettled as (output: object) => void;
     return { settle, settled, queue, runId };

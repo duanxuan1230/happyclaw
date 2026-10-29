@@ -130,6 +130,8 @@ function hooks(overrides: Partial<runtime.AutomationRuntimeHooks> = {}) {
     admitInput: vi.fn(() => 'started' as const),
     wake: vi.fn(),
     broadcastNewMessage: vi.fn(),
+    routeSessionOf: vi.fn(() => null),
+    listSessionImRoutes: vi.fn(() => []),
     isInputPending: vi.fn(() => true),
     cancelInput: vi.fn(async () => {}),
     sendImText: vi.fn(async () => true),
@@ -388,7 +390,7 @@ describe('run lifecycle reports', () => {
       [runId, { status: 'success', resultText: '完成' }],
     ]);
     expect(tracker.wasSettled('turn-1')).toBe(true);
-    expect(ledger.isAutomationRunSettled(runId)).toBe(true);
+    expect(ledger.isAutomationRunLive(runId)).toBe(false);
   });
 
   test('a parked input is forgotten, not settled', () => {

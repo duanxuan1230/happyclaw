@@ -234,6 +234,7 @@ import {
   cancelQueuedFollowUp,
   withdrawQueuedFollowUp,
   listQueuedChannelFollowUps,
+  listQueuedAutomationFollowUps,
   claimNextQueuedFollowUpBatch,
   getQueuedFollowUp,
   getQueuedFollowUpChatJids,
@@ -497,16 +498,18 @@ import {
 } from './group-queue.js';
 import { createAutomationCore } from './automation-service.js';
 import { setAutomationService } from './routes/automations.js';
-import type {
-  AutomationActor,
-  AutomationRunOutcome,
-  AutomationScheduler,
+import {
+  AutomationError,
+  type AutomationActor,
+  type AutomationRunOutcome,
+  type AutomationScheduler,
 } from './automation-contract.js';
 import type { AutomationIpcRequest } from './automation.js';
 import {
   AutomationTurnTracker,
   automationRunIdOf,
   cancelAutomationInputs,
+  isAutomationRunSilenced,
   createAutomationRuntimeDeps,
   deriveAutomationActor,
   handleAutomationIpc,
@@ -514,7 +517,7 @@ import {
   isLegacyTaskIpcType,
   LEGACY_TASK_IPC_ERROR,
   automationCardTitle,
-  isAutomationRunSettled,
+  isEndedAutomationInput,
   setAutomationRuntimeService,
   settleAutomationRun,
   withAutomationRunContext,
@@ -684,20 +687,18 @@ function isUnattendedInput(message: NewMessage): boolean {
 }
 
 /**
- * Inputs that are history, not work: prompts of the retired scheduled tasks
- * (never replayed) and automation inputs whose run already ended, e.g.
- * failed after the bounded retries or cancelled. They are consumed so a later input cannot
- * execute them again; the rest is returned in order.
+ * Inputs that are history, not work: legacy 定时任务 prompts (never replayed)
+ * and automation inputs whose run is no longer live in the database (settled,
+ * cancelled, its automation or session deleted, billing denied), including
+ * after a restart. They are consumed so nothing executes them; the rest is
+ * returned in order. Every path that takes a batch for a runner goes
+ * through this.
  */
 function dropNonReplayableInputs(
   laneJid: string,
   messages: NewMessage[],
 ): NewMessage[] {
-  const stale = messages.filter((message) => {
-    if (message.source_kind === 'scheduled_task_prompt') return true;
-    const runId = automationRunIdOf(message);
-    return !!runId && isAutomationRunSettled(runId);
-  });
+  const stale = messages.filter(isEndedAutomationInput);
   if (stale.length === 0) return messages;
   for (const message of stale) {
     completeOutOfBandMessage(laneJid, {
@@ -1884,20 +1885,9 @@ function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
       registeredGroups[conversationJid] ?? getRegisteredGroup(conversationJid);
     if (isDirectImConversation(conversationJid, group)) continue;
     if (isSenderAllowedInGroup(sourceJid, sender.imId)) continue;
-    const deliveryUpdatedAt = new Date().toISOString();
-    // The input and any forward root it covers leave the queue together.
-    const withdrawn = withdrawQueuedFollowUp(
-      chatJid,
-      item.id,
-      deliveryUpdatedAt,
-    );
-    if (withdrawn) {
-      for (const input of [withdrawn.item, ...withdrawn.coveredRoots]) {
-        settleCancelledFollowUp(chatJid, input, deliveryUpdatedAt);
-      }
-    }
+    const withdrawn = withdrawQueuedInput(chatJid, item.id);
     logger.info(
-      { chatJid, messageId: item.id, withdrawn: !!withdrawn },
+      { chatJid, messageId: item.id, withdrawn },
       'Queued input withdrawn: its sender is no longer in the response audience',
     );
   }
@@ -1924,10 +1914,36 @@ function queuedInputImSender(
   return provider !== 'feishu' && imId ? { imId } : null;
 }
 
+/**
+ * Withdraw a queued input like a user cancel: it and any forward root it
+ * covers leave the queue together. False when it was no longer queued.
+ */
+function withdrawQueuedInput(chatJid: string, messageId: string): boolean {
+  const deliveryUpdatedAt = new Date().toISOString();
+  const withdrawn = withdrawQueuedFollowUp(
+    chatJid,
+    messageId,
+    deliveryUpdatedAt,
+  );
+  if (!withdrawn) return false;
+  for (const input of [withdrawn.item, ...withdrawn.coveredRoots]) {
+    settleCancelledFollowUp(chatJid, input, deliveryUpdatedAt);
+  }
+  return true;
+}
+
+/** Queued automation inputs whose run ended leave the queue unexecuted. */
+function withdrawQueuedInputsOfEndedRuns(chatJid: string): void {
+  for (const item of listQueuedAutomationFollowUps(chatJid)) {
+    if (isEndedAutomationInput(item)) withdrawQueuedInput(chatJid, item.id);
+  }
+}
+
 async function dispatchNextQueuedFollowUp(chatJid: string): Promise<void> {
   const reservedRunId = queue.reserveNextQuery(chatJid);
   if (!reservedRunId) return;
   withdrawQueuedInputsOutsideAudience(chatJid);
+  withdrawQueuedInputsOfEndedRuns(chatJid);
   const items = claimNextQueuedFollowUpBatch(chatJid, reservedRunId);
   if (items.length === 0) {
     queue.releaseQueryReservation(chatJid, reservedRunId);
@@ -2270,6 +2286,7 @@ function releaseQueuedFollowUpsToColdReader(
   options: { enqueue?: boolean } = {},
 ): boolean {
   withdrawQueuedInputsOutsideAudience(chatJid);
+  withdrawQueuedInputsOfEndedRuns(chatJid);
   const recoveryRunId = `recovery:${crypto.randomUUID()}`;
   const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
   if (items.length === 0) return false;
@@ -4598,6 +4615,35 @@ function sendBillingDeniedMessage(jid: string, content: string): string {
   return msgId;
 }
 
+type PluginReplyOptions = {
+  originalMessageId: string;
+  groupFolder: string;
+  imRouteJid?: string | null;
+  agentId?: string | null;
+};
+
+/**
+ * A plugin command answered without the agent. When the command was an
+ * automation run's prompt, the reply is the run's result: it settles the run,
+ * and a quiet run keeps it on the Web.
+ */
+async function sendPluginExpanderReply(
+  jid: string,
+  content: string,
+  options: PluginReplyOptions,
+): Promise<{ messageId: string; acknowledged: boolean }> {
+  const original = getAgentBuilderInputMessage(jid, options.originalMessageId);
+  const runId = original ? automationRunIdOf(original) : null;
+  const delivery = await deliverPluginExpanderReply(jid, content, {
+    ...options,
+    imRouteJid: isAutomationRunSilenced(runId) ? null : options.imRouteJid,
+  });
+  if (runId && delivery.acknowledged) {
+    settleAutomationRun(runId, { status: 'success', resultText: content });
+  }
+  return delivery;
+}
+
 /**
  * Persist + broadcast a plugin-expander system reply (e.g. command conflict,
  * docker container offline). Mirrors `sendBillingDeniedMessage` but uses the
@@ -4609,15 +4655,10 @@ function sendBillingDeniedMessage(jid: string, content: string): string {
  * etc.) would silently drop on IM and the slash command appears to no-op
  * (#20 P1-1).
  */
-async function sendPluginExpanderReply(
+async function deliverPluginExpanderReply(
   jid: string,
   content: string,
-  options: {
-    originalMessageId: string;
-    groupFolder: string;
-    imRouteJid?: string | null;
-    agentId?: string | null;
-  },
+  options: PluginReplyOptions,
 ): Promise<{ messageId: string; acknowledged: boolean }> {
   const msgId = `sys_plugin_${crypto
     .createHash('sha256')
@@ -7876,6 +7917,7 @@ async function processGroupMessages(
       await clearProcessingIndicatorForInput(lastProcessed.id);
       activeImReplyRoutes.delete(effectiveGroup.folder);
       if (!notified) return false;
+      automationTurns.settle(lastProcessed.id, UNSETTLED_RUN_OUTCOME);
       advanceCursors(chatJid, {
         timestamp: lastProcessed.timestamp,
         id: lastProcessed.id,
@@ -7887,6 +7929,8 @@ async function processGroupMessages(
     if (idleTimer) clearTimeout(idleTimer);
     activeImReplyRoutes.delete(effectiveGroup.folder);
     if (disposition === 'skip_terminal') {
+      // The turn already reached its terminal before this attempt.
+      automationTurns.settleSuccess(lastProcessed.id);
       await clearProcessingIndicatorForInput(lastProcessed.id);
       advanceCursors(chatJid, {
         timestamp: lastProcessed.timestamp,
@@ -8978,6 +9022,13 @@ async function processGroupMessages(
         'Settled a recalled input: card removed, turn cancelled, cursor committed',
       );
     };
+    // A run cancelled while this batch was being prepared is not started.
+    // Past this point a cancel finds the batch active and stops the query.
+    if (missedMessages.some(isEndedAutomationInput)) {
+      commitCursor();
+      await clearProcessingIndicatorForInput(lastProcessed.id);
+      return true;
+    }
     output = await runAgent(
       effectiveGroup,
       prompt,
@@ -13557,6 +13608,67 @@ function runSelfCapabilityMutation<T>(
 }
 
 /**
+ * An automation input still waits or executes: queued (or being promoted),
+ * or stored and not yet behind the lane's committed cursor. One row read.
+ */
+function isAutomationLaneInputPending(
+  laneJid: string,
+  messageId: string,
+): boolean {
+  const message = getAgentBuilderInputMessage(laneJid, messageId);
+  const status = message?.delivery_status;
+  if (!message || status === 'cancelled' || status === 'subsumed') {
+    return false;
+  }
+  if (status === 'queued' || status === 'promoting') return true;
+  const cursor = getMessageCursor(laneJid, messageId);
+  return (
+    !!cursor &&
+    isCursorAfter(cursor, lastCommittedCursor[laneJid] ?? EMPTY_CURSOR)
+  );
+}
+
+/**
+ * Withdraw an automation input or stop the turn running it.
+ * - Queued or being promoted: withdrawn; the injection checks the queue row
+ *   right before writing IPC, so the runner never receives it.
+ * - In the batch being prepared or executed: the lane's query stops (a
+ *   query still booting stops as soon as it registers). A cold batch also
+ *   checks the run's liveness right before its runner starts.
+ * - Not read yet: consumed, so the lane never runs it.
+ */
+async function cancelAutomationLaneInput(
+  laneJid: string,
+  messageId: string,
+): Promise<void> {
+  if (getQueuedFollowUp(laneJid, messageId)) {
+    withdrawQueuedInput(laneJid, messageId);
+    return;
+  }
+  const folder = resolveEffectiveFolder(laneJid);
+  const executing =
+    !!folder &&
+    activeAgentBuilderTurns
+      .activeBatch(agentBuilderTurnScope(folder, agentIdOfJid(laneJid)))
+      .some((turn) => turn.messageId === messageId);
+  if (
+    executing ||
+    queue.activeQueryExclusivelyCoversMessage(laneJid, messageId)
+  ) {
+    queue.interruptQuery(laneJid, undefined, 'stop');
+    return;
+  }
+  const message = getAgentBuilderInputMessage(laneJid, messageId);
+  const cursor = getMessageCursor(laneJid, messageId);
+  if (message && cursor) {
+    cancelAutomationInputs([message], 'withdrawn');
+    completeOutOfBandMessage(laneJid, cursor);
+  }
+}
+
+const STALE_AUTOMATION_TURN_ERROR = '这个请求来自已经结束的一轮，请重新发起';
+
+/**
  * Who is calling an automation tool, from the turn executing in the calling
  * runtime (never from the request): the run of an automation input, the
  * workspace owner's own turn (the install_skill rule, bound to this session
@@ -13566,6 +13678,7 @@ function resolveIpcAutomationActor(
   sourceGroup: string,
   sourceGroupEntry: RegisteredGroup | undefined,
   ipcAgentId: string | null,
+  inputTurnId: string | null | undefined,
 ): AutomationActor {
   const workspaceJid = findWebJidForFolder(sourceGroup) ?? '';
   const agent = ipcAgentId ? getAgent(ipcAgentId) : undefined;
@@ -13576,12 +13689,22 @@ function resolveIpcAutomationActor(
     ? `${agent.chat_jid}#agent:${agent.id}`
     : workspaceJid;
   const turnScope = agentBuilderTurnScope(sourceGroup, ipcAgentId);
+  const activeBatch = activeAgentBuilderTurns.activeBatch(turnScope);
+  // Judged against the exact turn the agent is answering: a request that
+  // outlived its turn (timeout, steer) must not borrow the next one.
+  if (
+    !inputTurnId ||
+    activeBatch.length === 0 ||
+    activeBatch.some((turn) => turn.runtimeTurnId !== inputTurnId)
+  ) {
+    throw new AutomationError(409, STALE_AUTOMATION_TURN_ERROR);
+  }
   const ownerUserId = sourceGroupEntry?.created_by;
   return deriveAutomationActor({
     workspaceJid: agent?.chat_jid ?? workspaceJid,
     sessionJid,
     owner: ownerUserId ? getUserById(ownerUserId) : undefined,
-    activeBatch: activeAgentBuilderTurns.activeBatch(turnScope),
+    activeBatch,
     loadInput: getAgentBuilderInputMessage,
     isOwnerTurn: () =>
       !!ownerUserId &&
@@ -13829,7 +13952,12 @@ async function processTaskIpc(
   if (isAutomationIpcType(data.type)) {
     const request = data as unknown as AutomationIpcRequest;
     const result = await handleAutomationIpc(request, () =>
-      resolveIpcAutomationActor(sourceGroup, sourceGroupEntry, ipcAgentId),
+      resolveIpcAutomationActor(
+        sourceGroup,
+        sourceGroupEntry,
+        ipcAgentId,
+        request.inputTurnId,
+      ),
     );
     writeTaskResult(tasksDir, data.type, data.requestId, { ...result });
     return;
@@ -15175,8 +15303,13 @@ async function processAgentConversation(
   chatJid: string,
   agentId: string,
 ): Promise<void | boolean> {
-  const automationTurns = new AutomationTurnTracker();
   const agent = getAgent(agentId);
+  const virtualJid = `${chatJid}#agent:${agentId}`;
+  // A session an automation opened for its runs does not keep a warm runner
+  // after a run, whatever its outcome: the next run comes hours later.
+  const automationTurns = new AutomationTurnTracker(() => {
+    if (agent?.source_kind === 'automation') queue.closeStdin(virtualJid);
+  });
   if (!agent || (agent.kind !== 'conversation' && agent.kind !== 'spawn')) {
     logger.warn(
       { chatJid, agentId },
@@ -15194,8 +15327,7 @@ async function processAgentConversation(
 
   const { effectiveGroup } = resolveEffectiveGroup(group);
 
-  const virtualChatJid = `${chatJid}#agent:${agentId}`;
-  const virtualJid = virtualChatJid; // used as queue key
+  const virtualChatJid = virtualJid;
   const agentBuilderScope = agentBuilderTurnScope(
     effectiveGroup.folder,
     agentId,
@@ -15415,6 +15547,7 @@ async function processAgentConversation(
       automationRunId: automationRunIdOf(message),
     })),
   );
+  automationTurns.remember(lastProcessed.id, missedMessages);
 
   // Update agent status → running
   updateAgentStatus(agentId, 'running');
@@ -15691,17 +15824,10 @@ async function processAgentConversation(
         )
       : [{ chatJid: virtualChatJid, messageId: lastProcessed.id }];
     activeAgentBuilderTurns.clearCompleted(agentBuilderScope, completedInputs);
-    let automationTurnCompleted = false;
     for (const inputTurnId of completedInputTurnIds) {
       healthyAgentCompletedInputTurns.add(inputTurnId);
       agentInputUsageProjection.complete(inputTurnId);
-      automationTurnCompleted ||= automationTurns.runOf(inputTurnId) !== null;
       automationTurns.settleSuccess(inputTurnId);
-    }
-    // A session an automation opened for its runs does not keep a warm
-    // runner after a run: the next one is a fresh turn hours later.
-    if (automationTurnCompleted && agent.source_kind === 'automation') {
-      queue.closeStdin(virtualJid);
     }
   };
   const completeAgentChannelRuntimesForOutput = async (
@@ -15891,6 +16017,7 @@ async function processAgentConversation(
       updateAgentStatus(agentId, 'idle');
       await clearAgentProcessingIndicatorForInput(lastProcessed.id);
       if (!notified) return false;
+      automationTurns.settle(lastProcessed.id, UNSETTLED_RUN_OUTCOME);
       advanceCursors(virtualChatJid, {
         timestamp: lastProcessed.timestamp,
         id: lastProcessed.id,
@@ -15907,6 +16034,8 @@ async function processAgentConversation(
         : 'idle',
     );
     if (disposition === 'skip_terminal') {
+      // The turn already reached its terminal before this attempt.
+      automationTurns.settleSuccess(lastProcessed.id);
       await clearAgentProcessingIndicatorForInput(lastProcessed.id);
       advanceCursors(virtualChatJid, {
         timestamp: lastProcessed.timestamp,
@@ -18151,9 +18280,6 @@ async function processAgentConversation(
   };
 
   ipcWatcherManager?.watchRuntime(effectiveGroup.folder, { agentId });
-  // From here the round ends at the tail below, which settles every run it
-  // consumed; warm admissions add theirs as they arrive.
-  automationTurns.remember(lastProcessed.id, missedMessages);
   try {
     agentChannelOutboxScope =
       agentChannelTurnRuntime &&
@@ -18258,6 +18384,13 @@ async function processAgentConversation(
 
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
+    // A run cancelled while this batch was being prepared is not started.
+    // Past this point a cancel finds the batch active and stops the query.
+    if (missedMessages.some(isEndedAutomationInput)) {
+      commitCursor();
+      await clearAgentProcessingIndicatorForInput(lastProcessed.id);
+      return true;
+    }
     let output: ContainerOutput;
     if (executionMode === 'host') {
       const currentOwner = effectiveGroup.created_by
@@ -19142,8 +19275,11 @@ async function startMessageLoop(): Promise<void> {
             chatJid,
             lastAgentTimestamp[chatJid] || EMPTY_CURSOR,
           );
-          let messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          let messagesToSend = dropNonReplayableInputs(
+            chatJid,
+            allPending.length > 0 ? allPending : groupMessages,
+          );
+          if (messagesToSend.length === 0) continue;
           const { effectiveGroup: activeEffectiveGroup } =
             resolveEffectiveGroup(group);
           const warmInteractionBatch = selectRuntimeInteractionBatch(
@@ -20466,6 +20602,62 @@ function buildLookupEffectiveChatJid() {
   });
 }
 
+/**
+ * The session an IM route delivers to right now: a native topic's own
+ * Runtime Session, otherwise the chat's bound session (`web:<ws>` for a Main
+ * Session). Null when the route reaches no session.
+ */
+function resolveRouteSession(routeJid: string): string | null {
+  const conversationJid = channelConversationJid(routeJid);
+  const lookup = (jid: string) =>
+    registeredGroups[jid] ?? getRegisteredGroup(jid);
+  const group = lookup(conversationJid);
+  if (!group) return null;
+  if (isNativeContextContainer(conversationJid, group)) {
+    const address = parseChannelAddress(routeJid);
+    for (const contextId of [address?.threadId, address?.rootMessageId]) {
+      if (!contextId) continue;
+      const binding =
+        getImContextBinding(conversationJid, 'thread', contextId) ??
+        getImContextBindingByRootMessageId(
+          conversationJid,
+          'thread',
+          contextId,
+        );
+      const agent = binding?.agent_id ? getAgent(binding.agent_id) : undefined;
+      // Like inbound routing: a binding into another workspace is stale.
+      if (agent && agent.chat_jid === findWebJidForFolder(group.folder)) {
+        return `${agent.chat_jid}#agent:${agent.id}`;
+      }
+    }
+    return null;
+  }
+  const target = resolveBoundChatTarget(
+    conversationJid,
+    group,
+    lookup,
+    getAgent,
+    findGroupNameByFolder,
+    resolveWorkspaceJid,
+  );
+  if (!target) return null;
+  return target.agentId
+    ? target.targetChatJid
+    : findWebJidForFolder(target.folder);
+}
+
+/** The IM chats bound to a session as a whole (topic containers excluded). */
+function listSessionImRoutes(sessionJid: string): string[] {
+  return Object.entries(registeredGroups)
+    .filter(
+      ([jid, group]) =>
+        !!getChannelType(jid) &&
+        !isNativeContextContainer(jid, group) &&
+        resolveRouteSession(jid) === sessionJid,
+    )
+    .map(([jid]) => jid);
+}
+
 /** The existing Session of a native topic, or null. */
 function findNativeThreadAgent(
   chatJid: string,
@@ -20519,7 +20711,10 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
 
     // Fetch pending messages
     const sinceCursor = lastAgentTimestamp[virtualChatJid] || EMPTY_CURSOR;
-    const allPendingMessages = getMessagesSince(virtualChatJid, sinceCursor);
+    const allPendingMessages = dropNonReplayableInputs(
+      virtualChatJid,
+      getMessagesSince(virtualChatJid, sinceCursor),
+    );
     const { effectiveGroup } = resolveEffectiveGroup(group);
     const interactionBatch = selectRuntimeInteractionBatch(
       allPendingMessages,
@@ -23267,39 +23462,10 @@ async function main(): Promise<void> {
           : queue.enqueueMessageCheck(session.laneJid),
       broadcastNewMessage: (laneJid, message) =>
         broadcastNewMessage(laneJid, message),
-      isInputPending: (laneJid, messageId) =>
-        !!getQueuedFollowUp(laneJid, messageId) ||
-        getMessagesSince(
-          laneJid,
-          lastCommittedCursor[laneJid] ?? EMPTY_CURSOR,
-        ).some((message) => message.id === messageId),
-      cancelInput: async (laneJid, messageId) => {
-        if (getQueuedFollowUp(laneJid, messageId)) {
-          cancelFollowUp(laneJid, messageId);
-          broadcastFollowUpUpdate(laneJid);
-          return;
-        }
-        const folder = resolveEffectiveFolder(laneJid);
-        const scope = folder
-          ? agentBuilderTurnScope(folder, agentIdOfJid(laneJid))
-          : null;
-        const executing =
-          !!scope &&
-          activeAgentBuilderTurns
-            .activeBatch(scope)
-            .some((turn) => turn.messageId === messageId);
-        if (executing) {
-          queue.interruptQuery(laneJid, undefined, 'stop');
-          return;
-        }
-        // Not started yet: consume it so the lane never runs it.
-        const message = getAgentBuilderInputMessage(laneJid, messageId);
-        const cursor = getMessageCursor(laneJid, messageId);
-        if (message && cursor) {
-          cancelAutomationInputs([message], 'withdrawn');
-          completeOutOfBandMessage(laneJid, cursor);
-        }
-      },
+      routeSessionOf: resolveRouteSession,
+      listSessionImRoutes,
+      isInputPending: isAutomationLaneInputPending,
+      cancelInput: cancelAutomationLaneInput,
       sendImText: (routeJid, text) => sendImWithRetry(routeJid, text, []),
       postSessionMessage: async (sessionJid, text) => {
         const outcome = await sendMessageWithOutcome(sessionJid, text, {
@@ -23312,6 +23478,7 @@ async function main(): Promise<void> {
       },
       broadcastAutomationEvent,
     }),
+    { scriptIdleTimeoutMs: () => getSystemSettings().containerTimeout },
   );
   setAutomationRuntimeService(automationCore.service);
   setAutomationService(automationCore.service);

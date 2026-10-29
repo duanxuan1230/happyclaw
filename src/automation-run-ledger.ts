@@ -89,8 +89,28 @@ export function settleAutomationRun(
   return true;
 }
 
-export function isAutomationRunSettled(runId: string): boolean {
-  return settledRuns.has(runId);
+/**
+ * The run is still queued or running in the database. Without a service (no
+ * automation core in this process) nothing can have ended it.
+ */
+export function isAutomationRunLive(runId: string): boolean {
+  if (settledRuns.has(runId)) return false;
+  if (!automationService) return true;
+  try {
+    return automationService.runSink.isRunLive(runId);
+  } catch (err) {
+    logger.warn({ err, runId }, 'Automation run liveness check failed');
+    return true;
+  }
+}
+
+/** The input's run ended (or it is a legacy 定时任务 prompt): history, not work. */
+export function isEndedAutomationInput(
+  message: AutomationInputFields,
+): boolean {
+  if (message.source_kind === 'scheduled_task_prompt') return true;
+  const runId = automationRunIdOf(message);
+  return !!runId && !isAutomationRunLive(runId);
 }
 
 /** Quiet run that has not escalated: its IM delivery is held. */
@@ -247,6 +267,9 @@ export function cancelAutomationInputs(
  * quiet run holds aside, and the final text the run records.
  */
 export class AutomationTurnTracker {
+  /** `onSettled` runs after any of this runner's runs settles. */
+  constructor(private readonly onSettled?: () => void) {}
+
   private readonly runOfTurn = new Map<string, string>();
   private readonly settledTurns = new Set<string>();
   private readonly heldRoutes = new Map<string, string>();
@@ -322,6 +345,7 @@ export class AutomationTurnTracker {
     this.forget(inputTurnId);
     this.settledTurns.add(inputTurnId);
     settleAutomationRun(runId, outcome);
+    this.onSettled?.();
   }
 
   /** The turn completed healthily: its run succeeds with the recorded text. */

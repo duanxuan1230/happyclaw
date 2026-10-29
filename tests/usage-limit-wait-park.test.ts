@@ -93,6 +93,7 @@ function parkGlobals(): Record<string, any> {
     broadcastUsageLimitWait: vi.fn(),
     deliverTerminalFailureNotice: vi.fn(async () => {}),
     withdrawQueuedInputsOutsideAudience: vi.fn(),
+    withdrawQueuedInputsOfEndedRuns: vi.fn(),
     enqueueReleasedFollowUp: vi.fn(),
   };
 }
