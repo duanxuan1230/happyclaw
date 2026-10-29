@@ -642,6 +642,8 @@ describe('WeCom inbound media persist/notify', () => {
       'wecom',
       'route.pdf',
       Buffer.from('pdf'),
+      // The staged route, which picks a session's worktree.
+      'wecom:c2c:target-a',
     );
     expect(storeMessageDirect.mock.calls[1][1]).toBe('wecom:c2c:target-a');
     expect(storeMessageDirect.mock.calls[1][4]).toBe(
@@ -749,6 +751,7 @@ describe('WeCom inbound media persist/notify', () => {
       'wecom',
       'g.jpg',
       expect.any(Buffer),
+      'wecom:group:group-1',
     );
     expect(storeMessageDirect.mock.calls[0][1]).toBe('wecom:group:group-1');
     expect(storeMessageDirect.mock.calls[0][4]).toBe(
@@ -837,6 +840,7 @@ describe('WeCom inbound media persist/notify', () => {
       'wecom',
       'notes.pdf',
       Buffer.from('pdf'),
+      storeMessageDirect.mock.calls[0][1],
     );
     expect(storeMessageDirect.mock.calls[0][4]).toBe(
       '[文件: downloads/wecom/notes.pdf]',

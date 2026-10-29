@@ -224,7 +224,12 @@ describe('inbound wiring', () => {
     ).toHaveLength(1);
   });
 
-  test('IM downloads resolve from the Agent working directory', () => {
+  test('IM downloads resolve from the Agent working directory', async () => {
+    const path = await import('node:path');
+    const { GROUPS_DIR } = await import('../src/config.js');
+    const { resolveWorkspaceProjectRoot } =
+      await import('../src/session-worktree.js');
+    const { agentIdOfJid } = await import('../src/utils.js');
     const groups: Record<string, any> = {
       'web:host-cwd': {
         folder: 'host-cwd',
@@ -243,8 +248,14 @@ describe('inbound wiring', () => {
       getRegisteredGroup: (jid: string) => groups[jid],
       findWebJidForFolder: (folder: string) => `web:${folder}`,
       resolveEffectiveGroup: (group: unknown) => ({ effectiveGroup: group }),
+      resolveWorkspaceProjectRoot,
+      agentIdOfJid,
+      path,
+      GROUPS_DIR,
     };
     const harness = createRuntimeSourceHarness(globals);
+    harness.install('agentWorkingRoot');
+    harness.install('imDownloadRoot');
     harness.installCallArgument(
       'downloadRootResolver',
       'main',
@@ -253,11 +264,18 @@ describe('inbound wiring', () => {
     );
     const resolve = globals.downloadRootResolver as (
       folder: string,
+      routeJid: string,
     ) => string | undefined;
-    expect(resolve('host-cwd')).toBe('/srv/project');
-    expect(resolve('host-default')).toBeUndefined();
-    expect(resolve('container')).toBeUndefined();
-    expect(resolve('missing')).toBeUndefined();
+    expect(resolve('host-cwd', 'web:host-cwd')).toBe('/srv/project');
+    expect(resolve('host-default', 'web:host-default')).toBe(
+      path.join(GROUPS_DIR, 'host-default'),
+    );
+    expect(resolve('container', 'web:container')).toBe(
+      path.join(GROUPS_DIR, 'container'),
+    );
+    expect(resolve('missing', 'web:missing')).toBe(
+      path.join(GROUPS_DIR, 'missing'),
+    );
   });
 });
 
