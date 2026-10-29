@@ -4215,8 +4215,6 @@ configRoutes.put(
               ? {
                   host_only_migrated_groups:
                     hostOnlyMigration.affectedGroups.length,
-                  host_only_migrated_tasks:
-                    hostOnlyMigration.migratedTaskIds.length,
                 }
               : {}),
           },

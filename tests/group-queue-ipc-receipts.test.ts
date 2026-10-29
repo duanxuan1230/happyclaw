@@ -20,7 +20,7 @@ vi.mock('../src/runtime-config.js', () => ({
     maxConcurrentHostProcesses: 10,
   }),
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue } = await import('../src/group-queue.js');
 type Receipt = import('../src/group-queue.js').IpcDeliveryReceipt;

@@ -30,22 +30,57 @@ function stringValue(node: ts.Node | undefined): string | null {
     : null;
 }
 
+function parseRunnerSources(): ts.SourceFile[] {
+  return runnerSourceFiles(runnerSrc).map((file) =>
+    ts.createSourceFile(
+      file,
+      fs.readFileSync(file, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+    ),
+  );
+}
+
+/** String-literal members of every `type X = 'a' | 'b'` alias in the runner. */
+function collectLiteralUnions(sources: ts.SourceFile[]): Map<string, string[]> {
+  const unions = new Map<string, string[]>();
+  for (const source of sources) {
+    visit(source, (node) => {
+      if (!ts.isTypeAliasDeclaration(node) || !ts.isUnionTypeNode(node.type)) {
+        return;
+      }
+      const members = node.type.types.flatMap((member) =>
+        ts.isLiteralTypeNode(member) && ts.isStringLiteral(member.literal)
+          ? [member.literal.text]
+          : [],
+      );
+      if (members.length > 0) unions.set(node.name.text, members);
+    });
+  }
+  return unions;
+}
+
+/**
+ * Tool factories that receive the poller as a callback and pass it
+ * `${request.type}_result`, mapped to the union of their request types.
+ */
+const CALLBACK_RESULT_TYPES: Record<string, string> = {
+  createAutomationTools: 'AutomationIpcType',
+};
+
 /**
  * Contract: every result prefix the runner polls for in its tasks/ directory
  * (`pollIpcResult(<tasks dir>, request, '<type>_result', …)`) must be
  * classified as a host result, never as a request the watcher may consume.
  * Prefixes are string literals, module constants, or `${type}_result` inside a
- * helper whose literal `type` arguments are collected from its call sites.
+ * helper whose literal `type` arguments are collected from its call sites,
+ * or the `resultPrefix` parameter of a callback handed to a tool factory.
  */
 function collectTaskResultPrefixes(): string[] {
   const prefixes = new Set<string>();
-  for (const file of runnerSourceFiles(runnerSrc)) {
-    const source = ts.createSourceFile(
-      file,
-      fs.readFileSync(file, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true,
-    );
+  const sources = parseRunnerSources();
+  const unions = collectLiteralUnions(sources);
+  for (const source of sources) {
     const constants = new Map<string, string>();
     const literalCallArgs = new Map<string, string[]>();
     const polls: ts.CallExpression[] = [];
@@ -78,6 +113,18 @@ function collectTaskResultPrefixes(): string[] {
         prefixes.add(constants.get(prefixArg.text)!);
         continue;
       }
+      const callbackFactory = ts.isIdentifier(prefixArg)
+        ? callbackFactoryOf(call, prefixArg.text)
+        : null;
+      if (callbackFactory && CALLBACK_RESULT_TYPES[callbackFactory]) {
+        const types = unions.get(CALLBACK_RESULT_TYPES[callbackFactory]) ?? [];
+        expect(
+          types.length,
+          `no request types found for ${callbackFactory}`,
+        ).toBeGreaterThan(0);
+        for (const type of types) prefixes.add(`${type}_result`);
+        continue;
+      }
       if (
         ts.isTemplateExpression(prefixArg) &&
         prefixArg.head.text === '' &&
@@ -101,11 +148,32 @@ function collectTaskResultPrefixes(): string[] {
         continue;
       }
       throw new Error(
-        `Unresolvable pollIpcResult prefix in ${path.relative(runnerSrc, file)}: ${prefixArg.getText(source)}`,
+        `Unresolvable pollIpcResult prefix in ${path.relative(runnerSrc, source.fileName)}: ${prefixArg.getText(source)}`,
       );
     }
   }
   return [...prefixes].sort();
+}
+
+/**
+ * `factory((request, <param>) => pollIpcResult(…, <param>))`: the name of
+ * `factory` when `param` is a parameter of the enclosing arrow function.
+ */
+function callbackFactoryOf(call: ts.Node, param: string): string | null {
+  let owner: ts.Node | undefined = call.parent;
+  while (owner && !ts.isArrowFunction(owner)) owner = owner.parent;
+  if (
+    !owner ||
+    !owner.parameters.some(
+      (p) => ts.isIdentifier(p.name) && p.name.text === param,
+    )
+  ) {
+    return null;
+  }
+  const factory = owner.parent;
+  return ts.isCallExpression(factory) && ts.isIdentifier(factory.expression)
+    ? factory.expression.text
+    : null;
 }
 
 // Same shape as the runner's newRequestId() / writeIpcFile() names.
@@ -125,9 +193,19 @@ describe('task IPC result files are never consumed as requests', () => {
         'agent_profile_list_result',
         'workspace_memory_result',
         'happyclaw_owner_profile_result',
-        'schedule_task_result',
+        'automation_create_result',
+        'automation_notify_current_run_result',
       ]),
     );
+  });
+
+  test('automation tools poll `${request.type}_result`', () => {
+    // CALLBACK_RESULT_TYPES assumes this naming; fail loudly if it changes.
+    const source = fs.readFileSync(
+      path.join(runnerSrc, 'automation-tools.ts'),
+      'utf8',
+    );
+    expect(source).toContain('call(request, `${request.type}_result`)');
   });
 
   test('every runner-polled result file is classified as a host result', () => {

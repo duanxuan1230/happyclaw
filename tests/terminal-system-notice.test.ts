@@ -485,9 +485,6 @@ describe('message retry exhaustion notice', () => {
     Object.assign(runtime.globals, {
       registeredGroups: { [groupJid]: group },
       getAgentBuilderInputMessage: db.getAgentBuilderInputMessage,
-      getTaskRunById: db.getTaskRunById,
-      resolveScheduledGroupRunsForOutput: () => [],
-      projectTerminalScheduledGroupRuns: vi.fn(async () => false),
       resolveEffectiveGroup: (value: unknown) => ({ effectiveGroup: value }),
       resolveTrustedInteractionMode: () => 'assistant',
       clearTrackedProcessingIndicators: vi.fn(async () => {}),

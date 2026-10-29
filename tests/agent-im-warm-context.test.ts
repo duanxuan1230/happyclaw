@@ -56,7 +56,6 @@ vi.mock('../src/runtime-config.js', () => ({
   }),
 }));
 vi.mock('../src/db.js', () => ({
-  getTaskById: () => undefined,
   getChannelAccount: () => undefined,
 }));
 const { GroupQueue } = await import('../src/group-queue.js');
