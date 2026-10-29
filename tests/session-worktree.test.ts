@@ -203,6 +203,9 @@ describe('session worktree lifecycle', () => {
         unreadable: false,
         submodules: false,
         embeddedRepos: false,
+        detachedCommits: false,
+        operationInProgress: null,
+        hiddenChanges: false,
       },
     });
     expect(fs.existsSync(record.worktree_path)).toBe(true);

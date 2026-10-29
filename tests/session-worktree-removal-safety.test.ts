@@ -325,6 +325,221 @@ describe('an embedded repository counts as a change', () => {
   });
 });
 
+describe('work git status does not show still needs confirmation', () => {
+  /** A repository of its own at `rel` inside the worktree, one commit in. */
+  function nestedRepo(worktreePath: string, rel: string, ...init: string[]) {
+    const nested = path.join(worktreePath, rel);
+    fs.mkdirSync(nested, { recursive: true });
+    git(nested, 'init', '-q', '-b', 'main', ...init);
+    fs.writeFileSync(path.join(nested, 'x.txt'), 'only here\n');
+    git(nested, 'add', '.');
+    git(nested, 'commit', '-qm', 'only here');
+    return nested;
+  }
+
+  async function expectRefused(agentId: string, risk: Record<string, unknown>) {
+    const refused = await worktrees.removeSessionWorktree(agentId);
+    expect(refused).toMatchObject({ removed: false, risk });
+    expect(
+      fs.existsSync(store.getSessionWorktree(agentId)!.worktree_path),
+    ).toBe(true);
+    return refused && !refused.removed ? refused.risk : null;
+  }
+
+  test('a repository inside an ignored directory, however it is ignored', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n', '.gitignore': 'scratch/\n' });
+    const ignored = await worktreeFor(repo);
+    nestedRepo(ignored.worktree_path, 'scratch/dep');
+    expect(git(ignored.worktree_path, 'status', '--porcelain')).toBe('');
+    await expectRefused(ignored.agent_id, {
+      dirtyFiles: 0,
+      embeddedRepos: true,
+    });
+
+    // info/exclude lives in the shared git dir.
+    const excluded = await worktreeFor(repo);
+    fs.appendFileSync(path.join(repo, '.git', 'info', 'exclude'), 'local/\n');
+    nestedRepo(excluded.worktree_path, 'local/deep/dep');
+    expect(git(excluded.worktree_path, 'status', '--porcelain')).toBe('');
+    const risk = await expectRefused(excluded.agent_id, {
+      embeddedRepos: true,
+    });
+    expect(worktrees.dirtyWorktreesConflict([risk!]).error).toContain(
+      '包含嵌入的 git 仓库',
+    );
+  });
+
+  test('a .git file pointing outside the admin modules, or a .git symlink', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const separate = await worktreeFor(repo);
+    nestedRepo(
+      separate.worktree_path,
+      'dep',
+      `--separate-git-dir=${path.join(root, `separate-${seq}.git`)}`,
+    );
+    git(separate.worktree_path, 'add', 'dep');
+    git(separate.worktree_path, 'commit', '-qm', 'gitlink');
+    await expectRefused(separate.agent_id, { embeddedRepos: true });
+
+    const linked = await worktreeFor(repo);
+    const target = path.join(root, `linked-${seq}`);
+    fs.mkdirSync(target);
+    git(target, 'init', '-q', '-b', 'main');
+    fs.mkdirSync(path.join(linked.worktree_path, 'vendor'));
+    fs.symlinkSync(
+      path.join(target, '.git'),
+      path.join(linked.worktree_path, 'vendor', '.git'),
+    );
+    await expectRefused(linked.agent_id, { embeddedRepos: true });
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    'a directory the scan cannot read counts as unreadable',
+    async () => {
+      const repo = makeRepo({ 'a.txt': 'a\n', '.gitignore': 'locked/\n' });
+      const record = await worktreeFor(repo);
+      const locked = path.join(record.worktree_path, 'locked');
+      fs.mkdirSync(locked);
+      fs.chmodSync(locked, 0o000);
+      try {
+        await expectRefused(record.agent_id, { unreadable: true });
+      } finally {
+        fs.chmodSync(locked, 0o755);
+      }
+    },
+  );
+
+  test('commits on a detached HEAD that no branch or tag contains', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const record = await worktreeFor(repo);
+    git(record.worktree_path, 'checkout', '-q', '--detach');
+    // Detached at a commit main contains: nothing to lose.
+    await expect(
+      worktrees.findDirtySessionWorktrees([record]),
+    ).resolves.toEqual([]);
+
+    fs.writeFileSync(path.join(record.worktree_path, 'a.txt'), 'detached\n');
+    git(record.worktree_path, 'commit', '-qam', 'detached');
+    expect(git(record.worktree_path, 'status', '--porcelain')).toBe('');
+    const risk = await expectRefused(record.agent_id, {
+      dirtyFiles: 0,
+      detachedCommits: true,
+      operationInProgress: null,
+    });
+    expect(worktrees.dirtyWorktreesConflict([risk!])).toMatchObject({
+      error: expect.stringContaining('HEAD 不在任何分支上'),
+      dirty_worktrees: [{ detached_commits: true }],
+    });
+
+    // Tagged, the commit survives the worktree.
+    git(record.worktree_path, 'tag', `keep-${seq}`);
+    await expect(
+      worktrees.findDirtySessionWorktrees([record]),
+    ).resolves.toEqual([]);
+  });
+
+  test('a rebase stopped at edit, and a bisect under way', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    const rebasing = await worktreeFor(repo);
+    for (const n of [1, 2]) {
+      fs.writeFileSync(path.join(rebasing.worktree_path, `f${n}`), `${n}\n`);
+      git(rebasing.worktree_path, 'add', '.');
+      git(rebasing.worktree_path, 'commit', '-qm', `c${n}`);
+    }
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'rebase',
+        '-q',
+        '-i',
+        'HEAD~2',
+      ],
+      {
+        cwd: rebasing.worktree_path,
+        env: {
+          ...process.env,
+          GIT_SEQUENCE_EDITOR: "sed -i.bak 's/^pick/edit/'",
+        },
+        stdio: 'ignore',
+      },
+    );
+    fs.writeFileSync(path.join(rebasing.worktree_path, 'f1'), 'amended\n');
+    git(rebasing.worktree_path, 'commit', '-q', '--amend', '-am', 'amended');
+    expect(git(rebasing.worktree_path, 'status', '--porcelain')).toBe('');
+    const risk = await expectRefused(rebasing.agent_id, {
+      dirtyFiles: 0,
+      detachedCommits: true,
+      operationInProgress: 'rebase',
+    });
+    expect(worktrees.dirtyWorktreesConflict([risk!])).toMatchObject({
+      error: expect.stringContaining('有进行中的 rebase'),
+      dirty_worktrees: [{ operation_in_progress: 'rebase' }],
+    });
+
+    const bisecting = await worktreeFor(repo);
+    git(bisecting.worktree_path, 'bisect', 'start');
+    await expectRefused(bisecting.agent_id, {
+      detachedCommits: false,
+      operationInProgress: 'bisect',
+    });
+  });
+
+  test('edits hidden by skip-worktree or assume-unchanged', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n' });
+    const skipped = await worktreeFor(repo);
+    git(skipped.worktree_path, 'update-index', '--skip-worktree', 'a.txt');
+    fs.writeFileSync(path.join(skipped.worktree_path, 'a.txt'), 'edited\n');
+    expect(git(skipped.worktree_path, 'status', '--porcelain')).toBe('');
+    const risk = await expectRefused(skipped.agent_id, {
+      dirtyFiles: 0,
+      hiddenChanges: true,
+    });
+    expect(worktrees.dirtyWorktreesConflict([risk!])).toMatchObject({
+      error: expect.stringContaining('skip-worktree 或 assume-unchanged'),
+      dirty_worktrees: [{ hidden_changes: true }],
+    });
+
+    const assumed = await worktreeFor(repo);
+    git(assumed.worktree_path, 'update-index', '--assume-unchanged', 'b.txt');
+    await expectRefused(assumed.agent_id, { hiddenChanges: true });
+
+    // Skip-worktree entries absent from disk (a sparse checkout) hold nothing.
+    const sparse = await worktreeFor(repo);
+    git(sparse.worktree_path, 'update-index', '--skip-worktree', 'c.txt');
+    fs.rmSync(path.join(sparse.worktree_path, 'c.txt'));
+    await expect(
+      worktrees.removeSessionWorktree(sparse.agent_id),
+    ).resolves.toMatchObject({ removed: true });
+  });
+});
+
+describe('removal touches no other worktree of the repository', () => {
+  test('when git cannot remove ours, only our admin dir goes', async () => {
+    const repo = makeRepo({ 'a.txt': 'a\n' });
+    // The user's own worktree, on a disk that is not mounted right now.
+    const userWorktree = path.join(root, `user-wt-${seq}`);
+    git(repo, 'worktree', 'add', '-q', '-b', `user-${seq}`, userWorktree);
+    fs.renameSync(userWorktree, `${userWorktree}-unmounted`);
+    const userAdmin = fs.readdirSync(path.join(repo, '.git', 'worktrees'));
+    const record = await worktreeFor(repo);
+    // Without its .git file `git worktree remove` refuses.
+    fs.rmSync(path.join(record.worktree_path, '.git'));
+
+    await expect(
+      worktrees.removeSessionWorktree(record.agent_id, { force: true }),
+    ).resolves.toMatchObject({ removed: true });
+    expect(fs.existsSync(record.worktree_path)).toBe(false);
+    expect(fs.readdirSync(path.join(repo, '.git', 'worktrees'))).toEqual(
+      userAdmin,
+    );
+    expect(git(repo, 'worktree', 'list')).toContain(userWorktree);
+  });
+});
+
 describe('data/worktrees keeps no empty folders', () => {
   const worktreesDir = path.join(dataDir, 'worktrees');
 

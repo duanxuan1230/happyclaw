@@ -11,7 +11,9 @@
  *
  * Invariants: branches are never deleted, the main checkout's files are never
  * touched, a missing or damaged worktree fails the run instead of falling
- * back to the main checkout, and nothing is removed outside data/worktrees.
+ * back to the main checkout, and nothing is removed outside data/worktrees
+ * except the worktree's own admin dir in the repository (what `git worktree
+ * remove` deletes), never another worktree's.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -617,6 +619,8 @@ async function detachWorktreeDirectory(
   if (!isManagedWorktreePath(worktreePath)) {
     throw new Error(`refusing to remove unmanaged path: ${worktreePath}`);
   }
+  // Found while the checkout is still there to match against.
+  const adminDir = worktreeAdminDir(repoRoot, worktreePath);
   let removedByGit = false;
   try {
     await runGit(repoRoot, ['worktree', 'remove', '--force', worktreePath], {
@@ -626,7 +630,7 @@ async function detachWorktreeDirectory(
     removedByGit = true;
   } catch (error) {
     // The repository may be gone or no longer know this worktree. Removing
-    // the directory below data/worktrees is still safe; prune is best effort.
+    // the directory below data/worktrees is still safe.
     logger.warn(
       { err: error, worktreePath },
       'git worktree remove failed; removing the directory directly',
@@ -638,12 +642,10 @@ async function detachWorktreeDirectory(
     }
     fs.rmSync(worktreePath, { recursive: true, force: true });
   }
-  if (!removedByGit) {
-    try {
-      await runGit(repoRoot, ['worktree', 'prune'], { maxBytes: 64 * 1024 });
-    } catch {
-      /* repository unavailable; nothing left to prune */
-    }
+  if (!removedByGit && adminDir) {
+    // Only this worktree's admin dir. `git worktree prune` would also drop
+    // the user's own worktrees that are merely unreachable right now.
+    fs.rmSync(adminDir, { recursive: true, force: true });
   }
   if (deleteBranch) {
     try {
@@ -682,11 +684,24 @@ export interface DirtyWorktree {
   /** Initialized submodules, whose local commits go with the worktree. */
   submodules: boolean;
   /**
-   * Committed gitlinks backed by a repository inside the worktree, whose
-   * commits and changes go with it.
+   * Another repository anywhere inside the worktree (ignored paths included),
+   * whose commits and changes go with it.
    */
   embeddedRepos: boolean;
+  /** HEAD is detached at a commit that no branch or tag contains. */
+  detachedCommits: boolean;
+  /** A rebase, merge, cherry-pick, revert or bisect is under way. */
+  operationInProgress: WorktreeOperation | null;
+  /** Files marked skip-worktree or assume-unchanged hide their changes. */
+  hiddenChanges: boolean;
 }
+
+export type WorktreeOperation =
+  | 'rebase'
+  | 'merge'
+  | 'cherry-pick'
+  | 'revert'
+  | 'bisect';
 
 /** The repository's common git dir (`.git` of the main checkout). */
 function commonGitDir(repoRoot: string): string | null {
@@ -708,12 +723,18 @@ function commonGitDir(repoRoot: string): string | null {
 
 /**
  * The worktree's administrative dir (`<common>/worktrees/<name>`), found from
- * the repository side so a missing `.git` file does not hide it.
+ * the repository side so a missing `.git` file does not hide it. Git records
+ * the worktree's real path there (relative to the admin dir with
+ * worktree.useRelativePaths), so both sides are compared as real paths: data/
+ * may be reached through a symlink, as /var is on macOS.
  */
-function worktreeAdminDir(record: SessionWorktree): string | null {
-  const common = commonGitDir(record.repo_path);
+function worktreeAdminDir(
+  repoRoot: string,
+  worktreePath: string,
+): string | null {
+  const common = commonGitDir(repoRoot);
   if (!common) return null;
-  const expected = path.resolve(record.worktree_path, '.git');
+  const expected = realpathBestEffort(path.join(worktreePath, '.git'));
   const worktreesDir = path.join(common, 'worktrees');
   let names: string[];
   try {
@@ -722,12 +743,13 @@ function worktreeAdminDir(record: SessionWorktree): string | null {
     return null;
   }
   for (const name of names) {
+    const adminDir = path.join(worktreesDir, name);
     try {
       const gitdir = fs
-        .readFileSync(path.join(worktreesDir, name, 'gitdir'), 'utf8')
+        .readFileSync(path.join(adminDir, 'gitdir'), 'utf8')
         .trim();
-      if (path.resolve(gitdir) === expected) {
-        return path.join(worktreesDir, name);
+      if (realpathBestEffort(path.resolve(adminDir, gitdir)) === expected) {
+        return adminDir;
       }
     } catch {
       /* not a worktree entry */
@@ -736,11 +758,142 @@ function worktreeAdminDir(record: SessionWorktree): string | null {
   return null;
 }
 
-function hasInitializedSubmodules(record: SessionWorktree): boolean {
-  const adminDir = worktreeAdminDir(record);
-  if (!adminDir) return false;
+function hasInitializedSubmodules(adminDir: string): boolean {
   try {
     return fs.readdirSync(path.join(adminDir, 'modules')).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Admin-dir entries git keeps while each operation is under way. */
+const OPERATION_STATE: ReadonlyArray<[string, WorktreeOperation]> = [
+  ['rebase-merge', 'rebase'],
+  ['rebase-apply', 'rebase'],
+  ['MERGE_HEAD', 'merge'],
+  ['CHERRY_PICK_HEAD', 'cherry-pick'],
+  ['REVERT_HEAD', 'revert'],
+  ['sequencer', 'cherry-pick'],
+  ['BISECT_START', 'bisect'],
+];
+
+function operationInProgress(adminDir: string): WorktreeOperation | null {
+  for (const [entry, operation] of OPERATION_STATE) {
+    if (fs.existsSync(path.join(adminDir, entry))) return operation;
+  }
+  return null;
+}
+
+/**
+ * HEAD is detached at a commit no branch or tag contains (commits made on a
+ * detached HEAD, a rebase stopped at `edit`): only the worktree's own HEAD
+ * and reflog, in the admin dir that goes with it, still reach them.
+ */
+async function hasDetachedCommits(
+  repoRoot: string,
+  adminDir: string,
+): Promise<boolean> {
+  const head = fs.readFileSync(path.join(adminDir, 'HEAD'), 'utf8').trim();
+  if (head.startsWith('ref: ')) return false;
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(head)) {
+    throw new Error('unreadable worktree HEAD');
+  }
+  const result = await runGit(
+    repoRoot,
+    [
+      'for-each-ref',
+      '--count=1',
+      '--format=%(refname)',
+      `--contains=${head}`,
+      'refs/heads',
+      'refs/tags',
+    ],
+    { maxBytes: 64 * 1024 },
+  );
+  return result.stdout.trim() === '';
+}
+
+/** Index listing cap for the hidden-change scan (~300k entries). */
+const INDEX_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Files marked assume-unchanged, or skip-worktree while present on disk,
+ * whose edits git status does not show. Sparse-checkout entries are
+ * skip-worktree too but absent, so they hold nothing to lose.
+ */
+async function hasHiddenChanges(worktreePath: string): Promise<boolean> {
+  const result = await runGit(worktreePath, ['ls-files', '-v', '-z'], {
+    maxBytes: INDEX_SCAN_MAX_BYTES,
+  });
+  if (result.truncated) {
+    throw new GitCommandError('git ls-files output exceeded the cap', null, '');
+  }
+  for (const entry of result.stdout.split('\0')) {
+    const tag = entry[0];
+    if (!tag) continue;
+    // `<tag> <path>`: lowercase is assume-unchanged, `S` skip-worktree.
+    if (tag >= 'a' && tag <= 'z') return true;
+    if (tag === 'S' && fs.existsSync(path.join(worktreePath, entry.slice(2)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Bounds of the nested-repository walk; past either the worktree is unreadable. */
+const NESTED_GIT_SCAN_MAX_ENTRIES = 500_000;
+const NESTED_GIT_SCAN_MAX_MS = 10_000;
+const GIT_FILE_MAX_BYTES = 4096;
+
+/**
+ * Another repository's `.git` anywhere inside the worktree, ignored paths
+ * included: a directory, a symlink, or a `.git` file pointing anywhere but
+ * this worktree's admin modules (a submodule cloned by git, which
+ * hasInitializedSubmodules reports). Walks the file system without following
+ * symlinks and never runs git inside what it finds, whose own config would
+ * decide what runs. A walk past its entry or time budget throws, so the
+ * worktree counts as unreadable rather than clean.
+ */
+async function hasNestedRepository(
+  worktreePath: string,
+  adminDir: string,
+): Promise<boolean> {
+  const modulesDir = path.join(adminDir, 'modules');
+  const deadline = Date.now() + NESTED_GIT_SCAN_MAX_MS;
+  let entries = 0;
+  const pending = [worktreePath];
+  for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+    for (const entry of await fs.promises.readdir(dir, {
+      withFileTypes: true,
+    })) {
+      if (++entries > NESTED_GIT_SCAN_MAX_ENTRIES || Date.now() > deadline) {
+        throw new Error('worktree too large to scan for nested repositories');
+      }
+      const entryPath = path.join(dir, entry.name);
+      if (entry.name === '.git') {
+        // The worktree's own `.git` file.
+        if (dir === worktreePath) continue;
+        if (!(entry.isFile() && isSubmoduleGitFile(entryPath, modulesDir))) {
+          return true;
+        }
+      } else if (entry.isDirectory()) {
+        pending.push(entryPath);
+      }
+    }
+  }
+  return false;
+}
+
+function isSubmoduleGitFile(gitFile: string, modulesDir: string): boolean {
+  try {
+    if (fs.statSync(gitFile).size > GIT_FILE_MAX_BYTES) return false;
+    const gitdir = /^gitdir:\s*(.+)$/m
+      .exec(fs.readFileSync(gitFile, 'utf8'))?.[1]
+      ?.trim();
+    return (
+      !!gitdir &&
+      isRealpathInside(path.resolve(path.dirname(gitFile), gitdir), modulesDir)
+    );
   } catch {
     return false;
   }
@@ -754,73 +907,60 @@ function hasInitializedSubmodules(record: SessionWorktree): boolean {
 async function assessWorktreeRemoval(
   record: SessionWorktree,
 ): Promise<DirtyWorktree | null> {
+  const adminDir = worktreeAdminDir(record.repo_path, record.worktree_path);
   const risk: DirtyWorktree = {
     agentId: record.agent_id,
     branch: record.branch,
     dirtyFiles: 0,
     unreadable: false,
-    submodules: hasInitializedSubmodules(record),
+    submodules: adminDir ? hasInitializedSubmodules(adminDir) : false,
     embeddedRepos: false,
+    detachedCommits: false,
+    operationInProgress: adminDir ? operationInProgress(adminDir) : null,
+    hiddenChanges: false,
   };
+  const checks: Promise<void>[] = [];
+  if (adminDir) {
+    checks.push(
+      hasDetachedCommits(record.repo_path, adminDir).then((detached) => {
+        risk.detachedCommits = detached;
+      }),
+    );
+  }
   if (fs.existsSync(record.worktree_path)) {
     // Without its .git file git would walk up into an enclosing repository
     // (data/ lives in the HappyClaw checkout) and report that one.
-    if (!fs.existsSync(path.join(record.worktree_path, '.git'))) {
+    if (!adminDir || !fs.existsSync(path.join(record.worktree_path, '.git'))) {
       risk.unreadable = true;
     } else {
-      try {
-        [risk.dirtyFiles, risk.embeddedRepos] = await Promise.all([
-          countWorktreeChanges(record.worktree_path),
-          hasEmbeddedRepositories(record.worktree_path),
-        ]);
-      } catch {
-        risk.unreadable = true;
-      }
+      const worktreePath = record.worktree_path;
+      checks.push(
+        countWorktreeChanges(worktreePath).then((count) => {
+          risk.dirtyFiles = count;
+        }),
+        hasNestedRepository(worktreePath, adminDir).then((found) => {
+          risk.embeddedRepos = found;
+        }),
+        hasHiddenChanges(worktreePath).then((hidden) => {
+          risk.hiddenChanges = hidden;
+        }),
+      );
     }
+  }
+  try {
+    await Promise.all(checks);
+  } catch {
+    risk.unreadable = true;
   }
   return risk.dirtyFiles > 0 ||
     risk.unreadable ||
     risk.submodules ||
-    risk.embeddedRepos
+    risk.embeddedRepos ||
+    risk.detachedCommits ||
+    risk.operationInProgress !== null ||
+    risk.hiddenChanges
     ? risk
     : null;
-}
-
-/** Index listing cap for the gitlink scan (~300k entries). */
-const GITLINK_SCAN_MAX_BYTES = 32 * 1024 * 1024;
-
-/**
- * Whether a gitlink in the index is checked out as a repository of its own
- * inside the worktree (`<path>/.git` is a real directory). Its commits and
- * uncommitted changes live only there, so they go with the worktree even when
- * the status shows nothing. A submodule cloned by git has a `.git` file
- * pointing into the admin dir instead (see hasInitializedSubmodules). Reads
- * the index and the file system only: git never runs inside the nested
- * repository, whose config would decide what runs. A listing too large to
- * read fails, so the worktree counts as unreadable rather than clean.
- */
-async function hasEmbeddedRepositories(worktreePath: string): Promise<boolean> {
-  const result = await runGit(worktreePath, ['ls-files', '--stage', '-z'], {
-    maxBytes: GITLINK_SCAN_MAX_BYTES,
-  });
-  if (result.truncated) {
-    throw new GitCommandError('git ls-files output exceeded the cap', null, '');
-  }
-  for (const entry of result.stdout.split('\0')) {
-    // `<mode> <object> <stage>\t<path>`; gitlinks have mode 160000.
-    if (!entry.startsWith('160000 ')) continue;
-    const relPath = entry.slice(entry.indexOf('\t') + 1);
-    try {
-      if (
-        fs.lstatSync(path.join(worktreePath, relPath, '.git')).isDirectory()
-      ) {
-        return true;
-      }
-    } catch {
-      /* not checked out, or a submodule's .git file */
-    }
-  }
-  return false;
 }
 
 export type RemoveSessionWorktreeResult =
@@ -867,6 +1007,23 @@ export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
     ...(dirty.some((item) => item.embeddedRepos)
       ? ['包含嵌入的 git 仓库，删除会一并删除其中的提交和改动']
       : []),
+    ...(dirty.some((item) => item.detachedCommits)
+      ? ['HEAD 不在任何分支上，当前提交无法从分支或标签到达，删除后会丢失']
+      : []),
+    ...[
+      ...new Set(
+        dirty.flatMap((item) =>
+          item.operationInProgress ? [item.operationInProgress] : [],
+        ),
+      ),
+    ].map(
+      (operation) => `有进行中的 ${operation}，删除会丢失其状态和未完成的提交`,
+    ),
+    ...(dirty.some((item) => item.hiddenChanges)
+      ? [
+          '有标记为 skip-worktree 或 assume-unchanged 的文件，它们的改动不会显示在状态里',
+        ]
+      : []),
   ];
   return {
     error: `${owner}的 worktree ${reasons.join('；')}，确认后才会移除（分支会保留）`,
@@ -878,6 +1035,9 @@ export function dirtyWorktreesConflict(dirty: DirtyWorktree[]) {
       unreadable: item.unreadable,
       submodules: item.submodules,
       embedded_repos: item.embeddedRepos,
+      detached_commits: item.detachedCommits,
+      operation_in_progress: item.operationInProgress,
+      hidden_changes: item.hiddenChanges,
     })),
   };
 }
