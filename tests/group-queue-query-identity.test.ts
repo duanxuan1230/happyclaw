@@ -270,24 +270,16 @@ describe('GroupQueue query identity', () => {
     state.queryId = null;
 
     expect(
-      queue.sendMessage(
-        jid,
-        'forward root',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          chatJid: jid,
-          coveredCursors: [
-            { timestamp: '2026-08-14T00:00:00.000Z', id: 'om_root' },
-          ],
-          cursor: {
-            timestamp: '2026-08-14T00:00:00.000Z',
-            id: 'om_root',
-          },
+      queue.sendMessage(jid, 'forward root', undefined, undefined, undefined, {
+        chatJid: jid,
+        coveredCursors: [
+          { timestamp: '2026-08-14T00:00:00.000Z', id: 'om_root' },
+        ],
+        cursor: {
+          timestamp: '2026-08-14T00:00:00.000Z',
+          id: 'om_root',
         },
-      ),
+      }),
     ).toBe('sent');
     expect(queue.activeQueryExclusivelyCoversMessage(jid, 'om_root')).toBe(
       true,

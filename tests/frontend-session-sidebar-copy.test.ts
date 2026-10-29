@@ -53,6 +53,11 @@ describe('session sidebar copy', () => {
     expect(routes).not.toContain(
       'Native thread workspaces do not support manual sessions',
     );
-    expect(routes).toContain("source_kind: 'manual'");
+    // Sessions created from the Web are manual; the factory is shared with
+    // automation run sessions.
+    expect(routes).toContain('createConversationSession({');
+    expect(fs.readFileSync('src/session-factory.ts', 'utf8')).toContain(
+      "source_kind: input.sourceKind ?? 'manual'",
+    );
   });
 });

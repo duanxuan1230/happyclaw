@@ -91,7 +91,6 @@ function conversationInput(opts?: {
   chatJid?: string;
   turnId?: string;
   currentBatchMessageIds?: readonly string[];
-  isScheduledTask?: boolean;
   agentId?: string;
   groupFolder?: string;
 }) {
@@ -102,7 +101,6 @@ function conversationInput(opts?: {
     chatJid: opts?.chatJid ?? 'web:failover-keep-context',
     turnId: opts?.turnId ?? 'pending-now',
     currentBatchMessageIds: opts?.currentBatchMessageIds,
-    isScheduledTask: opts?.isScheduledTask,
     agentId: opts?.agentId,
     isMain: true,
   };
@@ -260,32 +258,5 @@ describe('provider failover keeps conversation context', () => {
     );
     expect(prepared.prompt).toBe(already);
     expect(prepared.sessionId).toBeUndefined();
-  });
-
-  test('isolated scheduled tasks drop resume without inheriting workspace chat', () => {
-    const chatJid = 'web:failover-scheduled';
-    persistTurn(
-      chatJid,
-      'ws-user',
-      '工作区闲聊不该进隔离任务',
-      false,
-      '2026-08-18T12:00:00.000Z',
-    );
-    const prepared = applyProviderSwitchToInput(
-      conversationInput({
-        chatJid,
-        prompt: '跑每日巡检',
-        isScheduledTask: true,
-      }),
-      {
-        profileId: created[1],
-        previousProviderId: created[0],
-        resetSession: true,
-      },
-      null,
-    );
-    expect(prepared.sessionId).toBeUndefined();
-    expect(prepared.prompt).toBe('跑每日巡检');
-    expect(prepared.prompt).not.toContain('工作区闲聊');
   });
 });

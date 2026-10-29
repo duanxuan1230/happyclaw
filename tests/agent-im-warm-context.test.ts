@@ -276,15 +276,11 @@ async function fixture(
     processingTypingLeaseIdsByCompletion: new Map(),
     processingIndicatorJidsByInput: new Map(),
     rememberScheduledGroupRuns: vi.fn(),
-    injectionTaskId: undefined,
+    messagesToSend: [],
     lastSourceJidForRoute: warm.sourceJid,
     invokeActiveRouteUpdater: vi.fn(),
     SAFE_REQUEST_ID_RE: /^[A-Za-z0-9-]+$/,
     verifyAndConsumeWorkspaceMemoryMutation,
-    resolveScheduledTaskIpcRunId: () => null,
-    extractDurableTaskRunIdFromNamespace: () => null,
-    getTaskRunById: () => undefined,
-    resolveBroadcastFolder: () => 'review',
     canAccessGroup: vi.fn(),
     isFeishuCapabilityMutation: () => false,
     imManager: {
@@ -344,7 +340,6 @@ async function fixture(
           undefined,
           globals.realMainInjected,
           warm.sourceJid,
-          undefined,
           globals.createIpcDeliveryTarget(),
           warm,
           (receipt) =>
@@ -865,7 +860,6 @@ test.each([false, true])(
           );
       },
       'web:review',
-      undefined,
       { chatJid: f.jid, cursor, coveredCursors: [cursor] },
       web,
       (receipt) =>

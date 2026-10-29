@@ -317,9 +317,7 @@ describe('WeCom host wiring', () => {
     );
     expect(branch).toContain('(streamingCardHandledIM && directImReply)');
     expect(branch).toContain('await persistUncertainStreamingDelivery({');
-    expect(branch).toContain(
-      'directImReply &&\n                    !skipImSend',
-    );
+    expect(branch).toContain('sendToIM: directImReply && !skipImSend');
   });
 
   test('conversation Agent finalizes an active session before considering static delivery', () => {

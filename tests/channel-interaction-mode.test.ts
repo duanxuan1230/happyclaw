@@ -56,20 +56,8 @@ describe('trusted source mount reply-mode contract', () => {
     expect(resolve('feishu:unknown')).toBe('proactive');
   });
 
-  test('spawn and isolated scheduled work retain assistant semantics', () => {
+  test('spawn work retains assistant semantics', () => {
     expect(resolve('feishu:other', 'spawn')).toBe('assistant');
-    expect(
-      resolveSourceInteractionMode(
-        {
-          workspaceFolder: 'home',
-          workspaceMode: 'proactive',
-          sourceJid: 'feishu:other',
-          agentKind: 'main',
-          scheduledTask: true,
-        },
-        deps,
-      ),
-    ).toBe('assistant');
   });
 
   test('mixed Home inputs are consumed as contiguous mode-compatible batches, preserving every suffix', () => {

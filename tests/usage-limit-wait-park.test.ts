@@ -259,8 +259,8 @@ function lane(kind: 'main' | 'agent') {
     chatJid,
     agentId: kind === 'main' ? null : agentId,
     inbound: (id: string) => store_(id),
-    scheduledPrompt: (id: string) =>
-      store_(id, { sourceKind: 'scheduled_task_prompt', taskId: 'task-1' }),
+    automationInput: (id: string) =>
+      store_(id, { sourceKind: 'automation_prompt', automationRunId: 'run-1' }),
     /** The input `id` and everything before it were answered. */
     answeredThrough(id: string) {
       const cursor = db.getMessageCursor(jid, id);
@@ -302,7 +302,7 @@ afterEach(() => wait.bindUsageLimitWaitHost(null));
 
 describe('both conversation loops honour a waiting lane', () => {
   test.each(['main', 'agent'] as const)(
-    '%s: parked input stays put; a scheduled prompt joins it; new input brings all back in one batch',
+    '%s: parked input stays put; an automation input joins it; new input brings the user inputs back',
     async (kind) => {
       const l = lane(kind);
       l.inbound('m1');
@@ -313,7 +313,7 @@ describe('both conversation loops honour a waiting lane', () => {
       // The retry after the failed run finds nothing to run.
       expect(await l.round()).toBeNull();
 
-      l.scheduledPrompt('t1');
+      l.automationInput('t1');
       expect(await l.round()).toBeNull();
       expect(l.queued()).toEqual([
         ['m2', 'usage-limit:m2'],
@@ -325,9 +325,10 @@ describe('both conversation loops honour a waiting lane', () => {
 
       l.inbound('m4');
       const batch = await l.round();
-      expect(batch?.slice(0, 2)).toEqual(['m2', 'm3']);
-      expect(batch).toContain('m4');
-      expect(l.queued()).toEqual([]);
+      // The automation input is a turn of its own: it never joins the
+      // released user messages and stays queued for the next turn.
+      expect(batch).toEqual(['m2', 'm3', 'm4']);
+      expect(l.queued()).toEqual([['t1', 'usage-limit:m2']]);
       expect(store.getUsageLimitWait(l.jid)).toMatchObject({
         state: 'resumed',
         waitCount: 1,

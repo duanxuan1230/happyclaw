@@ -315,7 +315,7 @@ describe('refused card body fallback (outbound P1-4, cross-review M3; loop wirin
     // channel-delivery-failure.test.ts against the real card error.
     const mainBranch = between(
       'const refusedCardStaticText = pendingStreamingCardCompleted',
-      '// Channel bindings do not subscribe to other inputs',
+      '// A quiet automation run that escalated mid-turn',
     );
     expect(mainBranch).toContain(
       'feishuCardStaticFallbackText(cardFinalization.error)',

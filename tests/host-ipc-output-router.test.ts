@@ -18,16 +18,8 @@ describe('host IPC primary output routing', () => {
         sourceChatJid: 'feishu:oc_chat#thread:omt_topic#root:om_root',
         agentId: 'conversation-agent',
         agentChatJid: 'web:main',
-        scheduledTask: false,
       }),
     ).toBe('web:main#agent:conversation-agent');
-    expect(
-      resolveHostIpcLogicalChatJid({
-        sourceChatJid: 'web:workspace',
-        taskRunId: 'task-run-1',
-        scheduledTask: true,
-      }),
-    ).toBe('web:workspace#task:task-run-1');
   });
 
   test('attributes a bound IM chat output to its workspace, not the IM row', () => {
@@ -40,25 +32,15 @@ describe('host IPC primary output routing', () => {
     expect(
       resolveHostIpcLogicalChatJid({
         sourceChatJid: 'qq:c2c:CHAT_A',
-        scheduledTask: false,
         resolveWorkspaceJid,
       }),
     ).toBe('web:ws-b');
-    expect(
-      resolveHostIpcLogicalChatJid({
-        sourceChatJid: 'qq:c2c:CHAT_A',
-        taskRunId: 'task-run-2',
-        scheduledTask: true,
-        resolveWorkspaceJid,
-      }),
-    ).toBe('web:ws-b#task:task-run-2');
     // An explicit agent JID still wins over the folded source.
     expect(
       resolveHostIpcLogicalChatJid({
         sourceChatJid: 'qq:c2c:CHAT_A',
         agentId: 'agent-1',
         agentChatJid: 'web:ws-c',
-        scheduledTask: false,
         resolveWorkspaceJid,
       }),
     ).toBe('web:ws-c#agent:agent-1');
@@ -68,7 +50,6 @@ describe('host IPC primary output routing', () => {
     expect(
       resolveHostIpcLogicalChatJid({
         sourceChatJid: 'qq:c2c:CHAT_UNBOUND',
-        scheduledTask: false,
         resolveWorkspaceJid: () => null,
       }),
     ).toBe('qq:c2c:CHAT_UNBOUND');
@@ -76,7 +57,6 @@ describe('host IPC primary output routing', () => {
     expect(
       resolveHostIpcLogicalChatJid({
         sourceChatJid: 'qq:c2c:CHAT_UNBOUND',
-        scheduledTask: false,
       }),
     ).toBe('qq:c2c:CHAT_UNBOUND');
   });
@@ -88,13 +68,11 @@ describe('host IPC primary output routing', () => {
     const reboundWorkspace = () => 'web:ws-b';
     const delayedTextJid = resolveHostIpcLogicalChatJid({
       sourceChatJid: 'qq:c2c:CHAT_A',
-      scheduledTask: false,
       runtimeChatJid: 'web:ws-a',
       resolveWorkspaceJid: reboundWorkspace,
     });
     const delayedImageJid = resolveHostIpcLogicalChatJid({
       sourceChatJid: 'qq:c2c:CHAT_A',
-      scheduledTask: false,
       runtimeChatJid: 'web:ws-a',
       resolveWorkspaceJid: reboundWorkspace,
     });
@@ -126,7 +104,6 @@ describe('host IPC primary output routing', () => {
         text: '最终调研报告',
         deliveryRole: 'final',
         authorized: true,
-        scheduledTask: false,
       },
       activeTurnOutputs,
     );
@@ -158,7 +135,6 @@ describe('host IPC primary output routing', () => {
         text: '迟到的答案',
         deliveryRole: 'final',
         authorized: true,
-        scheduledTask: false,
       },
       activeTurnOutputs,
     );
@@ -178,22 +154,9 @@ describe('host IPC primary output routing', () => {
     expect(sendImWithRetry).not.toHaveBeenCalled();
   });
 
-  test('keeps scheduled and explicitly separate output on the provider lane', () => {
+  test('keeps explicitly separate output on the provider lane', () => {
     const activeTurnOutputs = new ActiveTurnOutputRegistry();
 
-    expect(
-      routeHostIpcOutput(
-        {
-          sourceGroup: 'workspace',
-          inputTurnId: 'turn-1',
-          text: '定时任务通知',
-          deliveryRole: 'final',
-          authorized: true,
-          scheduledTask: true,
-        },
-        activeTurnOutputs,
-      ).path,
-    ).toBe('separate_provider');
     expect(
       routeHostIpcOutput(
         {
@@ -202,7 +165,6 @@ describe('host IPC primary output routing', () => {
           text: '额外通知',
           deliveryRole: 'separate',
           authorized: true,
-          scheduledTask: false,
         },
         activeTurnOutputs,
       ).path,
@@ -231,7 +193,6 @@ describe('host IPC primary output routing', () => {
           text: 'progress utterance',
           deliveryRole: 'progress',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'proactive',
           turnSource: 'web',
         },
@@ -256,7 +217,6 @@ describe('host IPC primary output routing', () => {
           text: 'final utterance',
           deliveryRole: 'final',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'proactive',
           turnSource: 'web',
         },
@@ -296,7 +256,6 @@ describe('host IPC primary output routing', () => {
             text: '正在查看日志',
             deliveryRole: 'progress',
             authorized: true,
-            scheduledTask: false,
             interactionMode: 'proactive',
             turnSource,
             imRouteAvailable: true,
@@ -336,7 +295,6 @@ describe('host IPC primary output routing', () => {
           text: '正在查看日志',
           deliveryRole: 'progress',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'proactive',
           turnSource: activeTurnOutputs.sourceOf(
             channelTurnScope('workspace'),
@@ -398,7 +356,6 @@ describe('host IPC primary output routing', () => {
           text: '正在处理',
           deliveryRole: 'progress',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'assistant',
           turnSource: 'im',
         },
@@ -433,7 +390,6 @@ describe('host IPC primary output routing', () => {
           text: '先看一下',
           deliveryRole: 'progress',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'proactive',
           turnSource,
           imRouteAvailable: true,
@@ -475,7 +431,6 @@ describe('host IPC primary output routing', () => {
         text: '准确的完整总结正文',
         deliveryRole: 'final',
         authorized: true,
-        scheduledTask: false,
         interactionMode: 'proactive',
       },
       activeTurnOutputs,
@@ -515,7 +470,6 @@ describe('host IPC primary output routing', () => {
           text: '第一份 final',
           deliveryRole: 'final',
           authorized: true,
-          scheduledTask: false,
           interactionMode: 'proactive',
         },
         activeTurnOutputs,
@@ -533,7 +487,6 @@ describe('host IPC primary output routing', () => {
         text: '第二份不同 final',
         deliveryRole: 'final',
         authorized: true,
-        scheduledTask: false,
         interactionMode: 'proactive',
       },
       activeTurnOutputs,

@@ -14,11 +14,11 @@ function read(relativePath: string): string {
  * new session needs is injected beforehand.
  */
 describe('Agent model runtime contracts', () => {
-  test('conversations and isolated scheduled tasks hand the Agent model to the runner', () => {
+  test('conversations hand the Agent model to the runner', () => {
     expect(read('src/runner-agent-profile.ts')).toMatch(
       /function toRunnerAgentProfile[\s\S]*?modelConfigId: profile\.model_config_id,\s*model: profile\.model,/,
     );
-    for (const caller of ['src/index.ts', 'src/task-scheduler.ts']) {
+    for (const caller of ['src/index.ts']) {
       expect(read(caller)).toContain('toRunnerAgentProfile(');
     }
   });

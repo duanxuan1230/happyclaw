@@ -28,12 +28,6 @@ describe('workspace interaction runtime policy', () => {
     expect(
       resolveRuntimeInteractionMode('proactive', { agentKind: 'spawn' }),
     ).toBe('assistant');
-    expect(
-      resolveRuntimeInteractionMode('proactive', {
-        agentKind: 'main',
-        scheduledTask: true,
-      }),
-    ).toBe('assistant');
   });
 
   test('assistant publishes framework answers while proactive uses native messages', () => {
@@ -157,7 +151,6 @@ describe('workspace interaction runtime policy', () => {
   test('uses the IPC-file mode frozen before a workspace mode switch', () => {
     expect(
       resolveFrozenIpcInteractionMode('proactive', {
-        scheduledTask: false,
         spawnAgent: false,
       }),
     ).toEqual({
@@ -167,7 +160,6 @@ describe('workspace interaction runtime policy', () => {
     });
     expect(
       resolveFrozenIpcInteractionMode('persona', {
-        scheduledTask: false,
         spawnAgent: false,
       }),
     ).toEqual({
@@ -177,7 +169,6 @@ describe('workspace interaction runtime policy', () => {
     });
     expect(
       resolveFrozenIpcInteractionMode(undefined, {
-        scheduledTask: false,
         spawnAgent: false,
       }),
     ).toEqual({
@@ -187,7 +178,6 @@ describe('workspace interaction runtime policy', () => {
     });
     expect(
       resolveFrozenIpcInteractionMode('malformed', {
-        scheduledTask: false,
         spawnAgent: false,
       }),
     ).toMatchObject({ mode: 'assistant', valid: false });
@@ -208,22 +198,14 @@ describe('workspace interaction runtime policy', () => {
     expect(watcher).not.toContain('getWorkspaceInteractionMode');
   });
 
-  test('scheduled and spawn IPC can never opt into proactive delivery', () => {
+  test('spawn IPC can never opt into proactive delivery', () => {
     expect(
       resolveFrozenIpcInteractionMode('proactive', {
-        scheduledTask: true,
-        spawnAgent: false,
-      }).mode,
-    ).toBe('assistant');
-    expect(
-      resolveFrozenIpcInteractionMode('proactive', {
-        scheduledTask: false,
         spawnAgent: true,
       }).mode,
     ).toBe('assistant');
     expect(
       resolveFrozenIpcInteractionMode('persona', {
-        scheduledTask: false,
         spawnAgent: true,
       }).mode,
     ).toBe('assistant');

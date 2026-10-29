@@ -863,9 +863,7 @@ describe('DingTalk production host wiring', () => {
     expect(branch).toContain(
       'const cardBodyRejected = refusedCardStaticText !== undefined;',
     );
-    expect(branch).toContain(
-      'directImReply &&\n                    !skipImSend',
-    );
+    expect(branch).toContain('sendToIM: directImReply && !skipImSend');
   });
 
   test('conversation Agent finalizes before its exact static fallback gate', () => {
