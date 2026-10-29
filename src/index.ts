@@ -11200,7 +11200,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     if (channelTurnRuntimes.size > 0) {
       const explicitDiscard =
-        queue.getRecentStopDisposition(effectiveGroup.folder) === 'discard';
+        queue.getRecentStopDisposition(chatJid) === 'discard';
       for (const [inputTurnId, runtime] of channelTurnRuntimes) {
         const utteranceDelivered =
           channelPhysicalDeliveryAckByInput.get(inputTurnId) === true;
@@ -11424,7 +11424,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return channelManualNoticesAcknowledged && activeCursorCommitted;
   }
   if (!output) {
-    if (queue.getRecentStopDisposition(effectiveGroup.folder) === 'discard') {
+    if (queue.getRecentStopDisposition(chatJid) === 'discard') {
       await projectCurrentScheduledGroupTerminal(
         'cancelled',
         '定时任务已被用户停止，未继续执行。',
@@ -11452,7 +11452,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return activeCursorCommitted;
   }
 
-  const stopDisposition = queue.getRecentStopDisposition(effectiveGroup.folder);
+  const stopDisposition = queue.getRecentStopDisposition(chatJid);
   if (stopDisposition === 'discard') {
     await projectCurrentScheduledGroupTerminal(
       'cancelled',
@@ -11796,7 +11796,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // 让容器以 137 退出。如果用户刚点过 stop（GroupQueue.isRecentlyStopped），
     // 不要把这次退出计入 OOM 计数 —— 否则连续两次手动 stop 就会触发会话重置
     // 并显示『内存溢出』提示，混淆运维。
-    const isUserStopped = queue.isRecentlyStopped(effectiveGroup.folder);
+    const isUserStopped = queue.isRecentlyStopped(chatJid);
     const isOom = !isUserStopped && OOM_EXIT_RE.test(errorDetail);
     if (isOom) {
       const folder = effectiveGroup.folder;
@@ -20334,9 +20334,7 @@ async function processAgentConversation(
       commitCursor();
     }
 
-    const stopDisposition = queue.getRecentStopDisposition(
-      effectiveGroup.folder,
-    );
+    const stopDisposition = queue.getRecentStopDisposition(virtualChatJid);
     if (stopDisposition === 'discard') {
       const turnOutcome = resolveTurnOutcome({
         status: output.status,
@@ -20385,7 +20383,7 @@ async function processAgentConversation(
     // stopGroup may terminate the child before runContainerAgent can return a
     // terminal ContainerOutput. Preserve ordinary Stop's discard contract even
     // on that throw path; mutation-preserve stops deliberately keep the cursor.
-    if (queue.getRecentStopDisposition(effectiveGroup.folder) === 'discard') {
+    if (queue.getRecentStopDisposition(virtualChatJid) === 'discard') {
       commitCursor();
     } else if (interactionMode === 'proactive') {
       const utteranceDelivered =
@@ -20510,7 +20508,7 @@ async function processAgentConversation(
     if (agentChannelTurnRuntimes.size > 0) {
       let allAgentManualNoticesAcknowledged = true;
       const explicitDiscard =
-        queue.getRecentStopDisposition(effectiveGroup.folder) === 'discard';
+        queue.getRecentStopDisposition(virtualChatJid) === 'discard';
       for (const [inputTurnId, runtime] of agentChannelTurnRuntimes) {
         const utteranceDelivered =
           agentPhysicalDeliveryAckByInput.get(inputTurnId) === true;

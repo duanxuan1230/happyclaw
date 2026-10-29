@@ -995,7 +995,15 @@ export type RemoveSessionWorktreeResult =
  */
 export async function removeSessionWorktree(
   agentId: string,
-  options: { force?: boolean } = {},
+  options: {
+    force?: boolean;
+    /**
+     * Keep the record, marked broken, for a caller that deletes the session
+     * afterwards and then calls forgetSessionWorktree: if that fails midway,
+     * the session still cannot run, in particular not in the main checkout.
+     */
+    keepRecord?: boolean;
+  } = {},
 ): Promise<RemoveSessionWorktreeResult | null> {
   const worktree = getSessionWorktree(agentId);
   if (!worktree) return null;
@@ -1004,12 +1012,21 @@ export async function removeSessionWorktree(
     if (risk) return { removed: false, risk };
   }
   await detachWorktreeDirectory(worktree.repo_path, worktree.worktree_path);
-  deleteSessionWorktreeRecord(agentId);
+  if (options.keepRecord) {
+    markSessionWorktreeBroken(agentId, 'worktree removed with its session');
+  } else {
+    deleteSessionWorktreeRecord(agentId);
+  }
   logger.info(
     { agentId, worktreePath: worktree.worktree_path, branch: worktree.branch },
     'Session worktree removed; branch kept',
   );
   return { removed: true, branch: worktree.branch };
+}
+
+/** Drop the record removeSessionWorktree kept once its session is gone. */
+export function forgetSessionWorktree(agentId: string): void {
+  deleteSessionWorktreeRecord(agentId);
 }
 
 /** The 409 body of an operation refused because worktrees could lose work. */

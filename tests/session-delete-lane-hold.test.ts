@@ -53,6 +53,7 @@ vi.mock('../src/web.js', () => ({
 
 const db = await import('../src/db.js');
 const store = await import('../src/session-worktree-store.js');
+const worktrees = await import('../src/session-worktree.js');
 const webContext = await import('../src/web-context.js');
 const { GroupQueue } = await import('../src/group-queue.js');
 const agentRoutes = (await import('../src/routes/agents.js')).default;
@@ -112,8 +113,10 @@ async function workspace() {
   const runs: string[] = [];
   /** A lane whose next run stays up until the queue closes it. */
   const busy = new Map<string, { exited: ReturnType<typeof deferred> }>();
+  const runHooks: Array<(groupJid: string) => void> = [];
   queue.setProcessMessagesFn(async (groupJid: string) => {
     runs.push(groupJid);
+    for (const hook of runHooks) hook(groupJid);
     const hold = busy.get(groupJid);
     if (hold) {
       busy.delete(groupJid);
@@ -155,10 +158,21 @@ async function workspace() {
     const id = ((await response.json()) as any).session.id as string;
     return { id, lane: `${jid}#agent:${id}` };
   };
-  const deleteSession = (sessionId: string) =>
-    agentRoutes.request(`/${encodeURIComponent(jid)}/sessions/${sessionId}`, {
+  const deleteSession = (
+    sessionId: string,
+    route: 'sessions' | 'agents' = 'sessions',
+  ) =>
+    agentRoutes.request(`/${encodeURIComponent(jid)}/${route}/${sessionId}`, {
       method: 'DELETE',
     });
+  /** Start a run on `lane` that lasts until `exit` resolves. */
+  const keepBusyUntil = async (lane: string, exit: Promise<void>) => {
+    const exited = deferred();
+    busy.set(lane, { exited });
+    void exit.then(exited.resolve);
+    queue.enqueueMessageCheck(lane);
+    await settle();
+  };
   /** Start a run on `lane` that lasts until the queue closes it. */
   const keepBusy = async (lane: string, onStop: () => void = () => {}) => {
     const exited = deferred();
@@ -179,6 +193,9 @@ async function workspace() {
     createSession,
     deleteSession,
     keepBusy,
+    keepBusyUntil,
+    onRun: (hook: (groupJid: string) => void) => runHooks.push(hook),
+    onClose: (lane: string, hook: () => void) => onClose.set(lane, hook),
   };
 }
 
@@ -231,34 +248,37 @@ describe('deleting a worktree session holds only its own lane', () => {
     expect(ws.runs.sort()).toEqual([ws.jid, other.lane].sort());
   });
 
-  test('a delete refused after the stop releases the lane with its work', async () => {
-    const ws = await workspace();
-    const session = await ws.createSession();
-    const worktree = store.getSessionWorktree(session.id)!;
-    // Clean at the first check; the runner's last write lands as it stops.
-    await ws.keepBusy(session.lane, () => {
-      fs.writeFileSync(path.join(worktree.worktree_path, 'late.txt'), 'x\n');
-    });
-    ws.runs.length = 0;
+  test.each(['sessions', 'agents'] as const)(
+    'a delete through /%s refused after the stop releases the lane with its work',
+    async (route) => {
+      const ws = await workspace();
+      const session = await ws.createSession();
+      const worktree = store.getSessionWorktree(session.id)!;
+      // Clean at the first check; the runner's last write lands as it stops.
+      await ws.keepBusy(session.lane, () => {
+        fs.writeFileSync(path.join(worktree.worktree_path, 'late.txt'), 'x\n');
+      });
+      ws.runs.length = 0;
 
-    const refused = await ws.deleteSession(session.id);
-    expect(refused.status).toBe(409);
-    await settle();
-    expect(db.getAgent(session.id)).toBeDefined();
-    expect(fs.existsSync(path.join(worktree.worktree_path, 'late.txt'))).toBe(
-      true,
-    );
-    // The interrupted input waited and runs again once the lane is released;
-    // nothing was discarded.
-    expect(ws.runs).toEqual([session.lane]);
-    expect(ws.discarded).toEqual([]);
+      const refused = await ws.deleteSession(session.id, route);
+      expect(refused.status).toBe(409);
+      await settle();
+      expect(db.getAgent(session.id)).toBeDefined();
+      expect(fs.existsSync(path.join(worktree.worktree_path, 'late.txt'))).toBe(
+        true,
+      );
+      // The interrupted input waited and runs again once the lane is released;
+      // nothing was discarded.
+      expect(ws.runs).toEqual([session.lane]);
+      expect(ws.discarded).toEqual([]);
 
-    ws.runs.length = 0;
-    ws.queue.enqueueMessageCheck(session.lane);
-    ws.queue.enqueueMessageCheck(ws.jid);
-    await settle();
-    expect(ws.runs.sort()).toEqual([session.lane, ws.jid].sort());
-  });
+      ws.runs.length = 0;
+      ws.queue.enqueueMessageCheck(session.lane);
+      ws.queue.enqueueMessageCheck(ws.jid);
+      await settle();
+      expect(ws.runs.sort()).toEqual([session.lane, ws.jid].sort());
+    },
+  );
 
   test('a delete that fails after the worktree is gone still releases the lane', async () => {
     const ws = await workspace();
@@ -275,13 +295,71 @@ describe('deleting a worktree session holds only its own lane', () => {
     } finally {
       failing.mockRestore();
     }
-    expect(store.getSessionWorktree(session.id)).toBeUndefined();
+    // The session row survived but its worktree is gone: it can no longer
+    // run anywhere, least of all in the main checkout.
+    expect(db.getAgent(session.id)).toBeDefined();
+    expect(worktrees.resolveSessionWorkingDirectory(session.id)).toMatchObject({
+      kind: 'broken',
+    });
     // The lane is not left held: it was dropped like a deleted session's.
     expect(ws.discarded).toContain(session.lane);
     expect(ws.queue.isGroupMutationPaused(session.lane)).toBe(false);
     ws.queue.enqueueMessageCheck(ws.jid);
     await settle();
     expect(ws.runs).toContain(ws.jid);
+
+    // Deleting again finishes the job.
+    expect((await ws.deleteSession(session.id)).status).toBe(200);
+    expect(db.getAgent(session.id)).toBeUndefined();
+    expect(store.getSessionWorktree(session.id)).toBeUndefined();
+  });
+
+  test('a stop that fails releases the lane with the session intact', async () => {
+    const ws = await workspace();
+    const session = await ws.createSession();
+    vi.spyOn(ws.queue, 'stopGroup').mockRejectedValueOnce(
+      new Error('runner would not stop'),
+    );
+    const failed = await ws.deleteSession(session.id, 'agents');
+    expect(failed.status).toBe(500);
+    expect(((await failed.json()) as any).code).toBe('WORKTREE_REMOVE_FAILED');
+    expect(db.getAgent(session.id)).toBeDefined();
+    expect(store.getSessionWorktree(session.id)?.status).toBe('active');
+    expect(ws.queue.isGroupMutationPaused(session.lane)).toBe(false);
+    expect(ws.discarded).toEqual([]);
+    ws.queue.enqueueMessageCheck(session.lane);
+    await settle();
+    expect(ws.runs).toEqual([session.lane]);
+  });
+
+  test('the main session finishing its turn during the hold drains its queue at once', async () => {
+    const ws = await workspace();
+    const session = await ws.createSession();
+    const mainExit = deferred();
+    const sessionExit = deferred();
+    await ws.keepBusyUntil(ws.jid, mainExit.promise);
+    await ws.keepBusyUntil(session.lane, sessionExit.promise);
+    // Asked to close, the session's runner keeps going until main has run
+    // again: a follow-up for main queued behind its busy runner, whose turn
+    // then ended while the session's lane is held.
+    ws.onClose(session.lane, () => {
+      ws.queue.enqueueMessageCheck(ws.jid);
+      mainExit.resolve();
+    });
+    let heldWhenMainRan: boolean | undefined;
+    ws.onRun((jid) => {
+      if (jid !== ws.jid) return;
+      heldWhenMainRan = ws.queue.isGroupMutationPaused(session.lane);
+      sessionExit.resolve();
+    });
+    const fallback = setTimeout(() => sessionExit.resolve(), 2000);
+    ws.runs.length = 0;
+
+    const deleted = await ws.deleteSession(session.id);
+    clearTimeout(fallback);
+    expect(deleted.status).toBe(200);
+    expect(heldWhenMainRan).toBe(true);
+    expect(ws.runs).toEqual([ws.jid]);
   });
 });
 
