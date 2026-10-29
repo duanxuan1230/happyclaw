@@ -290,6 +290,11 @@ export class GroupQueue {
   private nextMutationPauseTokenId = 1;
   private mutationPreserveStopJids = new Set<string>();
   private mutationStoppedFolders = new Set<string>();
+  /**
+   * Exact lanes held by holdLane(), each with the folders its stops marked.
+   * Unlike a mutation pause this holds one lane, never its workspace family.
+   */
+  private heldLanes = new Map<string, Set<string>>();
   // 记录最近一次 stopGroup 的时间戳（毫秒）。runForGroup finally 块会用它来
   // 决定是否跳过自动 drainGroup —— stopGroup 中清空 pendingMessages 之后，
   // hasIpcInjectedMessages 重新置 pendingMessages=true，会让用户的 'stop' 之后
@@ -426,6 +431,7 @@ export class GroupQueue {
   }
 
   private isMutationPaused(groupJid: string): boolean {
+    if (this.heldLanes.has(groupJid)) return true;
     const key = this.getMutationPauseKey(groupJid);
     const paused =
       (this.mutationPauseCounts.get(key) ?? 0) > 0 ||
@@ -556,6 +562,71 @@ export class GroupQueue {
     return token;
   }
 
+  /**
+   * Hold one lane (a Runtime Session being deleted) without pausing its
+   * workspace: the lane's queued and newly arriving work waits instead of
+   * starting a runner, and stopGroup(..., { preserveQueuedWork: true }) keeps
+   * it, while the main session and the other sessions keep running.
+   */
+  holdLane(groupJid: string): void {
+    if (!this.heldLanes.has(groupJid)) this.heldLanes.set(groupJid, new Set());
+  }
+
+  /** Release a held lane as it was: its waiting work runs. */
+  releaseLane(groupJid: string): void {
+    if (!this.releaseLaneHold(groupJid)) return;
+    const state = this.groups.get(groupJid);
+    if (state && (state.pendingMessages || state.pendingTasks.length > 0)) {
+      this.waitingGroups.add(groupJid);
+    }
+    this.drainWaiting();
+  }
+
+  /**
+   * A held lane's session is gone: drop its work and run its discard hook
+   * (ending a usage-limit wait, cancelling parked input), as a plain stop does.
+   */
+  discardHeldLane(groupJid: string): void {
+    if (!this.releaseLaneHold(groupJid)) return;
+    this.discardLaneWork(groupJid, this.getGroup(groupJid));
+  }
+
+  private releaseLaneHold(groupJid: string): boolean {
+    const folders = this.heldLanes.get(groupJid);
+    if (!folders) return false;
+    this.heldLanes.delete(groupJid);
+    this.mutationPreserveStopJids.delete(groupJid);
+    // The stop's markers outlive it only where a workspace mutation still
+    // holds the folder; otherwise the lane's next runner starts afresh.
+    for (const folder of folders) {
+      if (this.mutationPauseCounts.has(folder)) continue;
+      this.mutationStoppedFolders.delete(folder);
+      this.recentlyStoppedFolders.delete(folder);
+    }
+    return true;
+  }
+
+  /** Drop a lane's queued work and run its discard hook, as stopGroup does. */
+  private discardLaneWork(groupJid: string, state: GroupState): void {
+    state.pendingMessages = false;
+    this.discardPendingTasks(state, groupJid);
+    this.clearRetryTimer(state);
+    this.waitingGroups.delete(groupJid);
+    try {
+      this.abandonUnacknowledgedIpcDeliveries(groupJid, state);
+    } catch (err) {
+      logger.error(
+        { groupJid, err },
+        'Failed to abandon IPC deliveries of a discarded lane',
+      );
+    }
+    try {
+      this.onLaneDiscardedFn?.(groupJid);
+    } catch (err) {
+      logger.error({ groupJid, err }, 'onLaneDiscarded callback failed');
+    }
+  }
+
   /** Release one mutation pause and drain work whose final pause was removed. */
   resumeGroupsAfterMutation(token: MutationPauseToken): void {
     const keys = this.mutationPauseTokens.get(token.id);
@@ -641,10 +712,7 @@ export class GroupQueue {
           'discardGroupsAfterMutation found an active runner; caller should stop the family first',
         );
       }
-      state.pendingMessages = false;
-      this.discardPendingTasks(state, jid);
-      this.clearRetryTimer(state);
-      this.waitingGroups.delete(jid);
+      this.discardLaneWork(jid, state);
       this.mutationPreserveStopJids.delete(jid);
     }
 
@@ -2745,6 +2813,7 @@ export class GroupQueue {
     if (requestedState.groupFolder) {
       if (preserveQueuedWork) {
         this.mutationStoppedFolders.add(requestedState.groupFolder);
+        this.heldLanes.get(groupJid)?.add(requestedState.groupFolder);
       } else {
         this.mutationStoppedFolders.delete(requestedState.groupFolder);
       }
@@ -2770,6 +2839,7 @@ export class GroupQueue {
     if (state.groupFolder) {
       if (preserveQueuedWork) {
         this.mutationStoppedFolders.add(state.groupFolder);
+        this.heldLanes.get(groupJid)?.add(state.groupFolder);
       } else {
         this.mutationStoppedFolders.delete(state.groupFolder);
       }

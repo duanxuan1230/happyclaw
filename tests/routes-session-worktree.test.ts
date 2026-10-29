@@ -181,6 +181,10 @@ beforeEach(() => {
       pauseGroupsForMutation: () => ({ id: 1 }),
       resumeGroupsAfterMutation: vi.fn(),
       discardGroupsAfterMutation: vi.fn(),
+      // A real GroupQueue holds lanes in session-delete-lane-hold.test.ts.
+      holdLane: vi.fn(),
+      releaseLane: vi.fn(),
+      discardHeldLane: vi.fn(),
     },
   } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
 });
@@ -851,53 +855,6 @@ describe('deleting worktree sessions', () => {
           ),
         ).toBe(true);
       }
-    },
-  );
-
-  test.each([
-    ['sessions', 'sessions'],
-    ['the legacy /agents alias', 'agents'],
-  ] as const)(
-    'deleting a session through %s leaves it whole when the second check refuses',
-    async (_label, segment) => {
-      const repo = makeRepo();
-      const { jid } = seedWorkspace({ executionMode: 'host', customCwd: repo });
-      const sessionId = (await createSession(jid, { worktree: true })).body
-        .session.id as string;
-      const worktree = store.getSessionWorktree(sessionId)!;
-      const queue = webContext.getWebDeps()!.queue as any;
-      const url = `/${enc(jid)}/${segment}/${sessionId}`;
-
-      // Clean at the first check; the runner writes while it is stopped.
-      stopGroup.mockImplementationOnce(async () => {
-        fs.writeFileSync(path.join(worktree.worktree_path, 'late'), 'x\n');
-      });
-      const refused = await call(agentRoutes, url, { method: 'DELETE' });
-      expect(refused.status).toBe(409);
-      expect(stopGroup).toHaveBeenCalledTimes(1);
-      expect(stopGroup).toHaveBeenCalledWith(`${jid}#agent:${sessionId}`, {
-        force: true,
-        preserveQueuedWork: true,
-      });
-      expect(queue.resumeGroupsAfterMutation).toHaveBeenCalledTimes(1);
-      expect(queue.discardGroupsAfterMutation).not.toHaveBeenCalled();
-      expect(db.getAgent(sessionId)).toMatchObject({ status: 'idle' });
-
-      // The stop itself failing leaves it whole too.
-      fs.rmSync(path.join(worktree.worktree_path, 'late'));
-      stopGroup.mockRejectedValueOnce(new Error('runner would not stop'));
-      const failed = await call(agentRoutes, url, { method: 'DELETE' });
-      expect(failed.status).toBe(500);
-      expect(failed.body.code).toBe('WORKTREE_REMOVE_FAILED');
-      expect(queue.resumeGroupsAfterMutation).toHaveBeenCalledTimes(2);
-      expect(db.getAgent(sessionId)).toMatchObject({ status: 'idle' });
-
-      const forced = await call(agentRoutes, `${url}?force_worktree=true`, {
-        method: 'DELETE',
-      });
-      expect(forced.status).toBe(200);
-      expect(db.getAgent(sessionId)).toBeUndefined();
-      expect(queue.discardGroupsAfterMutation).toHaveBeenCalledTimes(1);
     },
   );
 });

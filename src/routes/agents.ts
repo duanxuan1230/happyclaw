@@ -457,11 +457,12 @@ async function checkWorktreeBeforeDelete(
 /**
  * Remove a deleted session's worktree, keeping its branch. The runner is
  * stopped first so nothing writes into the checkout while it is checked
- * again and removed, but under a mutation pause that keeps the session's
- * queued work: when the removal is refused (409, work found after the runner
- * stopped) or fails (500), the session is left as it was and its queue
- * resumes. Otherwise the caller deletes the session and then calls `finish`,
- * which drops the work the pause kept.
+ * again and removed, with only this session's lane held (never the
+ * workspace's main session or other sessions) and its queued work kept:
+ * when the removal is refused (409, work found after the runner stopped) or
+ * fails (500), the lane is released as it was. Otherwise the caller deletes
+ * the session and then calls `finish` on every path, which drops the lane's
+ * work and runs its discard hook.
  */
 async function releaseSessionWorktree(
   c: Context<{ Variables: Variables }>,
@@ -470,9 +471,9 @@ async function releaseSessionWorktree(
   if (!getSessionWorktree(input.sessionId)) return { finish: () => {} };
   const queue = getWebDeps()?.queue;
   const laneJid = `${input.jid}#agent:${input.sessionId}`;
-  const pause = queue?.pauseGroupsForMutation([laneJid]);
+  queue?.holdLane(laneJid);
   const refuse = (refusal: Response) => {
-    if (pause) queue!.resumeGroupsAfterMutation(pause);
+    queue?.releaseLane(laneJid);
     return { refusal };
   };
   try {
@@ -498,11 +499,7 @@ async function releaseSessionWorktree(
       ),
     );
   }
-  return {
-    finish: () => {
-      if (pause) queue!.discardGroupsAfterMutation(pause);
-    },
-  };
+  return { finish: () => queue?.discardHeldLane(laneJid) };
 }
 
 // POST /api/groups/:jid/agents — create a user conversation
@@ -913,59 +910,63 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     force: forceWorktree,
   });
   if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
-
-  // If the agent is still running or idle, stop the process
-  if (agent.status === 'running' || agent.status === 'idle') {
-    updateAgentStatus(agentId, 'error', '用户手动停止');
-    // Stop running process via queue
-    const deps = getWebDeps();
-    if (deps) {
-      const virtualJid = `${jid}#agent:${agentId}`;
-      deps.queue.stopGroup(virtualJid);
+  try {
+    // If the agent is still running or idle, stop the process
+    if (agent.status === 'running' || agent.status === 'idle') {
+      updateAgentStatus(agentId, 'error', '用户手动停止');
+      // Stop running process via queue
+      const deps = getWebDeps();
+      if (deps) {
+        const virtualJid = `${jid}#agent:${agentId}`;
+        deps.queue.stopGroup(virtualJid);
+      }
     }
+
+    // Clean up IPC/session directories
+    const agentIpcDir = path.join(
+      DATA_DIR,
+      'ipc',
+      group.folder,
+      'agents',
+      agentId,
+    );
+    try {
+      fs.rmSync(agentIpcDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+    const agentSessionDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      'agents',
+      agentId,
+    );
+    try {
+      fs.rmSync(agentSessionDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+
+    // Delete virtual chat messages for conversation agents
+    if (agent.kind === 'conversation') {
+      const virtualChatJid = `${jid}#agent:${agentId}`;
+      deleteMessagesForChatJid(virtualChatJid);
+
+      // Note: IM bindings are checked above and block deletion if present.
+      // No auto-clear here — user must unbind explicitly before deleting.
+    }
+
+    // Delete session records
+    deleteSession(group.folder, agentId);
+    clearSessionChannelOwner(group.folder, agentId);
+
+    deleteAgent(agentId);
+  } finally {
+    // The worktree is gone: whatever happened above, the lane's work must
+    // not run on without it.
+    worktreeRelease.finish();
   }
-
-  // Clean up IPC/session directories
-  const agentIpcDir = path.join(
-    DATA_DIR,
-    'ipc',
-    group.folder,
-    'agents',
-    agentId,
-  );
-  try {
-    fs.rmSync(agentIpcDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
-  const agentSessionDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agents',
-    agentId,
-  );
-  try {
-    fs.rmSync(agentSessionDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
-
-  // Delete virtual chat messages for conversation agents
-  if (agent.kind === 'conversation') {
-    const virtualChatJid = `${jid}#agent:${agentId}`;
-    deleteMessagesForChatJid(virtualChatJid);
-
-    // Note: IM bindings are checked above and block deletion if present.
-    // No auto-clear here — user must unbind explicitly before deleting.
-  }
-
-  // Delete session records
-  deleteSession(group.folder, agentId);
-  clearSessionChannelOwner(group.folder, agentId);
-
-  deleteAgent(agentId);
-  worktreeRelease.finish();
 
   // Broadcast removal
   projectWebAgentRemoved(jid, agentId, agent.name);
@@ -1073,29 +1074,33 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
     force: forceWorktree,
   });
   if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
-
-  if (session.status === 'running' || session.status === 'idle') {
-    updateAgentStatus(sessionId, 'error', '用户手动停止');
-    const deps = getWebDeps();
-    if (deps) deps.queue.stopGroup(`${jid}#agent:${sessionId}`);
-  }
-
-  for (const dir of [
-    path.join(DATA_DIR, 'ipc', group.folder, 'agents', sessionId),
-    path.join(DATA_DIR, 'sessions', group.folder, 'agents', sessionId),
-  ]) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
+  try {
+    if (session.status === 'running' || session.status === 'idle') {
+      updateAgentStatus(sessionId, 'error', '用户手动停止');
+      const deps = getWebDeps();
+      if (deps) deps.queue.stopGroup(`${jid}#agent:${sessionId}`);
     }
-  }
 
-  deleteMessagesForChatJid(`${jid}#agent:${sessionId}`);
-  deleteSession(group.folder, sessionId);
-  clearSessionChannelOwner(group.folder, sessionId);
-  deleteAgent(sessionId);
-  worktreeRelease.finish();
+    for (const dir of [
+      path.join(DATA_DIR, 'ipc', group.folder, 'agents', sessionId),
+      path.join(DATA_DIR, 'sessions', group.folder, 'agents', sessionId),
+    ]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    deleteMessagesForChatJid(`${jid}#agent:${sessionId}`);
+    deleteSession(group.folder, sessionId);
+    clearSessionChannelOwner(group.folder, sessionId);
+    deleteAgent(sessionId);
+  } finally {
+    // The worktree is gone: whatever happened above, the lane's work must
+    // not run on without it.
+    worktreeRelease.finish();
+  }
 
   projectWebAgentRemoved(jid, sessionId, session.name);
 
