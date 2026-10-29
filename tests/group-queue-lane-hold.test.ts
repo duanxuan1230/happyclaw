@@ -166,6 +166,131 @@ describe('holding a session lane', () => {
   });
 });
 
+describe('a session lane run as a task, as index.ts and web.ts run them', () => {
+  test('the container slot it gives up while held serves main at once', async () => {
+    const { queue, runs, count } = harness();
+    settings.maxConcurrentContainers = 1;
+    queue.setHostModeChecker(() => false);
+    const laneExit = deferred();
+    vi.mocked(queue.closeStdin).mockImplementation((jid: string) => {
+      if (jid === LANE) laneExit.resolve();
+    });
+    queue.enqueueTask(LANE, 'agent-conversation:s1', async () => {
+      runs.push(LANE);
+      queue.registerProcess(LANE, {} as never, {
+        containerName: null,
+        groupFolder: FOLDER,
+        agentId: 's1',
+      });
+      await laneExit.promise;
+    });
+    await settle();
+    queue.enqueueMessageCheck(MAIN);
+    await settle();
+    expect(count(MAIN)).toBe(0);
+
+    queue.holdLane(LANE);
+    await queue.stopGroup(LANE, { force: true, preserveQueuedWork: true });
+    await settle();
+    expect(count(MAIN)).toBe(1);
+    queue.discardHeldLane(LANE);
+  });
+});
+
+describe('the end of a hold or pause', () => {
+  test('a discard that throws still releases the hold', () => {
+    const { queue } = harness();
+    queue.holdLane(LANE);
+    vi.spyOn(
+      queue as unknown as { discardLaneWork: () => void },
+      'discardLaneWork',
+    ).mockImplementation(() => {
+      throw new Error('discard hook failed');
+    });
+    expect(() => queue.discardHeldLane(LANE)).toThrow('discard hook failed');
+    expect(queue.isGroupMutationPaused(LANE)).toBe(false);
+  });
+
+  test('deliveries left by a stop that ends after the pause was released are replayed, once', async () => {
+    const { queue, runs } = harness();
+    const replayed: string[][] = [];
+    queue.setOnUnacknowledgedIpcDeliveries((_jid, receipts) =>
+      replayed.push(receipts.map((r) => r.cursor.id)),
+    );
+    // The runner keeps going after the close until the test lets it exit.
+    const mainExit = deferred();
+    queue.setProcessMessagesFn(async (jid: string) => {
+      runs.push(jid);
+      queue.registerProcess(jid, {} as never, {
+        containerName: null,
+        groupFolder: FOLDER,
+      });
+      if (runs.length === 1) await mainExit.promise;
+      return true;
+    });
+    vi.mocked(queue.closeStdin).mockImplementation(() => {});
+    queue.enqueueMessageCheck(MAIN);
+    await settle();
+    const cursor = { timestamp: '2026-10-29T00:00:00.000Z', id: 'om_a' };
+    expect(
+      queue.sendMessage(MAIN, 'a', undefined, undefined, MAIN, undefined, {
+        chatJid: MAIN,
+        coveredCursors: [cursor],
+        cursor,
+      }),
+    ).toBe('sent');
+    const token = queue.pauseGroupsForMutation([MAIN]);
+    const stopping = queue.stopGroup(MAIN, {
+      force: true,
+      preserveQueuedWork: true,
+    });
+    // Another path drops the last pause while the stop is still tearing down.
+    queue.resumeGroupsAfterMutation(token);
+    mainExit.resolve();
+    await stopping;
+    await settle();
+    expect(replayed).toEqual([['om_a']]);
+  });
+
+  test('the same for a session lane run as a task, its workspace pause released first', async () => {
+    const { queue, runs } = harness();
+    const replayed: string[][] = [];
+    queue.setOnUnacknowledgedIpcDeliveries((_jid, receipts) =>
+      replayed.push(receipts.map((r) => r.cursor.id)),
+    );
+    const laneExit = deferred();
+    vi.mocked(queue.closeStdin).mockImplementation(() => {});
+    queue.enqueueTask(LANE, 'agent-conversation:s1', async () => {
+      runs.push(LANE);
+      queue.registerProcess(LANE, {} as never, {
+        containerName: null,
+        groupFolder: FOLDER,
+        agentId: 's1',
+      });
+      await laneExit.promise;
+    });
+    await settle();
+    const cursor = { timestamp: '2026-10-29T00:00:00.000Z', id: 'om_b' };
+    expect(
+      queue.sendMessage(LANE, 'b', undefined, undefined, LANE, undefined, {
+        chatJid: LANE,
+        coveredCursors: [cursor],
+        cursor,
+      }),
+    ).toBe('sent');
+    const token = queue.pauseGroupsForMutation([MAIN, LANE]);
+    const stopping = queue.stopGroup(LANE, {
+      force: true,
+      preserveQueuedWork: true,
+    });
+    queue.resumeGroupsAfterMutation(token);
+    laneExit.resolve();
+    await stopping;
+    await settle();
+    expect(replayed).toEqual([['om_b']]);
+  });
+});
+
 describe('a stop is remembered for its own lane', () => {
   test('a user Stop on main during a session hold stays a discard, and survives the release', async () => {
     const { queue } = harness();

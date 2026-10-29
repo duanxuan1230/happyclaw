@@ -597,8 +597,11 @@ export class GroupQueue {
    */
   discardHeldLane(groupJid: string): void {
     if (!this.heldLanes.has(groupJid)) return;
-    this.discardLaneWork(groupJid, this.getGroup(groupJid));
-    this.releaseLaneHold(groupJid);
+    try {
+      this.discardLaneWork(groupJid, this.getGroup(groupJid));
+    } finally {
+      this.releaseLaneHold(groupJid);
+    }
     this.drainWaiting();
   }
 
@@ -3171,7 +3174,10 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        if (this.mutationPreserveStopJids.has(groupJid)) {
+        if (
+          this.mutationPreserveStopJids.has(groupJid) &&
+          this.isMutationPaused(groupJid)
+        ) {
           this.parkUnacknowledgedIpcDeliveries(groupJid, state);
         } else {
           this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
@@ -3375,7 +3381,10 @@ export class GroupQueue {
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
-        if (this.mutationPreserveStopJids.has(groupJid)) {
+        if (
+          this.mutationPreserveStopJids.has(groupJid) &&
+          this.isMutationPaused(groupJid)
+        ) {
           this.parkUnacknowledgedIpcDeliveries(groupJid, state);
         } else {
           this.recoverUnacknowledgedIpcDeliveries(groupJid, state);
@@ -3442,6 +3451,9 @@ export class GroupQueue {
         } catch (err) {
           logger.error({ groupJid, err }, 'drainGroup failed');
         }
+      } else if (this.isMutationPaused(groupJid)) {
+        // The slot a paused lane's runner just gave up serves the others.
+        this.drainWaiting();
       }
       this.resolveRunnerTeardownWaiters(state);
     }

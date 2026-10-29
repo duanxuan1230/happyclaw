@@ -576,10 +576,9 @@ export function refreshSessionWorktreeStatus(
   record: SessionWorktree,
 ): SessionWorktree {
   const reason = inspectSessionWorktree(record);
-  if (
-    reason &&
-    (record.status !== 'broken' || record.broken_reason !== reason)
-  ) {
+  // A worktree already broken keeps the reason it was given, which may say
+  // more than what inspecting it now finds (removed with its session).
+  if (reason && record.status !== 'broken') {
     markSessionWorktreeBroken(record.agent_id, reason);
     return { ...record, status: 'broken', broken_reason: reason };
   }
