@@ -212,6 +212,9 @@ describe('schema version head', () => {
     // sessions (schema-v84-agent-host-skills.test.ts); usage_limit_waits,
     // session_history_reinjections, task_failure_notices and
     // usage_event_connections for the runtime (schema-v84-runtime-state.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(84);
+    // v85: scheduled tasks become automations (automations, automation_runs,
+    // automation_failure_streaks); scheduled_tasks, task_runs, task_run_logs
+    // and task_failure_notices are dropped (automation-migration.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(85);
   });
 });
