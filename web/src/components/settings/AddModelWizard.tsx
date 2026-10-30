@@ -56,6 +56,7 @@ import {
   ModelPicker,
   addCandidates,
   candidateEntry,
+  candidateForSource,
   type DiscoveryState,
   type ModelCandidate,
 } from './ModelPicker';
@@ -226,10 +227,12 @@ export function AddModelWizard({
   const chooseSource = (next: WizardSource) => {
     if (sourceKey(next) !== sourceKey(source)) {
       // A different vendor starts from its own models; models typed by hand
-      // stay.
-      const manual = candidates.filter(
-        (candidate) => candidate.origin === 'manual',
-      );
+      // stay, with a suggested window only where the new source takes one.
+      const manual = candidates
+        .filter((candidate) => candidate.origin === 'manual')
+        .map((candidate) =>
+          candidateForSource(candidate, isThirdPartyKind(next.kind)),
+        );
       const nextPreset =
         next.kind === 'preset' ? getModelPreset(next.presetId) : null;
       setCandidates(

@@ -871,6 +871,66 @@ describe('late answers', () => {
 });
 
 describe('official kinds', () => {
+  async function typedOnRelayThenOfficial(pickWindow?: string) {
+    answer({
+      [DISCOVER]: { ok: true, source: 'endpoint', models: [] },
+      [TEST]: OK_TEST,
+      [PROVIDERS]: makeProvider({ id: 'api', type: 'official' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await next();
+    await type('input[aria-label="手动添加模型"]', 'claude-opus-4-7');
+    await click(button('添加'));
+    const window = () =>
+      document.querySelector(
+        'select[aria-label="claude-opus-4-7 的上下文长度"]',
+      ) as HTMLSelectElement;
+    // On a relay the suggestion is declared.
+    expect(window().value).toBe('1000000');
+    if (pickWindow) {
+      await act(async () => {
+        window().value = pickWindow;
+        window().dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+    await click(button('上一步'));
+    await click(button('上一步'));
+    await click(buttonContaining('Anthropic API Key'));
+    await type('#wizard-api-key', 'sk-ant-1');
+    await next();
+    return window;
+  }
+
+  test('a typed model keeps no suggested window when the source turns official', async () => {
+    const window = await typedOnRelayThenOfficial();
+    expect(window().value).toBe('');
+    expect(text()).toContain('建议：1M');
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({ models: [{ id: 'claude-opus-4-7' }] }),
+    );
+  });
+
+  test('a window the user picked survives the switch to official', async () => {
+    const window = await typedOnRelayThenOfficial('256000');
+    expect(window().value).toBe('256000');
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({
+        models: [{ id: 'claude-opus-4-7', contextWindow: 256_000 }],
+      }),
+    );
+  });
+
   test('an Anthropic API key checks known models and never claims a window it was not given', async () => {
     answer({
       [DISCOVER]: {
