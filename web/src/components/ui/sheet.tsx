@@ -74,15 +74,20 @@ const SHEET_CONTENT_CLASS =
 /**
  * Bottom sheet detents, after cindy's context sheet
  * (apps/mobile/src/session/contextSheetModel.ts): half shows about 56% of
- * the screen (at least 320px), full leaves 64px of the page above it.
+ * the screen (at least 320px), full leaves 64px of the page above it. A
+ * half lower than `minHalf` would be too short for the content, so on such
+ * a screen there is only full.
  */
-export function bottomSheetSnapHeights(screenHeight: number): {
+export function bottomSheetSnapHeights(
+  screenHeight: number,
+  minHalf = 0,
+): {
   half: number;
   full: number;
 } {
   const full = Math.max(320, Math.round(screenHeight - 64));
   const half = Math.min(Math.max(Math.round(screenHeight * 0.56), 320), full);
-  return { half, full };
+  return { half: half < minHalf ? full : half, full };
 }
 
 /** Released below this share of the half detent, the sheet closes. */
@@ -164,6 +169,7 @@ function BottomSheetContent({
   detents,
   snap: snapProp,
   onSnapChange,
+  minHalf,
   ref,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
@@ -171,6 +177,7 @@ function BottomSheetContent({
   detents: boolean;
   snap?: Snap;
   onSnapChange?: (snap: Snap) => void;
+  minHalf?: number;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   // A caller's ref (often present but undefined) must not replace ours.
@@ -192,18 +199,18 @@ function BottomSheetContent({
     const element = contentRef.current;
     if (!element || !snap) return;
     const apply = () => {
-      element.style.height = `${bottomSheetSnapHeights(window.innerHeight)[snap]}px`;
+      element.style.height = `${bottomSheetSnapHeights(window.innerHeight, minHalf)[snap]}px`;
     };
     apply();
     window.addEventListener('resize', apply);
     return () => window.removeEventListener('resize', apply);
-  }, [snap]);
+  }, [snap, minHalf]);
 
   /** The snapped sheet's height for a drag now at `clientY`. */
   const dragHeight = (drag: DragState, clientY: number) =>
     Math.min(
       Math.max(drag.startHeight - (clientY - drag.startY), 0),
-      bottomSheetSnapHeights(window.innerHeight).full,
+      bottomSheetSnapHeights(window.innerHeight, minHalf).full,
     );
 
   const close = () => closeRef.current?.click();
@@ -251,7 +258,7 @@ function BottomSheetContent({
     const offset = event.clientY - drag.startY;
     const flick = drag.velocity > DISMISS_VELOCITY && offset > 24;
     if (snap) {
-      const heights = bottomSheetSnapHeights(window.innerHeight);
+      const heights = bottomSheetSnapHeights(window.innerHeight, minHalf);
       const settled = flick
         ? 'dismiss'
         : settleBottomSheet(dragHeight(drag, event.clientY), heights);
@@ -336,6 +343,7 @@ function SheetContent({
   detents = false,
   snap,
   onSnapChange,
+  minHalf,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   side?: Side;
@@ -346,6 +354,11 @@ function SheetContent({
   snap?: Snap;
   /** A drag settled on another detent (with `detents`). */
   onSnapChange?: (snap: Snap) => void;
+  /**
+   * The least height (px) the half detent is any use at; a screen that
+   * leaves less opens it full (with `detents`).
+   */
+  minHalf?: number;
 }) {
   return (
     <SheetPortal>
@@ -357,6 +370,7 @@ function SheetContent({
           detents={detents}
           snap={snap}
           onSnapChange={onSnapChange}
+          minHalf={minHalf}
           {...props}
         >
           {children}

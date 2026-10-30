@@ -48,7 +48,7 @@ export default defineConfig({
           {
             name: 'webkit-iphone',
             // Phone specs, where iOS focus, keyboard and touch rules apply for
-            // real; CDP-driven touch cases skip themselves here.
+            // real; holds and drags go through tests/e2e/touchscreen.ts.
             testMatch:
               /(composer|model-selector|overlay|viewport|touch-primitives|chat-reading|phone-nav|mobile-chat|workspace-pages|settings-admin|chat-code-split)\.spec\.ts$/,
             use: { ...devices['iPhone 14'] },

@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { touchscreen } from './touchscreen';
+
 // The workspace pages on a phone: each names itself in the one top bar,
 // lists come first and open a detail that system back returns from, row
 // actions sit behind ⋯ (or a long press), nothing overflows sideways and
@@ -410,17 +412,10 @@ test.describe('文件面板', () => {
 
     // A held finger opens the same sheet, and its release opens nothing.
     const box = (await row.boundingBox())!;
-    const client = await page.context().newCDPSession(page);
-    const point = { x: box.x + 40, y: box.y + box.height / 2 };
-    await client.send('Input.dispatchTouchEvent', {
-      type: 'touchStart',
-      touchPoints: [point],
-    });
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x: box.x + 40, y: box.y + box.height / 2 }]);
     await page.waitForTimeout(700);
-    await client.send('Input.dispatchTouchEvent', {
-      type: 'touchEnd',
-      touchPoints: [],
-    });
+    await fingers.up();
     await expect(sheet).toBeVisible();
     await expect(page.getByRole('dialog', { name: /notes\.txt/ })).toHaveCount(
       1,

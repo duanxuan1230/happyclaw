@@ -41,9 +41,13 @@ function render(node: React.ReactNode) {
 }
 
 function pointerDown(element: HTMLElement, pointerType: string) {
+  pointer(element, 'pointerdown', pointerType);
+}
+
+function pointer(element: HTMLElement, type: string, pointerType: string) {
   act(() => {
     element.dispatchEvent(
-      new PointerEvent('pointerdown', {
+      new PointerEvent(type, {
         bubbles: true,
         cancelable: true,
         pointerType,
@@ -81,6 +85,21 @@ describe('DropdownMenuTrigger', () => {
     act(() => trigger.click());
     expect(menuOpen()).toBe(true);
     expect(onOpenChange).toHaveBeenCalledWith(true);
+  });
+
+  test('a tap opens on its pointerup, with no click to follow (iOS)', () => {
+    const trigger = render(menu());
+    pointerDown(trigger, 'touch');
+    pointer(trigger, 'pointerup', 'touch');
+    expect(menuOpen()).toBe(true);
+  });
+
+  test('a scroll that started on it (pointercancel) leaves it closed', () => {
+    const trigger = render(menu());
+    pointerDown(trigger, 'touch');
+    pointer(trigger, 'pointercancel', 'touch');
+    act(() => trigger.click());
+    expect(menuOpen()).toBe(false);
   });
 
   test('a mouse still opens on pointerdown', () => {

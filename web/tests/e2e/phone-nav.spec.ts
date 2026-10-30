@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
+import { touchscreen } from './touchscreen';
+
 const HARNESS_PATH = '/tests/e2e/app-shell-harness.html';
 
 // The harness mocks the stores the shell reads. Requests the chat view or a
@@ -388,17 +390,10 @@ test.describe('phone', () => {
       exact: true,
     });
     const box = (await title.boundingBox())!;
-    const cdp = await page.context().newCDPSession(page);
-    const point = { x: box.x + 20, y: box.y + box.height / 2 };
-    await cdp.send('Input.dispatchTouchEvent', {
-      type: 'touchStart',
-      touchPoints: [point],
-    });
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x: box.x + 20, y: box.y + box.height / 2 }]);
     await page.waitForTimeout(650);
-    await cdp.send('Input.dispatchTouchEvent', {
-      type: 'touchEnd',
-      touchPoints: [],
-    });
+    await fingers.up();
     const sheet = page.getByRole('dialog', { name: 'beta 会话 1的更多操作' });
     await expect(sheet).toBeVisible();
     // The release did not also open the conversation.
@@ -462,24 +457,39 @@ test.describe('phone', () => {
 
   test('a swipe from the left edge goes back with the list under the finger', async ({
     page,
+    browserName,
   }) => {
+    const fingers = await touchscreen(page);
+    const swipe = async () => {
+      await fingers.down([{ x: 5, y: 400 }]);
+      for (const x of [20, 60, 120, 200, 280]) {
+        await fingers.move([{ x, y: 400 }]);
+      }
+    };
     await page.goto(`${HARNESS_PATH}?router=hash#/chat`);
     await page
       .getByRole('button', { name: 'alpha 会话 1', exact: true })
       .click();
     await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s1');
+    if (browserName === 'webkit') {
+      // Safari in a tab swipes back through the history itself, so with an
+      // entry to go back to the page leaves the edge alone; its own swipe
+      // covers a chat opened directly.
+      await swipe();
+      await fingers.up();
+      // Past the swipe-out (250ms) a back would have landed.
+      await page.waitForTimeout(500);
+      await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s1');
+      // A fresh document: the chat is the app's first entry.
+      await page.goto('about:blank');
+      await page.goto(`${HARNESS_PATH}?router=hash#/chat/alpha?agent=alpha-s1`);
+      await expect(page.locator('[data-hc-chat-view]')).toBeVisible();
+    }
     const home = page.locator('[data-hc-phone-home]');
-    const cdp = await page.context().newCDPSession(page);
-    const touch = (type: string, x: number) =>
-      cdp.send('Input.dispatchTouchEvent', {
-        type,
-        touchPoints: type === 'touchEnd' ? [] : [{ x, y: 400 }],
-      });
-    await touch('touchStart', 5);
-    for (const x of [20, 60, 120, 200, 280]) await touch('touchMove', x);
+    await swipe();
     // Mid-swipe the home shows beneath the chat.
     await expect(home).toBeVisible();
-    await touch('touchEnd', 280);
+    await fingers.up();
     await expect(routeProbe(page)).toHaveText('/chat');
     await expect(page.locator('[data-hc-chat-view]')).toHaveCount(0);
   });
@@ -497,15 +507,10 @@ test.describe('phone', () => {
 
     await page.getByRole('button', { name: '打开菜单' }).click();
     await expect(drawer).toBeVisible();
-    const cdp = await page.context().newCDPSession(page);
-    const touch = (type: string, x: number) =>
-      cdp.send('Input.dispatchTouchEvent', {
-        type,
-        touchPoints: type === 'touchEnd' ? [] : [{ x, y: 500 }],
-      });
-    await touch('touchStart', 250);
-    for (const x of [240, 220, 180, 140]) await touch('touchMove', x);
-    await touch('touchEnd', 140);
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x: 250, y: 500 }]);
+    for (const x of [240, 220, 180, 140]) await fingers.move([{ x, y: 500 }]);
+    await fingers.up();
     await expect(drawer).toHaveCount(0);
     await expect(routeProbe(page)).toHaveText('/chat');
   });

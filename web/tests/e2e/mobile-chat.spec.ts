@@ -109,10 +109,31 @@ async function clickFile(sheet: Locator, fileName: string) {
 }
 
 async function wheelInside(page: Page, scrollPane: Locator, deltaY: number) {
+  if (page.context().browser()?.browserType().name() === 'webkit') {
+    // Mobile WebKit has no wheel, and a synthetic finger does not scroll:
+    // scroll the pane itself, which is what the scroll listeners see.
+    await scrollPane.evaluate((element, top) => {
+      element.scrollBy({ top, behavior: 'instant' });
+    }, deltaY);
+    return;
+  }
   const box = await scrollPane.boundingBox();
   if (!box) throw new Error('Expected scroll pane to have a bounding box');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, deltaY);
+}
+
+/**
+ * Opens a file row the way a keyboard does where a tap does not focus a
+ * button (WebKit, like iOS Safari), so there is a focus to return to.
+ */
+async function openRow(row: Locator, browserName: string) {
+  if (browserName === 'webkit') {
+    await row.focus();
+    await row.press('Enter');
+  } else {
+    await row.click();
+  }
 }
 
 test('idle scroll affordance is scoped and context nav follows scroll direction', async ({
@@ -167,6 +188,23 @@ test('idle scroll affordance is scoped and context nav follows scroll direction'
     'data-state',
     'open',
   );
+});
+
+test.describe('on a short phone', () => {
+  // An iPhone 14 in Safari; the half detent would leave the file list 0px.
+  test.use({ viewport: { width: 390, height: 664 } });
+
+  test('the context sheet opens full, so the file list shows', async ({
+    page,
+  }) => {
+    await prepareHarness(page);
+    const sheet = await openContextSheet(page);
+    expect((await sheet.boundingBox())!.height).toBe(664 - 64);
+    const list = sheet.getByTestId('file-list-scroll');
+    expect(
+      await list.evaluate((element) => element.clientHeight),
+    ).toBeGreaterThan(100);
+  });
 });
 
 test('markdown preview keeps focus and scroll inside nested modal layers', async ({
@@ -229,7 +267,12 @@ test('markdown preview keeps focus and scroll inside nested modal layers', async
 
 test('PDF bridge binds only after load and closes from the embedded window', async ({
   page,
+  browserName,
 }) => {
+  test.skip(
+    browserName === 'webkit',
+    'Playwright WebKit never loads a PDF in an iframe (no load event)',
+  );
   const { pdfRequestStarted, releasePdfResponse } = await prepareHarness(page, {
     deferPdfResponse: true,
   });
@@ -268,12 +311,13 @@ test('PDF bridge binds only after load and closes from the embedded window', asy
 
 test('direct image preview opens, traps focus, and restores it on Escape', async ({
   page,
+  browserName,
 }) => {
   await prepareHarness(page);
   const sheet = await openContextSheet(page);
   const returnTarget = sheet.getByRole('button', { name: /sample\.png/ });
   await returnTarget.scrollIntoViewIfNeeded();
-  await returnTarget.click();
+  await openRow(returnTarget, browserName);
 
   const preview = page.getByRole('dialog', { name: 'sample.png' });
   await expect(preview).toBeVisible();
