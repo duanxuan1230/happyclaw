@@ -1,17 +1,13 @@
 import { Badge } from '@/components/ui/badge';
 import type { AgentModelResolution } from '@/types';
 
-const SOURCE_LABELS: Record<string, string> = {
+const SOURCE_LABELS: Record<AgentModelResolution['source'], string> = {
   session: '会话手选',
   agent: '智能体绑定',
   owner_main: '跟随主智能体',
   system_main: '跟随主 HappyClaw',
   workspace_env: '工作区环境变量',
   none: '未设置模型',
-  // Older servers: the global default and the automatic pool.
-  default: '全局默认',
-  single: '唯一启用',
-  pool: '自动池',
 };
 
 /**

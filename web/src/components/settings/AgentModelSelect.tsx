@@ -62,7 +62,8 @@ export function AgentModelSelect({
   const listed = models.filter(
     (model) => model.id !== defaultModel || model.id === value,
   );
-  const missing = !!config && !!value && !models.some((m) => m.id === value);
+  const missing =
+    config && value && !models.some((m) => m.id === value) ? value : null;
   return (
     <Select
       value={value ?? DEFAULT_MODEL_VALUE}
@@ -80,8 +81,8 @@ export function AgentModelSelect({
             ? `连接默认（${defaultModel || '由中转站决定'}）`
             : '随跟随的智能体'}
         </SelectItem>
-        {missing && value && (
-          <SelectItem value={value}>{value}（不在模型列表里）</SelectItem>
+        {missing && (
+          <SelectItem value={missing}>{missing}（不在模型列表里）</SelectItem>
         )}
         {listed.map((model) => (
           <SelectItem key={model.id} value={model.id}>

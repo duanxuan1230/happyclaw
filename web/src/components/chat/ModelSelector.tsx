@@ -23,6 +23,7 @@ import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
 import type { ModelCapabilitySource } from '@/lib/model-providers';
+import type { ConnectionModel } from '@/types';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -61,7 +62,10 @@ import { useAuthStore } from '../../stores/auth';
 import { showToast } from '../../utils/toast';
 import { useIsPhone } from '../layout/phone';
 import { useComposerDock, useDockOverlay } from './composer/composerDock';
-import { ConversationContextUsageLine } from './composer/ContextUsageRing';
+import {
+  ConversationContextUsageLine,
+  formatTokenCount,
+} from './composer/ContextUsageRing';
 import {
   effortLabel,
   modelBindingErrorMessage,
@@ -90,17 +94,7 @@ export interface CodexSelectionView {
 }
 
 /** One model of a non-ChatGPT connection. */
-export interface ConnectionModelChoice {
-  id: string;
-  /** Reasoning efforts the model takes, low to high; empty when none. */
-  efforts: string[];
-  /** The level it runs at when none is picked. */
-  defaultEffort: string | null;
-  /** Its context window in tokens; null when unknown. */
-  contextWindow: number | null;
-  /** Where the efforts come from: the user, the registry or the family. */
-  effortsSource?: ModelCapabilitySource;
-}
+export type ConnectionModelChoice = ConnectionModel;
 
 export interface SessionModelOption {
   id: string;
@@ -173,17 +167,6 @@ function optionStatus(option: SessionModelOption): string {
   if (option.usable === false) return '缺少凭据';
   if (option.codex?.needsReauth) return '需重新登录';
   return '';
-}
-
-/** A context window as a row reads it (200K, 1M); null when unknown. */
-export function contextWindowLabel(
-  tokens: number | null | undefined,
-): string | null {
-  if (!tokens) return null;
-  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) {
-    return `${tokens / 1_000_000}M`;
-  }
-  return tokens >= 1_000 ? `${Math.round(tokens / 1_000)}K` : `${tokens}`;
 }
 
 function ownModel(option: SessionModelOption): string {
@@ -279,6 +262,8 @@ interface ModelRow {
   /** The model shown; '' when a relay decides. */
   id: string;
   note?: string;
+  /** Its context window in tokens; null when unknown. */
+  contextWindow: number | null;
 }
 
 function rowKey(optionId: string, id: string): string {
@@ -296,35 +281,46 @@ function optionRows(
 ): ModelRow[] {
   const defaultModel = ownModel(option);
   const listed = option.codex
-    ? option.codex.models.map((model) => model.value)
-    : (option.models ?? []).map((model) => model.id);
-  const row = (id: string, note?: string): ModelRow => ({
+    ? option.codex.models.map((model) => ({
+        id: model.value,
+        contextWindow: null,
+      }))
+    : (option.models ?? []);
+  const row = (
+    id: string,
+    { note, contextWindow = null }: Partial<ModelRow> = {},
+  ): ModelRow => ({
     key: rowKey(option.id, id),
     option,
     pick: id === defaultModel ? null : id,
     id,
     note,
+    contextWindow,
   });
   if (!listed.length) return [row(defaultModel)];
   const rows: ModelRow[] = [];
-  if (pinned && pinned !== defaultModel && !listed.includes(pinned)) {
+  if (
+    pinned &&
+    pinned !== defaultModel &&
+    !listed.some((model) => model.id === pinned)
+  ) {
     rows.push(
-      row(pinned, option.codex ? '不在账号的模型列表里' : '不在模型列表里'),
+      row(pinned, {
+        note: option.codex ? '不在账号的模型列表里' : '不在模型列表里',
+      }),
     );
   }
   // A relay without a model of its own still lets the relay decide.
   if (!option.codex && !defaultModel) rows.push(row(''));
-  for (const id of listed) rows.push(row(id));
+  for (const model of listed) rows.push(row(model.id, model));
   return rows;
 }
 
 /** The second line of a model row. */
 function rowDetail(row: ModelRow): string {
-  const entry = row.option.models?.find((model) => model.id === row.id);
-  const context = contextWindowLabel(entry?.contextWindow);
   return [
     row.option.name,
-    context ? `${context} 上下文` : null,
+    row.contextWindow ? `${formatTokenCount(row.contextWindow)} 上下文` : null,
     row.note,
     optionStatus(row.option),
   ]
@@ -340,7 +336,7 @@ export interface RecentModel {
   model: string;
 }
 
-export const MAX_RECENT_MODELS = 5;
+const MAX_RECENT_MODELS = 5;
 
 export function recentModelsKey(userId: string): string {
   return `happyclaw:model-picker:recent:${userId}`;
@@ -545,10 +541,11 @@ export function ModelSelector({
     s.hasPermission('manage_system_config'),
   );
   const userId = useAuthStore((s) => s.user?.id);
+  // Read once: a sign-out unmounts the composer, so the user never changes
+  // under a mounted picker.
   const [recent, setRecent] = useState<RecentModel[]>(() =>
     readRecentModels(userId),
   );
-  useEffect(() => setRecent(readRecentModels(userId)), [userId]);
   // A phone gets one pill for model and effort and picks the effort in the
   // sheet; a narrow window keeps the desktop controls but the sheet too.
   const phone = useIsPhone();
@@ -1187,6 +1184,32 @@ function ModelPanel({
     setRail(id);
     setQuery('');
   };
+  // 最近, 全部 and each connection: chips on a phone, marks otherwise.
+  const railItems = [
+    {
+      id: RECENT_RAIL,
+      label: '最近',
+      mark: <History className="size-4" aria-hidden="true" />,
+    },
+    {
+      id: ALL_RAIL,
+      label: '全部',
+      mark: <LayoutGrid className="size-4" aria-hidden="true" />,
+    },
+    ...selection.options.map((option) => ({
+      id: option.id,
+      label: option.name,
+      mark: (
+        <VendorTile
+          vendor={vendorOfConnection({
+            kind: option.kind,
+            model: ownModel(option),
+          })}
+          name={option.name}
+        />
+      ),
+    })),
+  ].map((item) => ({ ...item, active: rail === item.id && !needle }));
 
   const moveFocus = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
@@ -1237,22 +1260,12 @@ function ModelPanel({
           aria-label="模型配置"
           className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-surface-border px-3 py-2 [scrollbar-width:none]"
         >
-          <RailChip
-            label="最近"
-            active={recentView}
-            onClick={() => showRail(RECENT_RAIL)}
-          />
-          <RailChip
-            label="全部"
-            active={rail === ALL_RAIL && !needle}
-            onClick={() => showRail(ALL_RAIL)}
-          />
-          {selection.options.map((option) => (
+          {railItems.map((item) => (
             <RailChip
-              key={option.id}
-              label={option.name}
-              active={rail === option.id && !needle}
-              onClick={() => showRail(option.id)}
+              key={item.id}
+              label={item.label}
+              active={item.active}
+              onClick={() => showRail(item.id)}
             />
           ))}
         </div>
@@ -1272,34 +1285,14 @@ function ModelPanel({
             touch && 'hidden',
           )}
         >
-          <RailButton
-            label="最近"
-            active={recentView}
-            onClick={() => showRail(RECENT_RAIL)}
-          >
-            <History className="size-4" aria-hidden="true" />
-          </RailButton>
-          <RailButton
-            label="全部"
-            active={rail === ALL_RAIL && !needle}
-            onClick={() => showRail(ALL_RAIL)}
-          >
-            <LayoutGrid className="size-4" aria-hidden="true" />
-          </RailButton>
-          {selection.options.map((option) => (
+          {railItems.map((item) => (
             <RailButton
-              key={option.id}
-              label={option.name}
-              active={rail === option.id && !needle}
-              onClick={() => showRail(option.id)}
+              key={item.id}
+              label={item.label}
+              active={item.active}
+              onClick={() => showRail(item.id)}
             >
-              <VendorTile
-                vendor={vendorOfConnection({
-                  kind: option.kind,
-                  model: ownModel(option),
-                })}
-                name={option.name}
-              />
+              {item.mark}
             </RailButton>
           ))}
         </div>

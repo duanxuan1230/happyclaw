@@ -1,3 +1,5 @@
+import type { ResolvedModelCapabilities } from './lib/model-providers';
+
 export type InteractionMode = 'assistant' | 'proactive';
 /**
  * How much of a proactive turn's process is shown beside the spinner. Assistant
@@ -92,16 +94,16 @@ export interface AgentProfile {
   updated_at: string;
 }
 
-/** One model of a connection, with what the picker and forms need of it. */
-export interface ModelConfigModel {
-  id: string;
-  /** Reasoning efforts it takes, low to high; empty when none. */
-  efforts: Exclude<AgentEffortLevel, 'inherit'>[];
-  /** What it runs at when no effort is picked; null when it takes none. */
-  defaultEffort: Exclude<AgentEffortLevel, 'inherit'> | null;
-  contextWindow: number | null;
-  effortsSource?: 'declared' | 'registry' | 'family' | 'none';
-}
+/**
+ * One model of a connection as the chat picker and the Agent forms get it:
+ * its resolved capabilities (efforts low to high, empty when none; window
+ * null when unknown) and where the efforts come from.
+ */
+export type ConnectionModel = { id: string } & Pick<
+  ResolvedModelCapabilities,
+  'efforts' | 'defaultEffort' | 'contextWindow'
+> &
+  Partial<Pick<ResolvedModelCapabilities, 'effortsSource'>>;
 
 export interface ModelConfigOption {
   id: string;
@@ -112,7 +114,7 @@ export interface ModelConfigOption {
   /** False when the connection holds no credential and would fail. */
   usable?: boolean;
   /** Every model an Agent may pin within this connection, its own included. */
-  models: ModelConfigModel[];
+  models: ConnectionModel[];
 }
 
 /** A binding an Agent can follow: who supplies the connection and model. */

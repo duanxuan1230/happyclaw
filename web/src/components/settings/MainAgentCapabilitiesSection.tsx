@@ -14,7 +14,6 @@ import {
   capabilityFormFromProfile,
   capabilityFormModelChanges,
   capabilityFormPolicy,
-  modelFollowFor,
   sameCapabilityForm,
   type AgentCapabilityFormValue,
 } from '../agents/AgentCapabilityForm';
@@ -154,7 +153,7 @@ export function MainAgentCapabilitiesSection() {
           onChange={setForm}
           modelConfigs={modelConfigs}
           inheritedModel={inheritedModel}
-          follow={modelFollowFor(profile, inheritedModel)}
+          profile={profile}
           hostAvailable
           labelPrefix="主 HappyClaw "
           modelConfigDescription="Home 工作区、主会话、独立会话与自动化都会继承该选择；你创建的其他智能体没有自己的模型时也跟随它。"

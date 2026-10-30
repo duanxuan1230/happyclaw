@@ -1362,9 +1362,7 @@ export function AgentProfilesPage() {
                   onChange={setCapabilities}
                   modelConfigs={modelConfigs}
                   inheritedModel={inheritedModel}
-                  // The page lists custom Agents only: they follow their
-                  // owner's main Agent.
-                  follow="owner_main"
+                  profile={selected}
                   hostAvailable={isAdmin}
                   labelPrefix="智能体"
                   modelConfigDescription="该智能体所属的所有工作区、会话和自动化都会使用这里解析出的完整模型网关环境。"

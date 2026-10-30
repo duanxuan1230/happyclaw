@@ -19,8 +19,7 @@ import type {
   AgentProfile,
   AgentProfileRuntimePolicy,
   InheritedModel,
-  InheritedModelBinding,
-  ModelConfigModel,
+  ConnectionModel,
   ModelConfigOption,
 } from '@/types';
 import { normalizeMcpPolicyReferences } from '@/utils/mcp-servers';
@@ -150,7 +149,7 @@ export function sameCapabilityForm(
  */
 export type ModelFollow = 'owner_main' | 'system_main' | null;
 
-export function modelFollowFor(
+function modelFollowFor(
   profile: Pick<AgentProfile, 'id' | 'is_default'>,
   inherited: InheritedModel | null,
 ): ModelFollow {
@@ -160,28 +159,36 @@ export function modelFollowFor(
     : 'system_main';
 }
 
-/** The binding a following Agent runs on; a main Agent without one follows the system's. */
-function followedBinding(
+/**
+ * The connection and model a run of this binding uses: its own, else the one
+ * it follows (a main Agent without a binding follows the system's). Null
+ * when nothing is bound or the connection is gone.
+ */
+function resolveBinding(
+  value: Pick<AgentCapabilityFormValue, 'modelConfigId' | 'model'>,
+  configs: ModelConfigOption[],
   follow: ModelFollow,
   inherited: InheritedModel | null,
-): InheritedModelBinding | null {
-  if (!follow || !inherited) return null;
-  return follow === 'owner_main'
-    ? (inherited.owner_main ?? inherited.system_main)
-    : inherited.system_main;
+): { config: ModelConfigOption; model: string } | null {
+  let binding: { configId: string; model: string | null } | null = null;
+  if (value.modelConfigId !== 'inherit') {
+    binding = { configId: value.modelConfigId, model: value.model };
+  } else if (follow && inherited) {
+    const followed =
+      follow === 'owner_main'
+        ? (inherited.owner_main ?? inherited.system_main)
+        : inherited.system_main;
+    if (followed) {
+      binding = { configId: followed.model_config_id, model: followed.model };
+    }
+  }
+  const config = configs.find((item) => item.id === binding?.configId);
+  return config && binding
+    ? { config, model: binding.model || config.model }
+    : null;
 }
 
-/** 「连接 · 模型」 for a binding, or null when its connection is gone. */
-function bindingLabel(
-  configs: ModelConfigOption[],
-  configId: string,
-  model: string | null,
-): string | null {
-  const config = configs.find((item) => item.id === configId);
-  if (!config) return null;
-  const runs = model || config.model;
-  return runs ? `${config.name} · ${runs}` : config.name;
-}
+const FOLLOWING = { modelConfigId: 'inherit', model: null } as const;
 
 /** The option that follows another Agent, with what it currently runs. */
 function followOptionLabel(
@@ -189,31 +196,23 @@ function followOptionLabel(
   configs: ModelConfigOption[],
   inherited: InheritedModel | null,
 ): string {
-  const binding = followedBinding(follow, inherited);
-  const runs = binding
-    ? bindingLabel(configs, binding.model_config_id, binding.model)
-    : null;
+  const runs = resolveBinding(FOLLOWING, configs, follow, inherited);
   const name = follow === 'owner_main' ? '跟随主智能体' : '跟随主 HappyClaw';
-  return `${name}（${runs ?? '未设置'}）`;
+  const label = runs
+    ? [runs.config.name, runs.model].filter(Boolean).join(' · ')
+    : '未设置';
+  return `${name}（${label}）`;
 }
 
-/**
- * The model a run of the form's binding uses, with what it is known to take:
- * its own binding, else the one it follows. Null when nothing is known.
- */
+/** The bound model with what it is known to take; null when unknown. */
 function boundModelEntry(
   value: Pick<AgentCapabilityFormValue, 'modelConfigId' | 'model'>,
   configs: ModelConfigOption[],
   follow: ModelFollow,
   inherited: InheritedModel | null,
-): ModelConfigModel | null {
-  const own = value.modelConfigId !== 'inherit';
-  const binding = own ? null : followedBinding(follow, inherited);
-  const configId = own ? value.modelConfigId : binding?.model_config_id;
-  const config = configs.find((item) => item.id === configId);
-  if (!config) return null;
-  const model = (own ? value.model : binding?.model) || config.model;
-  return config.models.find((item) => item.id === model) ?? null;
+): ConnectionModel | null {
+  const runs = resolveBinding(value, configs, follow, inherited);
+  return runs?.config.models.find((item) => item.id === runs.model) ?? null;
 }
 
 /**
@@ -223,7 +222,7 @@ function boundModelEntry(
  */
 function keepSupportedEffort(
   effort: AgentEffortLevel,
-  entry: ModelConfigModel | null,
+  entry: ConnectionModel | null,
 ): AgentEffortLevel {
   if (effort === 'inherit' || !entry) return effort;
   return entry.efforts.includes(effort) ? effort : 'inherit';
@@ -234,7 +233,7 @@ export function AgentCapabilityForm({
   onChange,
   modelConfigs,
   inheritedModel,
-  follow,
+  profile,
   hostAvailable,
   labelPrefix,
   modelConfigDescription,
@@ -242,16 +241,17 @@ export function AgentCapabilityForm({
   value: AgentCapabilityFormValue;
   onChange: (next: AgentCapabilityFormValue) => void;
   modelConfigs: ModelConfigOption[];
-  /** What this Agent would follow without a binding of its own. */
+  /** What an Agent without a binding of its own follows. */
   inheritedModel: InheritedModel | null;
-  /** What it follows; null for the system main HappyClaw (see modelFollowFor). */
-  follow: ModelFollow;
+  /** The Agent edited: decides what it follows (see ModelFollow). */
+  profile: Pick<AgentProfile, 'id' | 'is_default'>;
   /** Host Skills can only be granted by an admin. */
   hostAvailable: boolean;
   /** Names the controls, e.g. "智能体" or "主 HappyClaw ". */
   labelPrefix: string;
   modelConfigDescription: string;
 }) {
+  const follow = modelFollowFor(profile, inheritedModel);
   const skills = useSkillsStore((state) => state.skills);
   const skillsLoading = useSkillsStore((state) => state.loading);
   const skillsError = useSkillsStore((state) => state.error);
