@@ -889,7 +889,7 @@ export function MemoryPage() {
     void loadDetail(itemId, options);
   };
   /** Below the desktop width: from an item back to the list. */
-  const closeDetailView = (options?: { confirmed?: boolean }) => {
+  const closeDetailView = async (options?: { confirmed?: boolean }) => {
     if (!requestedItem) return;
     if (openedFromList) {
       // The unsaved-changes blocker asks before this lands.
@@ -899,7 +899,12 @@ export function MemoryPage() {
     if (
       !options?.confirmed &&
       dirty &&
-      !window.confirm('当前记忆有未保存修改，离开页面会丢失。是否继续？')
+      !(await confirmDialog({
+        title: '放弃未保存的修改？',
+        message: '返回列表会丢失当前记忆的未保存修改。',
+        confirmText: '放弃修改',
+        variant: 'danger',
+      }))
     ) {
       return;
     }
@@ -980,7 +985,7 @@ export function MemoryPage() {
       } else {
         toast.success('已拒绝这条待确认记忆');
         clearSelection();
-        closeDetailView({ confirmed: true });
+        void closeDetailView({ confirmed: true });
       }
       await refreshMemoryView();
       if (answer === 'confirm' && isCurrent()) {
@@ -1195,7 +1200,7 @@ export function MemoryPage() {
       setForgetOpen(false);
       toast.success('已忘记这条工作区记忆');
       clearSelection();
-      closeDetailView({ confirmed: true });
+      void closeDetailView({ confirmed: true });
       await refreshMemoryView();
     } catch (error) {
       if (
@@ -1269,7 +1274,7 @@ export function MemoryPage() {
   const phoneHeader = !isPhone ? null : showDetail ? (
     <PhonePageHeader
       title={shownItem?.title || '记忆详情'}
-      onBack={() => closeDetailView()}
+      onBack={() => void closeDetailView()}
       action={
         canEditShown && (
           <Button
@@ -1609,7 +1614,7 @@ export function MemoryPage() {
                       <IconButton
                         label="返回记忆列表"
                         icon={<ArrowLeft />}
-                        onClick={() => closeDetailView()}
+                        onClick={() => void closeDetailView()}
                       />
                     )}
                     {shownItem && (
