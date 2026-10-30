@@ -3,8 +3,10 @@ import {
   getChannelMount,
   getJidsByFolder,
   getRegisteredGroup,
+  getUserById,
   listActiveGuestIdsForWorkspace,
 } from './db.js';
+import { canOwnGuests } from './guest-access.js';
 import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
@@ -60,7 +62,8 @@ export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
   // Read-only guests with an active grant on the workspace this output is
   // attributed to also receive it. The grant must come from the same owner
   // that owns the workspace now (checked in SQL together with both accounts'
-  // status), so a stale grant never leaks a re-owned workspace.
+  // status), so a stale grant never leaks a re-owned workspace. An owner who
+  // may no longer hold guests (allowMemberGuests off) shares with nobody.
   const workspaceJid = resolveAudienceWorkspaceJid(
     baseChatJid,
     boundJid,
@@ -70,11 +73,10 @@ export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
   if (workspaceJid) {
     const workspace = getRegisteredGroup(workspaceJid);
     if (workspace?.created_by === ownerId) {
-      for (const guestId of listActiveGuestIdsForWorkspace(
-        workspaceJid,
-        ownerId,
-      )) {
-        allowed.add(guestId);
+      const guestIds = listActiveGuestIdsForWorkspace(workspaceJid, ownerId);
+      const owner = guestIds.length > 0 ? getUserById(ownerId) : undefined;
+      if (owner && canOwnGuests(owner)) {
+        for (const guestId of guestIds) allowed.add(guestId);
       }
     }
   }

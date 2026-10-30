@@ -144,23 +144,30 @@ export const GUEST_ROUTE_ALLOWLIST: ReadonlyArray<{
     note: 'memory versions',
   },
 
-  // Scheduled tasks (read only).
-  { method: 'GET', pattern: /^\/api\/tasks\/?$/, note: 'task list' },
+  // Automations of granted workspaces (read only; shell commands and their
+  // output are left out by the handlers).
   {
     method: 'GET',
-    pattern: new RegExp(`^/api/tasks/${SEG}/runs$`),
-    note: 'task runs',
+    pattern: /^\/api\/automations\/?$/,
+    note: 'automation list',
   },
   {
     method: 'GET',
-    pattern: new RegExp(`^/api/tasks/runs/${SEG}$`),
-    note: 'task run detail',
+    // Not `for-session`: that lookup is the creator's own.
+    pattern: new RegExp(`^/api/automations/(?!for-session$)${SEG}$`),
+    note: 'automation detail',
   },
   {
     method: 'GET',
-    pattern: new RegExp(`^/api/tasks/${SEG}/logs$`),
-    note: 'task logs',
+    pattern: new RegExp(`^/api/automations/${SEG}/runs$`),
+    note: 'automation runs',
   },
+
+  // Deliberately absent reads: git status/diff (a diff can show the dot
+  // files the file routes hide), workdir peers (other workspaces' runs),
+  // model selection (the owner's model connections), context usage (token
+  // usage; only the composer shows it), workspace env/MCP, IM groups,
+  // delete impact, channel and runtime-session mounts, /api/status*.
 ];
 
 export function isGuestRouteAllowed(method: string, path: string): boolean {

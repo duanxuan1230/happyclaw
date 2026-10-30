@@ -21,8 +21,10 @@ import {
   hasActiveGuestWorkspaceGrant,
   listGuestIdsByOwner,
 } from './db.js';
+import { getSystemSettings } from './runtime-config.js';
 import { invalidateUserSessions } from './web-context.js';
 import { canAccessGroup } from './group-acl.js';
+import type { Automation, AutomationRun } from './automation.js';
 import type { RegisteredGroup, User, UserRole } from './types.js';
 import {
   hasBoundWorkspaceReference,
@@ -39,28 +41,41 @@ export function isGuestUser(user: { role: UserRole } | null | undefined) {
 }
 
 /**
- * Paths inside a workspace that guests never see. Directories: runtime and
- * session state (`.claude` holds SDK transcripts, settings and credential
- * snapshots), runner logs, and raw conversation archives. They are matched
- * at any depth (conservative: a project subdirectory named `logs` is hidden
- * too). Files: dotenv files (`.env`, `.env.*`), which commonly hold secrets in
- * a host workspace's real project directory.
+ * Names that hide a path from guests when any of its segments matches
+ * (compared lowercased, so a case-insensitive filesystem cannot reopen one).
+ * A host workspace's root is the admin's real directory, so the default is
+ * to hide: every dot entry (`.git`, `.ssh`, `.aws`, `.env*`, `.npmrc`,
+ * `.claude` …), common key and credential files, runner logs and raw
+ * conversation archives. Matching any depth is deliberately conservative: a
+ * project subdirectory named `logs` is hidden too.
  */
-export const GUEST_HIDDEN_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
-  '.claude',
+const GUEST_HIDDEN_NAMES: ReadonlySet<string> = new Set([
   'logs',
   'conversations',
+  'credentials.json',
 ]);
+const GUEST_HIDDEN_SUFFIXES = ['.pem', '.key', '.p12', '.pfx', '.keystore'];
+const GUEST_HIDDEN_PREFIXES = ['id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'];
 
-/** True when a workspace-relative path is hidden from guests. */
+function isGuestHiddenName(segment: string): boolean {
+  const name = segment.toLowerCase();
+  return (
+    name.startsWith('.') ||
+    GUEST_HIDDEN_NAMES.has(name) ||
+    GUEST_HIDDEN_SUFFIXES.some((suffix) => name.endsWith(suffix)) ||
+    GUEST_HIDDEN_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
+
+/**
+ * True when a workspace-relative path is hidden from guests. Callers that
+ * read the filesystem also check where the path really points (symlinks).
+ */
 export function isGuestHiddenWorkspacePath(relativePath: string): boolean {
-  const parts = relativePath
+  return relativePath
     .replace(/\\/g, '/')
     .split('/')
-    .filter((part) => part && part !== '.');
-  if (parts.some((part) => GUEST_HIDDEN_WORKSPACE_DIRS.has(part))) return true;
-  const base = parts[parts.length - 1] ?? '';
-  return base === '.env' || base.startsWith('.env.');
+    .some((part) => part !== '' && part !== '.' && isGuestHiddenName(part));
 }
 
 function stripVirtualSuffix(jid: string): string {
@@ -140,14 +155,28 @@ export function canViewHostGroup(
   return user.role === 'admin' || guestHasActiveGrant(user, group);
 }
 
+/** Guests one owner may hold at a time (disabled ones count). */
+export const MAX_GUESTS_PER_OWNER = 20;
+
+/**
+ * Whether `user` may hold guests: admins always; members only while the
+ * `allowMemberGuests` system setting is on (guests skip the invite-only
+ * registration, so it is off by default).
+ */
+export function canOwnGuests(user: { role: UserRole }): boolean {
+  if (user.role === 'admin') return true;
+  return user.role === 'member' && getSystemSettings().allowMemberGuests;
+}
+
 export type GuestAccountState =
   | { valid: true; guest: User; owner: User }
   | { valid: false; reason: 'not_guest' | 'guest_inactive' | 'owner_invalid' };
 
 /**
  * Fresh (uncached) validity of a guest account: the row is an active guest
- * and its owner is an active non-guest. Checked on every guest request so a
- * disabled or deleted owner cuts its guests off immediately.
+ * and its owner is active and may hold guests (canOwnGuests). Checked on
+ * every guest request so a disabled or deleted owner, or turning
+ * `allowMemberGuests` off, cuts the guests off immediately.
  */
 export function getGuestAccountState(guestUserId: string): GuestAccountState {
   const guest = getUserById(guestUserId);
@@ -160,7 +189,7 @@ export function getGuestAccountState(guestUserId: string): GuestAccountState {
   const owner = guest.guest_owner_id
     ? getUserById(guest.guest_owner_id)
     : undefined;
-  if (!owner || owner.status !== 'active' || owner.role === 'guest') {
+  if (!owner || owner.status !== 'active' || !canOwnGuests(owner)) {
     return { valid: false, reason: 'owner_invalid' };
   }
   return { valid: true, guest, owner };
@@ -178,4 +207,16 @@ export function revokeGuestSessionsForOwner(ownerId: string): number {
     deleteUserSessionsByUserId(guestId);
   }
   return guestIds.length;
+}
+
+/** Pre-run checks and scripts run on the host; guests see neither. */
+export function redactAutomationForGuest(automation: Automation): Automation {
+  return { ...automation, preRunCheck: null, scriptCommand: null };
+}
+
+/** A run as a guest sees it: the pre-run check's output left out. */
+export function redactAutomationRunForGuest(run: AutomationRun): AutomationRun {
+  return run.preCheck
+    ? { ...run, preCheck: { ...run.preCheck, stdout: '', stderr: '' } }
+    : run;
 }

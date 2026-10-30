@@ -8,6 +8,9 @@ const state = vi.hoisted(() => ({
   mounts: new Map<string, Pick<ChannelMount, 'workspace_jid' | 'session_id'>>(),
   // `${workspaceJid}|${ownerId}` → active guest ids (the SQL predicate's result)
   guests: new Map<string, string[]>(),
+  // Owner roles (default admin) and the allowMemberGuests system setting.
+  roles: new Map<string, string>(),
+  allowMemberGuests: false,
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -20,6 +23,10 @@ vi.mock('../src/db.js', () => ({
       .map(([jid]) => jid),
   listActiveGuestIdsForWorkspace: (workspaceJid: string, ownerId: string) =>
     state.guests.get(`${workspaceJid}|${ownerId}`) ?? [],
+  getUserById: (id: string) => ({ id, role: state.roles.get(id) ?? 'admin' }),
+}));
+vi.mock('../src/runtime-config.js', () => ({
+  getSystemSettings: () => ({ allowMemberGuests: state.allowMemberGuests }),
 }));
 
 const { getGroupAllowedUserIds } =
@@ -47,6 +54,8 @@ describe('group broadcast attribution ACL', () => {
     state.agents.clear();
     state.mounts.clear();
     state.guests.clear();
+    state.roles.clear();
+    state.allowMemberGuests = false;
   });
 
   test('observes a workspace rebind and owner transfer immediately', () => {
@@ -170,6 +179,19 @@ describe('group broadcast attribution ACL', () => {
     expect([...getGroupAllowedUserIds(imJid)!].sort()).toEqual([
       'guest-1',
       'u1',
+    ]);
+  });
+
+  test("a member's guests are reached only while allowMemberGuests is on", () => {
+    state.groups.set('web:flow-m', group('web:flow-m', 'flow-m', 'm1'));
+    state.roles.set('m1', 'member');
+    state.guests.set('web:flow-m|m1', ['guest-m']);
+
+    expect([...getGroupAllowedUserIds('web:flow-m')!]).toEqual(['m1']);
+    state.allowMemberGuests = true;
+    expect([...getGroupAllowedUserIds('web:flow-m')!].sort()).toEqual([
+      'guest-m',
+      'm1',
     ]);
   });
 

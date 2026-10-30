@@ -50,6 +50,7 @@ import {
   GUEST_READ_ONLY_ERROR,
   canViewGroup,
   getGuestAccountState,
+  redactAutomationRunForGuest,
 } from './guest-access.js';
 
 // Route modules
@@ -3897,9 +3898,20 @@ export function broadcastBillingUpdate(
   safeBroadcast(msg, false, allowedUserIds);
 }
 
-/** Automation changes go only to the owner's clients. */
+/**
+ * Automation changes go to the owner's clients and to guests granted the
+ * workspace, the latter without pre-run check output (as over REST).
+ */
 export function broadcastAutomationEvent(event: AutomationWsEvent): void {
   safeBroadcast(event, false, new Set([event.ownerId]));
+  const guests = getGroupAllowedUserIds(event.workspaceJid);
+  guests?.delete(event.ownerId);
+  if (!guests?.size) return;
+  const guestEvent: AutomationWsEvent =
+    event.type === 'automation_run_updated'
+      ? { ...event, run: redactAutomationRunForGuest(event.run) }
+      : event;
+  safeBroadcast(guestEvent, false, guests);
 }
 
 export function broadcastWhatsAppStatus(
@@ -4182,6 +4194,14 @@ let httpServer: ReturnType<typeof serve> | null = null;
 let wss: WebSocketServer | null = null;
 
 /**
+ * Test-only: attach the WebSocket gateway to a caller-owned HTTP server (bind
+ * it to an ephemeral loopback port). The caller closes the returned server.
+ */
+export function attachWebSocketForTest(server: unknown): WebSocketServer {
+  return setupWebSocket(server);
+}
+
+/**
  * Test-only factory: wires the given `WebDeps` into module + route state and
  * returns the fully-configured Hono `app` (every route is already mounted at
  * module load) so integration tests can exercise HTTP routes via
@@ -4198,14 +4218,6 @@ let wss: WebSocketServer | null = null;
  * construction). The current caller stays within the `/clear` ACL path, which
  * needs only `queue.stopGroup` / `getSessions` / `setLastAgentTimestamp`.
  */
-/**
- * Test-only: attach the WebSocket gateway to a caller-owned HTTP server (bind
- * it to an ephemeral loopback port). The caller closes the returned server.
- */
-export function attachWebSocketForTest(server: unknown): WebSocketServer {
-  return setupWebSocket(server);
-}
-
 export function createAppForTest(webDeps: WebDeps): typeof app {
   webDeps.broadcastNewMessage = broadcastNewMessage;
   webDeps.broadcastMessageDeleted = broadcastMessageDeleted;

@@ -4795,6 +4795,9 @@ export interface SystemSettings {
   // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
   // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
   pluginAutoScan: boolean;
+  // 普通成员能否创建只读访客账号。默认关闭：访客由所有者直接建号，不经过邀请码，
+  // 开放给成员等于绕过邀请制注册。关闭时成员已有的访客也一并失效；admin 不受限。
+  allowMemberGuests: boolean;
 }
 
 // Upper bound for the login lockout window. auth.ts reclaims login-attempt
@@ -4824,6 +4827,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   mainAgentAutoCompactPercentage: 0,
   fallbackModel: '',
   pluginAutoScan: true,
+  allowMemberGuests: false,
 };
 
 type SystemSettingsSource = 'file' | 'env' | 'api';
@@ -5037,6 +5041,10 @@ function normalizeSystemSettings(
       'pluginAutoScan',
       DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
     ),
+    allowMemberGuests: booleanField(
+      'allowMemberGuests',
+      DEFAULT_SYSTEM_SETTINGS.allowMemberGuests,
+    ),
   };
 
   if (invalidFields.size > 0) {
@@ -5084,6 +5092,7 @@ function buildEnvFallbackSettings(): SystemSettings {
         process.env.AUTO_COMPACT_PERCENTAGE,
       fallbackModel: process.env.FALLBACK_MODEL,
       pluginAutoScan: process.env.PLUGIN_AUTO_SCAN,
+      allowMemberGuests: process.env.ALLOW_MEMBER_GUESTS,
     },
     'env',
   );

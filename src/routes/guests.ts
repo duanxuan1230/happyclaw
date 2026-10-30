@@ -1,9 +1,12 @@
 /**
  * /api/guests — an account's own read-only guest accounts.
  *
- * Any active admin or member may create guests attached to themselves and
- * grant each one read-only visibility into a subset of their OWN workspaces
- * (`web:*` records they created, Home included). Every route is scoped to the
+ * Admins, and members while the `allowMemberGuests` system setting is on, may
+ * create up to MAX_GUESTS_PER_OWNER guests attached to themselves and grant
+ * each one read-only visibility into a subset of their OWN workspaces (`web:*`
+ * records they created, Home included). Listing, editing and deleting stay
+ * open to every owner, so a member can still clean up after the setting is
+ * turned off (their guests are inert meanwhile). Every route is scoped to the
  * caller's guests: another user's guest answers 404, as does a workspace JID
  * the caller does not own (existence is never revealed). Grant changes take
  * effect on the guest's next request; status, password and deletion changes
@@ -39,6 +42,7 @@ import { isUsernameConflictError } from './auth.js';
 import { onPasswordHashBusy } from '../password-hash-busy.js';
 import { getClientIp } from '../utils.js';
 import type { AuthUser, User } from '../types.js';
+import { MAX_GUESTS_PER_OWNER, canOwnGuests } from '../guest-access.js';
 
 const guestRoutes = new Hono<{ Variables: Variables }>();
 guestRoutes.onError(onPasswordHashBusy);
@@ -139,12 +143,26 @@ guestRoutes.get('/', authMiddleware, (c) => {
   return c.json({
     guests: listGuestsByOwner(owner.id).map(serializeGuest),
     grantable_workspaces: listGrantableWorkspaces(owner.id),
+    can_create: canOwnGuests(owner),
+    max_guests: MAX_GUESTS_PER_OWNER,
   });
 });
+
+const GUESTS_DISABLED_ERROR = 'Guest accounts are not enabled for members';
+const GUEST_LIMIT_ERROR = `Guest limit reached: at most ${MAX_GUESTS_PER_OWNER} guests per account`;
+
+function guestLimitReached(ownerId: string): boolean {
+  return listGuestsByOwner(ownerId).length >= MAX_GUESTS_PER_OWNER;
+}
 
 guestRoutes.post('/', authMiddleware, async (c) => {
   const owner = requireOwner(c);
   if (!owner) return c.json({ error: 'Forbidden' }, 403);
+  if (!canOwnGuests(owner))
+    return c.json({ error: GUESTS_DISABLED_ERROR }, 403);
+  if (guestLimitReached(owner.id)) {
+    return c.json({ error: GUEST_LIMIT_ERROR }, 409);
+  }
   const validation = GuestCreateSchema.safeParse(
     await c.req.json().catch(() => ({})),
   );
@@ -172,6 +190,11 @@ guestRoutes.post('/', authMiddleware, async (c) => {
   }
 
   const passwordHash = await hashPassword(password);
+  // Re-check after the async hash: a concurrent create may have used the
+  // last slot. Nothing below yields until the row is written.
+  if (guestLimitReached(owner.id)) {
+    return c.json({ error: GUEST_LIMIT_ERROR }, 409);
+  }
   const now = new Date().toISOString();
   const guestId = generateUserId();
   try {

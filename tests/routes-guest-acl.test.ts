@@ -2,8 +2,9 @@
  * Read-only guest accounts end to end, through the REAL auth middleware and
  * the global guest guard (no auth mock): guest management API, the default-
  * deny allowlist, granted vs ungranted reads, host-mode Home reads, file
- * hiding, task visibility, owner cut-off, deletion cascades, billing, and
- * the receive-only WebSocket.
+ * hiding (worktree sessions included), automation visibility, member guests
+ * and the per-owner cap, owner cut-off, deletion cascades, billing, and the
+ * receive-only WebSocket.
  */
 import fs from 'node:fs';
 import http from 'node:http';
@@ -39,6 +40,14 @@ const auth = await import('../src/auth.js');
 const acl = await import('../src/group-acl.js');
 const { SESSION_COOKIE_NAME_PLAIN } = await import('../src/config.js');
 const { invalidateUserSessions } = await import('../src/web-context.js');
+const automationRoutes = await import('../src/routes/automations.js');
+const { createAutomationCore } = await import('../src/automation-service.js');
+const { insertSessionWorktree } =
+  await import('../src/session-worktree-store.js');
+const harness = await import('./automation-harness.js');
+const { MAX_GUESTS_PER_OWNER } = await import('../src/guest-access.js');
+const { getGroupAllowedUserIds } =
+  await import('../src/group-broadcast-acl.js');
 
 const OWNER = 'u1'; // admin whose Home runs in host mode
 const OTHER = 'u2'; // unrelated member
@@ -47,6 +56,10 @@ const GRANTED = 'web:flow-x';
 const UNGRANTED = 'web:flow-y';
 const FOREIGN = 'web:flow-z';
 const GUEST_PASSWORD = 'guest-pass-123';
+const WORKTREE_SESSION = 'wt-session';
+const automations = harness.createFakeRuntime();
+const automationCore = createAutomationCore(automations.deps);
+const automationIds: Record<string, string> = {};
 
 const calls = {
   processGroupMessages: 0,
@@ -169,30 +182,74 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(dir, 'logs'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'logs', 'run.log'), 'log');
   fs.symlinkSync(path.join(dir, 'logs'), path.join(dir, 'alias'));
+  // Case and symlink variants of hidden entries.
+  fs.mkdirSync(path.join(dir, 'LOGS'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'LOGS', 'run.log'), 'log');
+  fs.mkdirSync(path.join(dir, '.Git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.Git', 'config'), '[remote]');
+  fs.writeFileSync(path.join(dir, 'Server.PEM'), 'KEY');
+  fs.writeFileSync(path.join(dir, 'id_ed25519'), 'KEY');
+  fs.writeFileSync(path.join(dir, 'credentials.json'), '{}');
+  fs.symlinkSync(path.join(dir, '.env'), path.join(dir, 'innocent.txt'));
+  fs.symlinkSync(path.join(dir, '.Git'), path.join(dir, 'repo-meta'));
 
-  for (const [id, jid] of [
-    ['task-granted', GRANTED],
-    ['task-ungranted', UNGRANTED],
-  ] as const) {
-    db.createTask({
-      id,
-      group_folder: jid.slice(4),
-      chat_jid: jid,
-      prompt: 'check',
-      schedule_type: 'cron',
-      schedule_value: '0 9 * * *',
-      context_mode: 'group',
-      execution_type: 'agent',
-      script_command: null,
-      next_run: null,
-      status: 'active',
-      created_at: new Date().toISOString(),
-      created_by: OWNER,
-    } as any);
+  // A Runtime Session of the granted workspace that runs in its own
+  // worktree: its file root is the worktree, not the workspace folder.
+  const now = new Date().toISOString();
+  db.createAgent({
+    id: WORKTREE_SESSION,
+    group_folder: 'flow-x',
+    chat_jid: GRANTED,
+    name: 'Worktree',
+    prompt: '',
+    status: 'idle',
+    kind: 'conversation',
+    created_by: OWNER,
+    created_at: now,
+    completed_at: null,
+    result_summary: null,
+    last_im_jid: null,
+    spawned_from_jid: null,
+  } as any);
+  const worktree = path.join(tmp, 'worktrees', 'flow-x', WORKTREE_SESSION);
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: elsewhere');
+  fs.writeFileSync(path.join(worktree, 'feature.ts'), 'export {}');
+  fs.writeFileSync(path.join(worktree, 'deploy.key'), 'KEY');
+  fs.symlinkSync(dir, path.join(worktree, 'main-checkout'));
+  insertSessionWorktree({
+    agent_id: WORKTREE_SESSION,
+    group_folder: 'flow-x',
+    chat_jid: GRANTED,
+    repo_path: dir,
+    cwd_subpath: '',
+    worktree_path: worktree,
+    branch: 'happyclaw/wt',
+    base_commit: 'abc',
+    created_at: now,
+  });
+
+  automationRoutes.setAutomationService(automationCore.service);
+  const ownerActor = { kind: 'web' as const, userId: OWNER, isAdmin: true };
+  for (const jid of [GRANTED, UNGRANTED]) {
+    automationIds[jid] = automationCore.service.create(ownerActor, {
+      workspaceJid: jid,
+      ...harness.draft({ name: `auto ${jid}`, schedule: { kind: 'manual' } }),
+    }).id;
   }
+  // The host Home may carry a pre-run check; guests never see its command.
+  automationIds[HOME] = automationCore.service.create(ownerActor, {
+    workspaceJid: HOME,
+    ...harness.draft({
+      name: 'home check',
+      schedule: { kind: 'manual' },
+      preRunCheck: { command: 'echo $SECRET_TOKEN' },
+    }),
+  }).id;
 });
 
 afterAll(() => {
+  automationRoutes.setAutomationService(null);
   delete process.env.HAPPYCLAW_SKIP_MIGRATION_BACKUP;
   db.closeDatabase();
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -288,10 +345,12 @@ describe('guest guard: default deny', () => {
     ['POST', `/api/groups/${GRANTED}/agents`],
     ['POST', `/api/groups/${GRANTED}/im-groups/sync`],
     ['POST', '/api/follow-ups/m1/action'],
-    ['POST', '/api/tasks'],
-    ['POST', '/api/tasks/task-granted/run'],
-    ['PATCH', '/api/tasks/task-granted'],
-    ['DELETE', '/api/tasks/task-granted'],
+    ['POST', '/api/automations'],
+    ['POST', '/api/automations/any/run'],
+    ['POST', '/api/automations/any/pause'],
+    ['POST', '/api/automations/any/runs/read'],
+    ['PATCH', '/api/automations/any'],
+    ['DELETE', '/api/automations/any'],
     ['POST', `/api/memory/workspaces/${GRANTED}/items`],
     ['POST', '/api/skills/install'],
     ['POST', '/api/mcp-servers'],
@@ -315,6 +374,10 @@ describe('guest guard: default deny', () => {
     `/api/groups/${GRANTED}/env`,
     `/api/groups/${GRANTED}/mcp`,
     `/api/groups/${GRANTED}/model-selection`,
+    `/api/groups/${GRANTED}/context-usage`,
+    `/api/groups/${GRANTED}/git/status`,
+    `/api/groups/${GRANTED}/git/diff?path=notes.txt`,
+    `/api/groups/${GRANTED}/workdir/peers`,
     `/api/groups/${GRANTED}/im-groups`,
     `/api/groups/${GRANTED}/delete-impact`,
     `/api/workspaces/${GRANTED}/channel-mounts`,
@@ -326,6 +389,9 @@ describe('guest guard: default deny', () => {
     '/api/billing/my/balance',
     '/api/usage/stats',
     '/api/status',
+    '/api/status/groups',
+    '/api/tasks',
+    '/api/automations/for-session?jid=web:flow-x',
     '/api/config/system',
     '/api/channel-accounts',
     '/api/browse/directories',
@@ -414,15 +480,11 @@ describe('guest reads: granted only', () => {
     expect(res.status).toBe(200);
   });
 
-  test('files hide .claude, logs and dotenv, including via symlink', async () => {
+  test('files hide dot entries, keys and runner state, in any case and via symlinks', async () => {
     const list = await call(guestCookie, 'GET', `/api/groups/${GRANTED}/files`);
     expect(list.status).toBe(200);
-    const names = list.body.files.map((f: any) => f.name);
-    expect(names).toContain('notes.txt');
-    expect(names).not.toContain('.claude');
-    expect(names).not.toContain('logs');
-    expect(names).not.toContain('.env');
-    expect(names).not.toContain('alias');
+    const names = list.body.files.map((f: any) => f.name).sort();
+    expect(names).toEqual(['notes.txt']);
     expect(list.body.files[0].absolutePath).toBeUndefined();
 
     const ok = await call(
@@ -434,8 +496,15 @@ describe('guest reads: granted only', () => {
     for (const hidden of [
       '.claude/settings.json',
       'logs/run.log',
+      'LOGS/run.log',
       'alias/run.log',
       '.env',
+      '.Git/config',
+      'repo-meta/config',
+      'innocent.txt',
+      'Server.PEM',
+      'id_ed25519',
+      'credentials.json',
     ]) {
       for (const kind of ['download', 'preview', 'content']) {
         const res = await call(
@@ -446,12 +515,14 @@ describe('guest reads: granted only', () => {
         expect([hidden, kind, res.status]).toEqual([hidden, kind, 404]);
       }
     }
-    const listHidden = await call(
-      guestCookie,
-      'GET',
-      `/api/groups/${GRANTED}/files?path=logs`,
-    );
-    expect(listHidden.status).toBe(404);
+    for (const dirPath of ['logs', 'LOGS', '.Git', 'repo-meta', 'alias']) {
+      const listHidden = await call(
+        guestCookie,
+        'GET',
+        `/api/groups/${GRANTED}/files?path=${encodeURIComponent(dirPath)}`,
+      );
+      expect([dirPath, listHidden.status]).toEqual([dirPath, 404]);
+    }
 
     // The owner is unaffected.
     const owner = await call(
@@ -462,37 +533,100 @@ describe('guest reads: granted only', () => {
     expect(owner.status).toBe(200);
   });
 
-  test('tasks: only granted ones, every permission false', async () => {
-    const res = await call(guestCookie, 'GET', '/api/tasks');
-    expect(res.status).toBe(200);
-    expect(res.body.tasks.map((t: any) => t.id)).toEqual(['task-granted']);
-    const perms = res.body.tasks[0].permissions;
-    for (const key of [
-      'can_edit',
-      'can_run',
-      'can_pause',
-      'can_stop',
-      'can_delete',
-      'can_restore',
-      'can_purge',
-    ]) {
-      expect([key, perms[key]]).toEqual([key, false]);
-    }
-    expect(Object.keys(res.body.groupNames).sort()).toEqual(
-      [GRANTED, HOME].sort(),
+  test('a worktree session lists and reads from its own worktree', async () => {
+    const base = `/api/groups/${GRANTED}/files`;
+    const query = `?agentId=${WORKTREE_SESSION}`;
+    const list = await call(guestCookie, 'GET', `${base}${query}`);
+    expect(list.status).toBe(200);
+    expect(list.body.files.map((f: any) => f.name)).toEqual(['feature.ts']);
+    const read = await call(
+      guestCookie,
+      'GET',
+      `${base}/content/${b64('feature.ts')}${query}`,
     );
+    expect(read.status).toBe(200);
+    for (const hidden of ['.git', 'deploy.key']) {
+      const res = await call(
+        guestCookie,
+        'GET',
+        `${base}/content/${b64(hidden)}${query}`,
+      );
+      expect([hidden, res.status]).toEqual([hidden, 404]);
+    }
+    // A link out of the worktree is refused by path validation (for owners
+    // too), before the guest check.
+    const escape = await call(
+      guestCookie,
+      'GET',
+      `${base}/content/${b64('main-checkout/notes.txt')}${query}`,
+    );
+    expect(escape.status).not.toBe(200);
+    expect(JSON.stringify(escape.body)).not.toContain('hello');
+    // The main session still reads the workspace folder.
     expect(
-      (await call(guestCookie, 'GET', '/api/tasks/task-granted/runs')).status,
+      (await call(guestCookie, 'GET', `${base}/content/${b64('notes.txt')}`))
+        .status,
     ).toBe(200);
     expect(
-      (await call(guestCookie, 'GET', '/api/tasks/task-granted/logs')).status,
+      (await call(guestCookie, 'GET', `${base}/content/${b64('feature.ts')}`))
+        .status,
+    ).toBe(404);
+  });
+
+  test('automations: granted workspaces only, host commands left out', async () => {
+    const list = await call(guestCookie, 'GET', '/api/automations');
+    expect(list.status).toBe(200);
+    expect(list.body.automations.map((a: any) => a.id).sort()).toEqual(
+      [automationIds[GRANTED], automationIds[HOME]].sort(),
+    );
+    const home = list.body.automations.find(
+      (a: any) => a.id === automationIds[HOME],
+    );
+    expect(home.preRunCheck).toBeNull();
+    expect(JSON.stringify(list.body)).not.toContain('SECRET_TOKEN');
+    const owner = await call(ownerCookie, 'GET', '/api/automations');
+    expect(JSON.stringify(owner.body)).toContain('SECRET_TOKEN');
+
+    const filtered = await call(
+      guestCookie,
+      'GET',
+      `/api/automations?workspace=${encodeURIComponent(UNGRANTED)}`,
+    );
+    expect(filtered.body.automations).toEqual([]);
+
+    const detail = await call(
+      guestCookie,
+      'GET',
+      `/api/automations/${automationIds[HOME]}`,
+    );
+    expect(detail.status).toBe(200);
+    expect(detail.body.automation.preRunCheck).toBeNull();
+    expect(
+      (
+        await call(
+          guestCookie,
+          'GET',
+          `/api/automations/${automationIds[GRANTED]}/runs`,
+        )
+      ).status,
     ).toBe(200);
+    for (const url of [
+      `/api/automations/${automationIds[UNGRANTED]}`,
+      `/api/automations/${automationIds[UNGRANTED]}/runs`,
+      '/api/automations/missing',
+    ]) {
+      const res = await call(guestCookie, 'GET', url);
+      expect([url, res.status]).toEqual([url, 404]);
+    }
     expect(
-      (await call(guestCookie, 'GET', '/api/tasks/task-ungranted/runs')).status,
-    ).toBe(404);
-    expect(
-      (await call(guestCookie, 'GET', '/api/tasks/task-ungranted/logs')).status,
-    ).toBe(404);
+      (
+        await call(
+          guestCookie,
+          'POST',
+          `/api/automations/${automationIds[GRANTED]}/run`,
+        )
+      ).status,
+    ).toBe(403);
   });
 
   test('grant changes apply on the next request', async () => {
@@ -615,16 +749,85 @@ describe('receive-only WebSocket', () => {
     ws.send(
       JSON.stringify({ type: 'terminal_input', chatJid: HOME, data: 'ls\n' }),
     );
+    ws.send(
+      JSON.stringify({
+        type: 'terminal_resize',
+        chatJid: HOME,
+        cols: 100,
+        rows: 30,
+      }),
+    );
+    ws.send(JSON.stringify({ type: 'terminal_stop', chatJid: HOME }));
+    // A type added after this test was written is refused the same way.
+    ws.send(JSON.stringify({ type: 'some_future_type', chatJid: GRANTED }));
     await until(
-      () => messages.filter((m) => m.type === 'ws_error').length >= 3,
+      () => messages.filter((m) => m.type === 'ws_error').length >= 6,
     );
     const errors = messages.filter((m) => m.type === 'ws_error');
-    expect(errors).toHaveLength(3);
+    expect(errors).toHaveLength(6);
     expect(
       errors.every((m) => m.error === 'Guest accounts are read-only'),
     ).toBe(true);
     expect(calls.ensureTerminal).toBe(0);
     expect(calls.processGroupMessages).toBe(0);
+    expect(calls.stopGroup).toBe(0);
+    ws.close();
+  });
+
+  test('a liveness ping still gets its pong', async () => {
+    const { ws, messages } = await connect(guestCookie);
+    ws.send(JSON.stringify({ type: 'ping' }));
+    await until(() => messages.some((m) => m.type === 'pong'));
+    expect(messages.map((m) => m.type)).toContain('pong');
+    expect(messages.some((m) => m.type === 'ws_error')).toBe(false);
+    ws.close();
+  });
+
+  test('automation events of granted workspaces reach the guest, redacted', async () => {
+    const { ws, messages } = await connect(guestCookie);
+    const run = {
+      id: 'run-1',
+      automationId: automationIds[HOME],
+      trigger: 'manual',
+      status: 'success',
+      sessionJid: HOME,
+      inputMessageId: null,
+      scheduledFor: new Date().toISOString(),
+      firedAt: null,
+      finishedAt: null,
+      resultText: null,
+      error: null,
+      preCheck: {
+        decision: 'run',
+        exitCode: 0,
+        timedOut: false,
+        stdout: 'SECRET_TOKEN=abc',
+        stderr: 'warn',
+      },
+      silenced: false,
+      readAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    web.broadcastAutomationEvent({
+      type: 'automation_run_updated',
+      automationId: automationIds[HOME],
+      workspaceJid: HOME,
+      ownerId: OWNER,
+      run: run as any,
+    });
+    web.broadcastAutomationEvent({
+      type: 'automation_changed',
+      automationId: automationIds[UNGRANTED],
+      workspaceJid: UNGRANTED,
+      ownerId: OWNER,
+    });
+    await until(() =>
+      messages.some((m) => m.type === 'automation_run_updated'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const events = messages.filter((m) => m.type.startsWith('automation_'));
+    expect(events).toHaveLength(1);
+    expect(events[0].run.preCheck).toMatchObject({ stdout: '', stderr: '' });
     ws.close();
   });
 
@@ -654,6 +857,106 @@ describe('receive-only WebSocket', () => {
       .sort();
     expect(ids).toEqual(['m-granted', 'm-home']);
     ws.close();
+  });
+});
+
+describe('member guests and the per-owner cap', () => {
+  test('members cannot hold guests until allowMemberGuests is on', async () => {
+    const list = await call(otherCookie, 'GET', '/api/guests');
+    expect(list.status).toBe(200);
+    expect(list.body.can_create).toBe(false);
+    const denied = await call(otherCookie, 'POST', '/api/guests', {
+      username: 'member_guest',
+      password: GUEST_PASSWORD,
+      workspace_jids: [FOREIGN],
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe(
+      'Guest accounts are not enabled for members',
+    );
+    // The admin created guest_one with the setting at its default (off).
+    expect(
+      (await call(ownerCookie, 'GET', '/api/guests')).body.can_create,
+    ).toBe(true);
+
+    const on = await call(ownerCookie, 'PUT', '/api/config/system', {
+      allowMemberGuests: true,
+    });
+    expect(on.status).toBe(200);
+    expect(on.body.allowMemberGuests).toBe(true);
+    const created = await call(otherCookie, 'POST', '/api/guests', {
+      username: 'member_guest',
+      password: GUEST_PASSWORD,
+      workspace_jids: [FOREIGN],
+    });
+    expect(created.status).toBe(201);
+    const memberGuestId = created.body.guest.id;
+    const memberGuestCookie = mintCookie(memberGuestId);
+    expect(
+      (await call(memberGuestCookie, 'GET', `/api/groups/${FOREIGN}/messages`))
+        .status,
+    ).toBe(200);
+    expect(getGroupAllowedUserIds(FOREIGN)?.has(memberGuestId)).toBe(true);
+
+    // Turning it off again cuts the member's guests off at once.
+    const off = await call(ownerCookie, 'PUT', '/api/config/system', {
+      allowMemberGuests: false,
+    });
+    expect(off.body.allowMemberGuests).toBe(false);
+    const cut = await call(memberGuestCookie, 'GET', '/api/groups');
+    expect(cut.status).toBe(403);
+    expect(cut.body.error).toBe('Account disabled');
+    expect(getGroupAllowedUserIds(FOREIGN)?.has(memberGuestId)).toBe(false);
+    // The admin's guest is unaffected.
+    expect((await call(guestCookie, 'GET', '/api/groups')).status).toBe(200);
+    // The member can still clean up.
+    expect(
+      (await call(otherCookie, 'DELETE', `/api/guests/${memberGuestId}`))
+        .status,
+    ).toBe(200);
+  });
+
+  test(`an owner holds at most ${MAX_GUESTS_PER_OWNER} guests`, async () => {
+    const filler: string[] = [];
+    const now = new Date().toISOString();
+    for (
+      let i = db.listGuestsByOwner(OWNER).length;
+      i < MAX_GUESTS_PER_OWNER;
+      i++
+    ) {
+      const id = `filler-${i}`;
+      db.createUser({
+        id,
+        username: `filler_${i}`,
+        password_hash: 'x',
+        display_name: id,
+        role: 'guest',
+        status: 'disabled',
+        guest_owner_id: OWNER,
+        created_at: now,
+        updated_at: now,
+      });
+      filler.push(id);
+    }
+    const full = await call(ownerCookie, 'POST', '/api/guests', {
+      username: 'one_too_many',
+      password: GUEST_PASSWORD,
+      workspace_jids: [],
+    });
+    expect(full.status).toBe(409);
+    expect(full.body.error).toBe(
+      `Guest limit reached: at most ${MAX_GUESTS_PER_OWNER} guests per account`,
+    );
+    expect(db.getUserByUsername('one_too_many')).toBeUndefined();
+
+    for (const id of filler) db.deleteGuestUser(id);
+    const room = await call(ownerCookie, 'POST', '/api/guests', {
+      username: 'one_more',
+      password: GUEST_PASSWORD,
+      workspace_jids: [],
+    });
+    expect(room.status).toBe(201);
+    db.deleteGuestUser(room.body.guest.id);
   });
 });
 

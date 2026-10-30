@@ -726,6 +726,7 @@ export const SystemSettingsSchema = z
     maxLoginAttempts: z.number().int().min(1).max(100).optional(),
     loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
     fallbackModel: z.string().max(64).optional(),
+    allowMemberGuests: z.boolean().optional(),
   })
   .strict();
 

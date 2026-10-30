@@ -402,13 +402,22 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   if (access instanceof Response) return access;
   const { group, authUser, rootOverride } = access;
   const isGuest = authUser.role === 'guest';
-  if (isGuest && isGuestHiddenWorkspacePath(subPath)) {
+  const fileRoot = getFileRoot(group.folder, rootOverride);
+  if (
+    subPath &&
+    isHiddenForGuest(
+      authUser,
+      group,
+      rootOverride,
+      subPath,
+      path.join(fileRoot, subPath),
+    )
+  ) {
     return c.json({ error: 'File not found' }, 404);
   }
 
   try {
     const result = listFiles(group.folder, subPath, rootOverride);
-    const fileRoot = getFileRoot(group.folder, rootOverride);
     const files = result.files
       .filter(
         (entry) =>
