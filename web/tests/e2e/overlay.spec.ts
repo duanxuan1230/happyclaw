@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+import { touchscreen } from './touchscreen';
+
 // The shared overlays over the overlay harness (a real browser router):
 // system back closes a sheet or dialog without leaving or remounting the
 // page, phone dialogs are bottom sheets whose content scrolls and whose
@@ -205,14 +207,12 @@ test.describe('a dropdown trigger on touch', () => {
     const box = (await trigger.boundingBox())!;
     const x = box.x + box.width / 2;
     const y = box.y + box.height / 2;
-    const cdp = await page.context().newCDPSession(page);
-    const touch = (type: string, points: { x: number; y: number }[]) =>
-      cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
-    await touch('touchStart', [{ x, y }]);
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x, y }]);
     for (let step = 1; step <= 6; step += 1) {
-      await touch('touchMove', [{ x, y: y - step * 20 }]);
+      await fingers.move([{ x, y: y - step * 20 }]);
     }
-    await touch('touchEnd', []);
+    await fingers.up();
     await page.waitForTimeout(300);
     await expect(page.getByRole('menu')).toHaveCount(0);
 

@@ -1,10 +1,6 @@
-import {
-  expect,
-  test,
-  type CDPSession,
-  type Locator,
-  type Page,
-} from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+
+import { touchscreen, type TouchPoint } from './touchscreen';
 
 // Reading a conversation on a phone (Pixel 7): the message menu and its long
 // press, long user messages, the image viewer's gestures, Markdown links and
@@ -37,33 +33,19 @@ async function expectNoSidewaysOverflow(page: Page) {
   expect(overflow).toBeLessThanOrEqual(0);
 }
 
-type TouchPoint = { x: number; y: number };
-
-async function touch(
-  cdp: CDPSession,
-  type: 'touchStart' | 'touchMove' | 'touchEnd',
-  points: TouchPoint[],
-) {
-  await cdp.send('Input.dispatchTouchEvent', {
-    type,
-    touchPoints: points.map((point, id) => ({
-      x: Math.round(point.x),
-      y: Math.round(point.y),
-      id,
-    })),
-  });
-}
-
 async function longPress(page: Page, at: TouchPoint) {
-  const cdp = await page.context().newCDPSession(page);
-  await touch(cdp, 'touchStart', [at]);
+  const fingers = await touchscreen(page);
+  await fingers.down([at]);
   await page.waitForTimeout(700);
-  await touch(cdp, 'touchEnd', []);
+  await fingers.up();
 }
 
 /**
  * Brings `locator` to the middle of the transcript (clear of the floating
- * header and composer) and lets the virtual list settle around it.
+ * header and composer) and lets the virtual list settle around it. While the
+ * first page settles the list takes a scroll without reader input for layout
+ * and pins the bottom again (WebKit measures late enough to hit that), so it
+ * scrolls again until the element stays in view.
  */
 async function reveal(locator: Locator) {
   await expect(async () => {
@@ -72,8 +54,13 @@ async function reveal(locator: Locator) {
       .evaluate((el) => el.scrollIntoView({ block: 'center' }), undefined, {
         timeout: 1000,
       });
+    await locator.page().waitForTimeout(300);
+    const inView = await locator.first().evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return box.bottom > 0 && box.top < window.innerHeight;
+    });
+    expect(inView).toBe(true);
   }).toPass();
-  await locator.page().waitForTimeout(300);
 }
 
 async function center(page: Page, selector: string) {
@@ -84,9 +71,7 @@ async function center(page: Page, selector: string) {
 test.describe('the message menu', () => {
   test('opens as a sheet on a long press, with a way to select the text', async ({
     page,
-    browserName,
   }) => {
-    test.skip(browserName !== 'chromium', 'multi-touch goes through CDP');
     await open(page, 'scenario=history');
     const bubble = page
       .locator('[data-hc-chat-view] p')
@@ -115,7 +100,13 @@ test.describe('the message menu', () => {
     await expect(select).toBeVisible();
     const text = select.locator('[data-hc-select-text]');
     await expect(text).toContainText('长列表大概会有 1000 个会话');
-    await expect(text).toHaveCSS('user-select', 'text');
+    // Safari only knows the prefixed property.
+    expect(
+      await text.evaluate((el) => {
+        const style = getComputedStyle(el);
+        return style.userSelect || style.webkitUserSelect;
+      }),
+    ).toBe('text');
     await expectNoSidewaysOverflow(page);
   });
 
@@ -218,25 +209,23 @@ test.describe('the image viewer', () => {
 
   test('zooms about the midpoint of two fingers, pans, and springs back past the edge', async ({
     page,
-    browserName,
   }) => {
-    test.skip(browserName !== 'chromium', 'multi-touch goes through CDP');
     await openImage(page);
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    const cdp = await page.context().newCDPSession(page);
+    const fingers = await touchscreen(page);
     const mid = await center(page, '[data-hc-zoom-content]');
     const anchor = { x: mid.x + 40, y: mid.y };
-    await touch(cdp, 'touchStart', [
+    await fingers.down([
       { x: anchor.x - 40, y: anchor.y },
       { x: anchor.x + 40, y: anchor.y },
     ]);
     for (let step = 1; step <= 5; step += 1) {
-      await touch(cdp, 'touchMove', [
+      await fingers.move([
         { x: anchor.x - 40 - step * 8, y: anchor.y },
         { x: anchor.x + 40 + step * 8, y: anchor.y },
       ]);
     }
-    await touch(cdp, 'touchEnd', []);
+    await fingers.up();
     const zoomed = await transform(page);
     expect(zoomed.scale).toBeCloseTo(2, 1);
     // The point between the fingers stayed under them: it was 40px right of
@@ -249,57 +238,60 @@ test.describe('the image viewer', () => {
 
     // One finger drags the zoomed image; far past its edge it springs back
     // to the edge, not beyond.
-    await touch(cdp, 'touchStart', [mid]);
+    await fingers.down([mid]);
     for (let step = 1; step <= 10; step += 1) {
-      await touch(cdp, 'touchMove', [{ x: mid.x + step * 60, y: mid.y }]);
+      await fingers.move([{ x: mid.x + step * 60, y: mid.y }]);
     }
-    await touch(cdp, 'touchEnd', []);
+    await fingers.up();
     const width = await page
       .locator('[data-hc-zoom-content]')
       .evaluate((el) => (el as HTMLElement).offsetWidth);
     const viewport = page.viewportSize()!.width;
-    const settled = await transform(page);
-    expect(settled.x).toBeCloseTo(Math.max(0, (width * 2 - viewport) / 2), 0);
+    // WebKit may still ease the spring back: motion reads the emulated
+    // reduced-motion setting late there.
+    await expect
+      .poll(async () => (await transform(page)).x)
+      .toBeCloseTo(Math.max(0, (width * 2 - viewport) / 2), 0);
 
     // A double tap zooms back out to 1×.
     for (let tap = 0; tap < 2; tap += 1) {
-      await touch(cdp, 'touchStart', [mid]);
-      await touch(cdp, 'touchEnd', []);
+      await fingers.down([mid]);
+      await fingers.up();
     }
     await expect(page.locator('[data-hc-zoom-content]')).toHaveAttribute(
       'data-zoomed',
       'false',
     );
-    expect((await transform(page)).scale).toBe(1);
+    await expect.poll(async () => (await transform(page)).scale).toBe(1);
     await expect(page.getByRole('dialog', { name: /图片预览/ })).toBeVisible();
   });
 
   test('a double tap zooms in; a pull down at 1× closes', async ({ page }) => {
     await openImage(page);
-    const cdp = await page.context().newCDPSession(page);
+    const fingers = await touchscreen(page);
     const mid = await center(page, '[data-hc-zoom-content]');
     for (let tap = 0; tap < 2; tap += 1) {
-      await touch(cdp, 'touchStart', [mid]);
-      await touch(cdp, 'touchEnd', []);
+      await fingers.down([mid]);
+      await fingers.up();
     }
     await expect(page.locator('[data-hc-zoom-content]')).toHaveAttribute(
       'data-zoomed',
       'true',
     );
     for (let tap = 0; tap < 2; tap += 1) {
-      await touch(cdp, 'touchStart', [mid]);
-      await touch(cdp, 'touchEnd', []);
+      await fingers.down([mid]);
+      await fingers.up();
     }
     await expect(page.locator('[data-hc-zoom-content]')).toHaveAttribute(
       'data-zoomed',
       'false',
     );
     await page.waitForTimeout(350);
-    await touch(cdp, 'touchStart', [mid]);
+    await fingers.down([mid]);
     for (let step = 1; step <= 10; step += 1) {
-      await touch(cdp, 'touchMove', [{ x: mid.x, y: mid.y + step * 20 }]);
+      await fingers.move([{ x: mid.x, y: mid.y + step * 20 }]);
     }
-    await touch(cdp, 'touchEnd', []);
+    await fingers.up();
     await expect(page.getByRole('dialog', { name: /图片预览/ })).toHaveCount(0);
   });
 });
@@ -307,9 +299,7 @@ test.describe('the image viewer', () => {
 test.describe('Markdown', () => {
   test('opens a workspace file inside the app, not in a new tab', async ({
     page,
-    browserName,
   }) => {
-    test.skip(browserName !== 'chromium', 'multi-touch goes through CDP');
     await page.route('**/files/preview/**', (route) =>
       route.fulfill({ contentType: 'text/plain', body: '报告正文' }),
     );
@@ -437,15 +427,15 @@ test.describe('the transcript', () => {
 
   /** Reads up the history with a finger, away from the bottom. */
   async function readUp(page: Page) {
-    const cdp = await page.context().newCDPSession(page);
+    const fingers = await touchscreen(page);
     const view = page.viewportSize()!;
     const x = view.width / 2;
-    await touch(cdp, 'touchStart', [{ x, y: 250 }]);
+    await fingers.down([{ x, y: 250 }]);
     for (let step = 1; step <= 10; step += 1) {
-      await touch(cdp, 'touchMove', [{ x, y: 250 + step * 40 }]);
+      await fingers.move([{ x, y: 250 + step * 40 }]);
       await page.waitForTimeout(16);
     }
-    await touch(cdp, 'touchEnd', []);
+    await fingers.up();
     await page.waitForTimeout(600);
   }
 
