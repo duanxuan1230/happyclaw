@@ -37,13 +37,16 @@ import {
   launchModelName,
   MAX_PROVIDER_MODEL_ID_LENGTH,
   MAX_PROVIDER_MODELS,
+  MODEL_EFFORTS,
   normalizeConnectionModelRoles,
   normalizeContextWindow,
   normalizeProviderBaseUrl,
   normalizeProviderModels,
   ONE_MILLION_CONTEXT,
   PROVIDER_ERROR_CODES,
+  resolveModelCapabilities,
   splitOneMillionSuffix,
+  windowOf,
   type ConnectionModelRoles,
   type ModelEffort,
   type ProviderErrorCode,
@@ -1503,10 +1506,11 @@ function toStoredProviderV4(
     claudeOAuthLastRefreshAt: provider.claudeOAuthLastRefreshAt ?? null,
     claudeOAuthLastRefreshError: provider.claudeOAuthLastRefreshError ?? null,
   };
-  const sanitizedEnv = sanitizeCustomEnvMap(
-    provider.customEnv || {},
-    CONNECTION_ENV_WRITE,
-  );
+  // Writes from the API are sanitized on the way in; this keeps what the
+  // read-time migration deliberately left in place.
+  const sanitizedEnv = sanitizeCustomEnvMap(provider.customEnv || {}, {
+    skipReservedClaudeKeys: true,
+  });
   return {
     id: provider.id,
     name: provider.name,
@@ -1707,27 +1711,34 @@ const LEGACY_ROLE_ENV_KEYS: ReadonlyArray<
   ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'sonnet'],
 ];
 
-/** `models` with `id`'s entry given `field`, unless it already has one. */
-function withEntryDefault<K extends 'contextWindow' | 'defaultEffort'>(
-  models: ProviderModelEntry[],
-  id: string,
-  field: K,
-  value: NonNullable<ProviderModelEntry[K]>,
-): ProviderModelEntry[] {
-  return models.map((entry) =>
-    entry.id === id && !entry[field] ? { ...entry, [field]: value } : entry,
-  );
-}
+/**
+ * Legacy model keys a connection without a model of its own keeps in its env
+ * when it has no entry to carry them: they are not injected (the launch
+ * derives these keys), but they are not dropped either.
+ */
+const UNATTACHED_LEGACY_KEYS = [
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  'CLAUDE_CODE_EFFORT_LEVEL',
+] as const;
+
+/** Connections whose kept legacy keys were already logged this process. */
+const loggedUnattachedLegacyKeys = new Set<string>();
 
 /**
  * Moves what a connection saved before models carried their window and
  * efforts into the structured fields, in place; true when anything changed.
- * `[1m]` on the connection's model becomes its entry's 1M window; legacy
- * model keys in the env become roles (when they name another model of the
- * connection), the model's window and its default effort, and leave the env.
- * A connection with an endpoint gets CONNECTION_ENV_PREFILL once, where its
- * env has no value, so the runtime defaults it ran with keep applying. Run
- * again on its own output it changes nothing.
+ * Run again on its own output it changes nothing.
+ *
+ * - `[1m]` on a model name becomes that entry's 1M window.
+ * - A legacy haiku/sub-agent/opus/sonnet key becomes a role; a model the
+ *   connection does not list yet is added for it.
+ * - CLAUDE_CODE_AUTO_COMPACT_WINDOW and CLAUDE_CODE_EFFORT_LEVEL applied to
+ *   every launch, so they go to every entry that declares no window or
+ *   default effort. A compact window below 1M replaces a 1M that only came
+ *   from `[1m]` (it lowered that ceiling). An effort the registry knows
+ *   nothing about declares every effort, so the default stays usable.
+ * - A connection with an endpoint gets CONNECTION_ENV_PREFILL once, where its
+ *   env has no value, so the runtime defaults it ran with keep applying.
  */
 function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
   const env = provider.customEnv;
@@ -1737,53 +1748,98 @@ function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
   const { model, oneMillion } = splitOneMillionSuffix(provider.anthropicModel);
   const needsPrefill = provider.envPrefill !== 1;
   if (!oneMillion && legacyKeys.length === 0 && !needsPrefill) return false;
+  const before = JSON.stringify([
+    provider.anthropicModel,
+    provider.models,
+    provider.roles,
+    env,
+    provider.envPrefill,
+  ]);
 
-  if (!isCodexGatewayProvider(provider) && model) {
-    let models = effectiveProviderModels({
-      anthropicModel: model,
-      models: provider.models,
-    });
-    if (oneMillion)
-      models = withEntryDefault(
-        models,
-        model,
-        'contextWindow',
-        ONE_MILLION_CONTEXT,
-      );
-    const compact = normalizeContextWindow(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
-    if (compact)
-      models = withEntryDefault(models, model, 'contextWindow', compact);
-    const effort = env.CLAUDE_CODE_EFFORT_LEVEL?.trim();
-    if (isModelEffort(effort)) {
-      models = withEntryDefault(models, model, 'defaultEffort', effort);
-    }
+  if (!isCodexGatewayProvider(provider)) {
+    let models = model
+      ? effectiveProviderModels({
+          anthropicModel: model,
+          models: provider.models,
+        })
+      : [...(provider.models ?? [])];
+    /** Ids named with `[1m]`: their 1M is a ceiling a compact window lowers. */
+    const oneMillionIds = new Set<string>(oneMillion ? [model] : []);
     const legacyRoles: Record<string, string> = {};
     for (const [key, role] of LEGACY_ROLE_ENV_KEYS) {
-      const value = env[key]?.trim();
-      if (!value) continue;
-      const named = splitOneMillionSuffix(value);
-      if (named.model === model) continue;
-      legacyRoles[role] = named.model;
-      if (named.oneMillion) {
-        models = withEntryDefault(
-          models,
-          named.model,
-          'contextWindow',
-          ONE_MILLION_CONTEXT,
-        );
+      const named = splitOneMillionSuffix(env[key]?.trim() ?? '');
+      if (!named.model || named.model === model) continue;
+      if (!isValidModelId(named.model)) continue;
+      if (!models.some((entry) => entry.id === named.model)) {
+        if (models.length >= MAX_PROVIDER_MODELS) continue;
+        models.push({ id: named.model });
       }
+      legacyRoles[role] = named.model;
+      if (named.oneMillion) oneMillionIds.add(named.model);
+    }
+    models = models.map((entry) =>
+      oneMillionIds.has(entry.id) && !entry.contextWindow
+        ? { ...entry, contextWindow: ONE_MILLION_CONTEXT }
+        : entry,
+    );
+
+    const compact = normalizeContextWindow(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+    const effort = env.CLAUDE_CODE_EFFORT_LEVEL?.trim();
+    const attached = models.length > 0;
+    if (attached && compact) {
+      models = models.map((entry) =>
+        !entry.contextWindow ||
+        (entry.contextWindow === ONE_MILLION_CONTEXT &&
+          compact < ONE_MILLION_CONTEXT)
+          ? { ...entry, contextWindow: compact }
+          : entry,
+      );
+    }
+    if (attached && isModelEffort(effort)) {
+      models = models.map((entry) => {
+        if (entry.defaultEffort) return entry;
+        const { efforts } = resolveModelCapabilities(entry);
+        if (efforts.length === 0) {
+          return {
+            ...entry,
+            efforts: [...MODEL_EFFORTS],
+            defaultEffort: effort,
+          };
+        }
+        return efforts.includes(effort)
+          ? { ...entry, defaultEffort: effort }
+          : entry;
+      });
     }
     const roles = {
       ...normalizeConnectionModelRoles(legacyRoles, models),
       ...(provider.roles ?? {}),
     };
-    if (provider.models || legacyKeys.length > 0 || oneMillion) {
+    // A connection without a list keeps none unless the migration added to
+    // what its one model implies.
+    const implied = model ? [{ id: model }] : [];
+    if (provider.models || JSON.stringify(models) !== JSON.stringify(implied)) {
       provider.models = models;
     }
     provider.roles = Object.keys(roles).length > 0 ? roles : undefined;
+
+    const kept = attached
+      ? []
+      : UNATTACHED_LEGACY_KEYS.filter((key) => env[key]?.trim());
+    for (const key of legacyKeys) {
+      if (!(kept as readonly string[]).includes(key)) delete env[key];
+    }
+    if (kept.length > 0 && !loggedUnattachedLegacyKeys.has(provider.id)) {
+      loggedUnattachedLegacyKeys.add(provider.id);
+      logger.warn(
+        { providerId: provider.id, keys: kept },
+        'Model connection without models keeps legacy env keys it can no longer inject',
+      );
+    }
+  } else {
+    for (const key of legacyKeys) delete env[key];
   }
   provider.anthropicModel = model;
-  for (const key of legacyKeys) delete env[key];
   if (needsPrefill) {
     if (provider.anthropicBaseUrl) {
       for (const [key, value] of Object.entries(CONNECTION_ENV_PREFILL)) {
@@ -1792,7 +1848,15 @@ function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
     }
     provider.envPrefill = 1;
   }
-  return true;
+  return (
+    JSON.stringify([
+      provider.anthropicModel,
+      provider.models,
+      provider.roles,
+      env,
+      provider.envPrefill,
+    ]) !== before
+  );
 }
 
 /**
@@ -2322,13 +2386,13 @@ export function nextProviderModelList(
     anthropicModel: model,
     models: list ?? [],
   });
-  if (oneMillion)
-    models = withEntryDefault(
-      models,
-      model,
-      'contextWindow',
-      ONE_MILLION_CONTEXT,
+  if (oneMillion) {
+    models = models.map((entry) =>
+      entry.id === model && !entry.contextWindow
+        ? { ...entry, contextWindow: ONE_MILLION_CONTEXT }
+        : entry,
     );
+  }
   if (models.length > MAX_PROVIDER_MODELS) {
     throw new Error(
       `一个模型配置最多 ${MAX_PROVIDER_MODELS} 个模型，请先移除不用的模型`,
@@ -3036,7 +3100,10 @@ export function toPublicProvider(
     roles: provider.roles ?? {},
     presetId: provider.presetId ?? null,
     lastTest: provider.lastTest ?? null,
-    customEnv: provider.customEnv || {},
+    customEnv: sanitizeCustomEnvMap(
+      provider.customEnv || {},
+      CONNECTION_ENV_WRITE,
+    ),
     updatedAt: provider.updatedAt,
   };
 }
@@ -3539,10 +3606,14 @@ export function buildClaudeEnvLines(
       lines.push(`${key}=${sanitizeEnvValue(value)}`);
     }
   } else if (config.anthropicModel) {
-    const declared = findModelEntry(models, config.anthropicModel);
+    // Declared or `[1m]`-named windows only: on the official endpoint `[1m]`
+    // is the billed 1M opt-in, which a registry window must not turn on.
     lines.push(
       `ANTHROPIC_MODEL=${sanitizeEnvValue(
-        launchModelName(config.anthropicModel, declared?.contextWindow),
+        launchModelName(
+          config.anthropicModel,
+          windowOf(models, config.anthropicModel),
+        ),
       )}`,
     );
   }
