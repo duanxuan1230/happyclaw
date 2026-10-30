@@ -25,6 +25,8 @@ vi.mock('../../stores/chat', async () => {
 
 const { useChatStore } = await import('../../stores/chat');
 const { ReviewPanel } = await import('./ReviewPanel');
+const { emulatePointer, flushHistory } =
+  await import('@/components/ui/overlay-test-utils');
 const { parseUnifiedDiff } = await import('./diff-lines');
 
 (
@@ -142,6 +144,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   act(() => root?.unmount());
   container?.remove();
   root = null;
@@ -287,6 +290,35 @@ describe('ReviewPanel', () => {
     expect(view.querySelector('[data-testid="review-diff-scroll"]')).toBeNull();
     expect(fileRow('src/new-name.ts').closest('.hidden')).toBeNull();
     expect(calls(STATUS_URL)).toHaveLength(1);
+  });
+
+  test('a phone’s system back closes the diff, not the panel', async () => {
+    emulatePointer('phone');
+    respond((url) => (url.pathname === STATUS_URL ? okStatus() : undefined));
+    respond((url) =>
+      url.pathname === '/api/groups/web%3Aws/git/diff'
+        ? {
+            state: 'ok',
+            path: 'src/routes/git-review.ts',
+            diff: RENAME_DIFF,
+            binary: false,
+            truncated: false,
+            untracked: false,
+          }
+        : undefined,
+    );
+    const view = await render('s1');
+    const entries = window.history.length;
+    act(() => fileRow('src/routes/git-review.ts').click());
+    await flush();
+    expect(
+      view.querySelector('[data-testid="review-diff-scroll"]'),
+    ).not.toBeNull();
+    expect(window.history.length).toBe(entries + 1);
+
+    act(() => window.history.back());
+    await flushHistory(act);
+    expect(view.querySelector('[data-testid="review-diff-scroll"]')).toBeNull();
   });
 
   test('says when a diff is binary or empty', async () => {
