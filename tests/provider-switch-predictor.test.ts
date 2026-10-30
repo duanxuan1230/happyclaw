@@ -97,9 +97,9 @@ describe('willClearSessionOnProviderSwitch', () => {
   test('true when the Agent runs another model of the same connection', () => {
     mocks.boundId = 'A';
     mocks.sessionModel = 'A-model';
-    expect(
-      willClearSessionOnProviderSwitch('grp', null, 'A', 'A-other'),
-    ).toBe(true);
+    expect(willClearSessionOnProviderSwitch('grp', null, 'A', 'A-other')).toBe(
+      true,
+    );
   });
 
   test('a window change alone is not a model change', () => {

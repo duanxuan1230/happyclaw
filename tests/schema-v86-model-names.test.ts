@@ -141,9 +141,7 @@ describe('schema v86 model names', () => {
     db.closeDatabase();
     const raw = new Database(databasePath);
     raw
-      .prepare(
-        "UPDATE router_state SET value = ? WHERE key = 'schema_version'",
-      )
+      .prepare("UPDATE router_state SET value = ? WHERE key = 'schema_version'")
       .run(String(db.CURRENT_SCHEMA_VERSION + 1));
     raw.close();
     expect(() => db.initDatabase()).toThrow(/refusing downgrade/);

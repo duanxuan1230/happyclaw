@@ -242,7 +242,10 @@ describe('default.model names what an unpicked launch runs', () => {
   test("an unbound Agent follows the owner's main Agent, with its model", async () => {
     bindAgent(null);
     bindMain(OWNER, glm.id, 'glm-5-air');
-    await expectLabelMatchesLaunch({ source: 'owner_main', model: 'glm-5-air' });
+    await expectLabelMatchesLaunch({
+      source: 'owner_main',
+      model: 'glm-5-air',
+    });
   });
 
   test('the system main HappyClaw', async () => {
@@ -254,7 +257,10 @@ describe('default.model names what an unpicked launch runs', () => {
   test('a ChatGPT subscription, inherited and as an Agent model', async () => {
     bindAgent(null);
     bindMain(OWNER, chatgpt.id);
-    await expectLabelMatchesLaunch({ source: 'owner_main', model: 'gpt-6-sol' });
+    await expectLabelMatchesLaunch({
+      source: 'owner_main',
+      model: 'gpt-6-sol',
+    });
     // ChatGPT's effort is the gateway's, as its catalog view reports it.
     const chatgptView = (
       await (
@@ -278,8 +284,6 @@ describe('default.model names what an unpicked launch runs', () => {
       model: null,
       effort: null,
     });
-    expect(
-      runner.trySelectPoolProvider(FOLDER, null, null, null),
-    ).toBeNull();
+    expect(runner.trySelectPoolProvider(FOLDER, null, null, null)).toBeNull();
   });
 });
