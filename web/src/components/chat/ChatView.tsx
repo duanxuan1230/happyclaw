@@ -413,13 +413,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       setContextPanelView('files');
     }
   }, [canModifyWorkspaceConfig, contextPanelView]);
-  // Git runs only for Host workspaces (see src/routes/git-review.ts).
-  const isHostWorkspace = group?.execution_mode === 'host';
+  // Git runs only for Host workspaces (see src/routes/git-review.ts). Guests
+  // never see diffs: they could show the dot files the file panel hides.
+  const canReview = group?.execution_mode === 'host' && !readOnly;
   useEffect(() => {
-    if (!isHostWorkspace && contextPanelView === 'review') {
+    if (!canReview && contextPanelView === 'review') {
       setContextPanelView('files');
     }
-  }, [isHostWorkspace, contextPanelView]);
+  }, [canReview, contextPanelView]);
 
   // Fetch IM connection status for home groups
   const isOwnHome =
@@ -611,11 +612,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   useEffect(() => {
     useFileStore.getState().setFileScopeSession(groupJid, worktreeSessionId);
   }, [groupJid, worktreeSessionId]);
-  // A worktree belongs to one session: nothing else runs there.
+  // A worktree belongs to one session: nothing else runs there. Guests do
+  // not learn about other workspaces' runs.
   const workdirPeers = useWorkdirPeers(
     groupJid,
     composerAgentId,
-    !!group && !activeWorktree,
+    !!group && !activeWorktree && !readOnly,
   );
   const showWorkdirNotice =
     workdirPeers.peers.length + workdirPeers.hiddenCount > 0;
@@ -656,10 +658,17 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   );
   const loadContextUsage = useChatStore((s) => s.loadContextUsage);
   useEffect(() => {
-    if (!headerSheetOpen) return;
+    if (!headerSheetOpen || readOnly) return;
     if (useChatStore.getState().contextUsage[usageKey] !== undefined) return;
     void loadContextUsage(groupJid, composerAgentId);
-  }, [headerSheetOpen, usageKey, loadContextUsage, groupJid, composerAgentId]);
+  }, [
+    headerSheetOpen,
+    readOnly,
+    usageKey,
+    loadContextUsage,
+    groupJid,
+    composerAgentId,
+  ]);
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     group?.conversation_source === 'native_thread' ||
@@ -1149,7 +1158,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       chevron: true,
       onClick: () => setContextPanelView('files'),
     },
-    ...(isHostWorkspace
+    ...(canReview
       ? [
           {
             key: 'review',
@@ -1266,7 +1275,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         {contextPanelView === 'env' && canModifyWorkspaceConfig ? (
           <ContainerEnvPanel groupJid={groupJid} />
-        ) : contextPanelView === 'review' && isHostWorkspace ? (
+        ) : contextPanelView === 'review' && canReview ? (
           <ReviewPanel groupJid={groupJid} agentId={composerAgentId} />
         ) : (
           <FilePanel groupJid={groupJid} />
@@ -1357,7 +1366,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     const fallback = window.setTimeout(afterClose, 300);
   };
   const contextFigures = contextUsageFigures(phoneContextUsage);
-  if (isPhone) {
+  // The model sheet lives in the composer, which read-only viewers lack.
+  if (isPhone && !readOnly) {
     headerActions.push([
       { label: '切换模型', icon: Cpu, onSelect: openModelSheet },
       ...(contextFigures

@@ -44,6 +44,7 @@ import {
   type GuestWorkspaceRef,
 } from '../../stores/guests';
 import {
+  GUEST_GRANT_DESCRIPTION,
   GUEST_SCOPE_DESCRIPTION,
   validateGuestPassword,
   validateGuestUsername,
@@ -237,7 +238,7 @@ function CreateGuestDialog({
 
           <SettingsField
             label="授权工作区"
-            description="访客只能看到这里勾选的工作区。"
+            description={GUEST_GRANT_DESCRIPTION}
           >
             <WorkspaceGrantList
               workspaces={workspaces}
@@ -345,7 +346,7 @@ function EditGuestDialog({
 
           <SettingsField
             label="授权工作区"
-            description="取消勾选后，访客立即失去该工作区的查看权限。"
+            description={`${GUEST_GRANT_DESCRIPTION}取消勾选后，访客立即失去该工作区的查看权限。`}
           >
             <WorkspaceGrantList
               workspaces={workspaces}
@@ -568,6 +569,8 @@ export function GuestsSection() {
   const loaded = useGuestsStore((s) => s.loaded);
   const error = useGuestsStore((s) => s.error);
   const loadGuests = useGuestsStore((s) => s.loadGuests);
+  const canCreate = useGuestsStore((s) => s.canCreate);
+  const maxGuests = useGuestsStore((s) => s.maxGuests);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<GuestAccount | null>(null);
   const [resetting, setResetting] = useState<GuestAccount | null>(null);
@@ -583,6 +586,16 @@ export function GuestsSection() {
       ),
     [guests],
   );
+  const atLimit = guests.length >= maxGuests;
+  // Why 新建 is missing, when it is.
+  const createNotice = !loaded
+    ? null
+    : !canCreate
+      ? '管理员尚未开放普通成员创建访客。已有的访客仍可在这里编辑或删除，但暂时无法登录。'
+      : atLimit
+        ? `每个账户最多 ${maxGuests} 个访客，删除不用的访客后才能新建。`
+        : null;
+  const showCreate = loaded && canCreate && !atLimit;
 
   return (
     <div className="space-y-8">
@@ -599,13 +612,20 @@ export function GuestsSection() {
               onClick={() => void loadGuests()}
               disabled={loading}
             />
-            <Button onClick={() => setCreateOpen(true)}>
-              <UserPlus />
-              新建访客
-            </Button>
+            {showCreate && (
+              <Button onClick={() => setCreateOpen(true)}>
+                <UserPlus />
+                新建访客
+              </Button>
+            )}
           </>
         }
       >
+        {createNotice && (
+          <p className="rounded-lg bg-muted/50 px-3 py-2.5 text-body text-muted-foreground">
+            {createNotice}
+          </p>
+        )}
         {error && (
           <div
             role="alert"
@@ -626,10 +646,12 @@ export function GuestsSection() {
             description="创建访客账户，与他人分享工作区的只读视图。"
             className="rounded-xl bg-surface-raised ring-1 ring-surface-border"
             action={
-              <Button variant="outline" onClick={() => setCreateOpen(true)}>
-                <UserPlus />
-                新建访客
-              </Button>
+              showCreate && (
+                <Button variant="outline" onClick={() => setCreateOpen(true)}>
+                  <UserPlus />
+                  新建访客
+                </Button>
+              )
             }
           />
         ) : (

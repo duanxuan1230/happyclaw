@@ -106,7 +106,8 @@ export function AutomationList({
   onFilterChange: (filter: AutomationFilter) => void;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onCreate: () => void;
+  /** Absent for read-only viewers (guests). */
+  onCreate?: () => void;
   loading: boolean;
 }) {
   const groups = useChatStore((s) => s.groups);
@@ -146,12 +147,18 @@ export function AutomationList({
             <EmptyState
               icon={Timer}
               title="暂无自动化"
-              description="按计划在会话里运行提示词。也可以在对话里直接让智能体创建。"
+              description={
+                onCreate
+                  ? '按计划在会话里运行提示词。也可以在对话里直接让智能体创建。'
+                  : '授权给你的工作区里还没有自动化。'
+              }
               action={
-                <Button onClick={onCreate}>
-                  <Plus />
-                  新建自动化
-                </Button>
+                onCreate && (
+                  <Button onClick={onCreate}>
+                    <Plus />
+                    新建自动化
+                  </Button>
+                )
               }
             />
           ) : (

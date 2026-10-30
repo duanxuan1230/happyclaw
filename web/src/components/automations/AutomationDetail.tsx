@@ -32,6 +32,7 @@ import {
 import { sessionIdOf, workspaceJidOf } from '../../lib/session-jid';
 import { openWorkspaceSession } from '../../lib/chat-navigation';
 import { useAutomationsStore } from '../../stores/automations';
+import { useIsGuest } from '../../stores/auth';
 import { useChatStore } from '../../stores/chat';
 import { extractErrorMessage } from '../../utils/error';
 import {
@@ -90,6 +91,8 @@ export function AutomationDetail({
   const cancelRun = useAutomationsStore((s) => s.cancelRun);
   const loadAgents = useChatStore((s) => s.loadAgents);
   const sessionLabel = useSessionLabel();
+  // Read-only guests: no run, edit, pause, delete, cancel or read marks.
+  const readOnly = useIsGuest();
 
   useEffect(() => {
     void loadDetail(automation.id).catch((err) =>
@@ -102,8 +105,8 @@ export function AutomationDetail({
   // Seeing the detail reads its runs, also those that finish while it is open.
   const unread = automation.unreadRuns ?? 0;
   useEffect(() => {
-    if (unread > 0) void markRead(automation.id);
-  }, [automation.id, unread, markRead]);
+    if (unread > 0 && !readOnly) void markRead(automation.id);
+  }, [automation.id, unread, readOnly, markRead]);
 
   const groups = useMemo(
     () => groupAutomationRuns(runs ?? [], automation.sessionMode),
@@ -162,14 +165,18 @@ export function AutomationDetail({
         title={automation.name}
         onBack={onBack}
         action={
-          <PhoneBarButton
-            label="立即运行"
-            icon={busy ? <Loader2 className="animate-spin" /> : <Play />}
-            disabled={busy}
-            onClick={runNow}
-          />
+          !readOnly && (
+            <PhoneBarButton
+              label="立即运行"
+              icon={busy ? <Loader2 className="animate-spin" /> : <Play />}
+              disabled={busy}
+              onClick={runNow}
+            />
+          )
         }
-        menu={{ title: automation.name, groups: menuGroups }}
+        menu={
+          readOnly ? undefined : { title: automation.name, groups: menuGroups }
+        }
       />
       <header className="flex shrink-0 items-start gap-2 border-b border-surface-border px-5 py-4 phone:px-4 phone:pt-0 phone:pb-3">
         {onBack && !isPhone && (
@@ -195,7 +202,7 @@ export function AutomationDetail({
           </div>
           <p className="mt-0.5 text-caption text-muted-foreground">{meta}</p>
         </div>
-        {!isPhone && (
+        {!isPhone && !readOnly && (
           <div className="flex shrink-0 items-center gap-1.5">
             <Button
               variant="outline"
@@ -282,7 +289,9 @@ export function AutomationDetail({
           </p>
         ) : groups.length === 0 ? (
           <p className="text-caption text-muted-foreground">
-            暂无运行记录。点击立即运行，或等待下次触发。
+            {readOnly
+              ? '暂无运行记录。'
+              : '暂无运行记录。点击立即运行，或等待下次触发。'}
           </p>
         ) : (
           <div className="space-y-2">
@@ -292,7 +301,7 @@ export function AutomationDetail({
                 group={group}
                 sessionLabel={sessionLabel}
                 onOpenSession={openSession}
-                onCancel={handleCancel}
+                onCancel={readOnly ? undefined : handleCancel}
               />
             ))}
           </div>

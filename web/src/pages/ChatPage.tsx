@@ -32,10 +32,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { IconButton } from '../components/common/IconButton';
 import { EmptyState } from '../components/common/EmptyState';
-import {
-  AccountMenuItems,
-  GuestBadge,
-} from '../components/layout/AccountMenu';
+import { AccountMenuItems, GuestBadge } from '../components/layout/AccountMenu';
 import { withBasePath } from '../utils/url';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 import { useClearWorkspace } from '../hooks/useClearWorkspace';

@@ -10,6 +10,7 @@ import {
   type AutomationFilter,
 } from '../lib/automation-presentation';
 import { useAutomationsStore } from '../stores/automations';
+import { useIsGuest } from '../stores/auth';
 import { AutomationList } from '../components/automations/AutomationList';
 import { AutomationDetail } from '../components/automations/AutomationDetail';
 import { automationHref } from '../components/automations/automation-actions';
@@ -34,6 +35,8 @@ export function AutomationsPage() {
   const loadAutomations = useAutomationsStore((s) => s.loadAutomations);
   const openCreateForm = useAutomationsStore((s) => s.openCreateForm);
   const [filter, setFilter] = useState<AutomationFilter>('all');
+  // Read-only guests see the automations of granted workspaces, nothing more.
+  const isGuest = useIsGuest();
 
   const routed = automationId
     ? automations.find((item) => item.id === automationId)
@@ -45,16 +48,18 @@ export function AutomationsPage() {
       ? automations.find((item) => matchesAutomationFilter(item, filter))
       : undefined);
   const select = (id: string) => navigate(automationHref(id));
-  const create = () => openCreateForm();
+  const create = isGuest ? undefined : () => openCreateForm();
 
   // A phone names the page in its top bar, with 新建 as the one action.
   const header = (
     <div className="flex items-center justify-between gap-2 px-4 pt-5 pb-3 lg:pt-6 phone:hidden">
       <h1 className="text-title-lg text-foreground">自动化</h1>
-      <Button size="sm" onClick={create}>
-        <Plus />
-        新建
-      </Button>
+      {create && (
+        <Button size="sm" onClick={create}>
+          <Plus />
+          新建
+        </Button>
+      )}
     </div>
   );
   const list = (
@@ -114,11 +119,13 @@ export function AutomationsPage() {
         <PhonePageHeader
           title="自动化"
           action={
-            <PhoneBarButton
-              label="新建自动化"
-              icon={<Plus className="size-5" />}
-              onClick={create}
-            />
+            create && (
+              <PhoneBarButton
+                label="新建自动化"
+                icon={<Plus className="size-5" />}
+                onClick={create}
+              />
+            )
           }
         />
         {header}

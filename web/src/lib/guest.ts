@@ -4,7 +4,12 @@
  */
 
 /** Route prefixes a read-only guest may open; everything else goes to /chat. */
-export const GUEST_ALLOWED_PATHS = ['/chat', '/automations', '/memory', '/settings'];
+export const GUEST_ALLOWED_PATHS = [
+  '/chat',
+  '/automations',
+  '/memory',
+  '/settings',
+];
 
 export function isGuestAllowedPath(pathname: string): boolean {
   return GUEST_ALLOWED_PATHS.some(
@@ -23,7 +28,11 @@ export const GUEST_READ_ONLY_NOTICE = '访客模式：只读，无法发送消�
 
 /** What a guest can and cannot do, shown wherever guests are managed. */
 export const GUEST_SCOPE_DESCRIPTION =
-  '访客只能查看被授权工作区的消息、会话、文件、记忆和自动化，不能发送消息、修改或执行任何操作。';
+  '访客只能查看被授权工作区的消息、会话、文件、记忆和自动化，不能发送消息、修改或执行任何操作。以点开头的文件和常见密钥文件对访客隐藏。';
+
+/** Shown where workspaces are granted: guests watch the same process. */
+export const GUEST_GRANT_DESCRIPTION =
+  '访客只能看到这里勾选的工作区。对话里的思考过程和工具调用，访客看到的与你一致。';
 
 /** Same username rule as registration and admin user creation. */
 export function validateGuestUsername(username: string): string | null {

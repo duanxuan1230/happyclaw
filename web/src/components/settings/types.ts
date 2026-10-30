@@ -89,6 +89,7 @@ export interface SystemSettings {
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   fallbackModel: string;
+  allowMemberGuests: boolean;
 }
 
 export interface HostIntegrationSettings {

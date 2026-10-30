@@ -236,8 +236,9 @@ export function AppLayout() {
 
           {isPhone ? <NavDrawer /> : !hideMobileTabBar && <BottomTabBar />}
           <CommandPaletteHost />
-          <AutomationFormHost />
-          <CreateWorkspaceHost />
+          {/* Read-only guests create nothing. */}
+          {!isGuest && <AutomationFormHost />}
+          {!isGuest && <CreateWorkspaceHost />}
         </div>
       </TooltipProvider>
     </MotionProvider>

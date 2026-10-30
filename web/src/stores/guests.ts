@@ -37,6 +37,9 @@ export interface UpdateGuestInput {
 interface GuestsState {
   guests: GuestAccount[];
   grantableWorkspaces: GuestWorkspaceRef[];
+  /** False for members while the admin keeps allowMemberGuests off. */
+  canCreate: boolean;
+  maxGuests: number;
   loading: boolean;
   loaded: boolean;
   error: string | null;
@@ -58,6 +61,8 @@ function errorMessage(err: unknown, fallback: string): string {
 const INITIAL = {
   guests: [] as GuestAccount[],
   grantableWorkspaces: [] as GuestWorkspaceRef[],
+  canCreate: false,
+  maxGuests: 0,
   loading: false,
   loaded: false,
   error: null as string | null,
@@ -80,10 +85,14 @@ export const useGuestsStore = create<GuestsState>((set) => ({
       const data = await api.get<{
         guests: GuestAccount[];
         grantable_workspaces: GuestWorkspaceRef[];
+        can_create: boolean;
+        max_guests: number;
       }>('/api/guests');
       set({
         guests: data.guests ?? [],
         grantableWorkspaces: data.grantable_workspaces ?? [],
+        canCreate: data.can_create === true,
+        maxGuests: data.max_guests ?? 0,
         loading: false,
         loaded: true,
       });

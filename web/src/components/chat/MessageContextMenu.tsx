@@ -95,17 +95,16 @@ export function MessageContextMenu({
   const share: MenuAction[] = onShareImage
     ? [{ label: '生成分享图片', icon: ImageDown, onSelect: onShareImage }]
     : [];
-  const remove: MenuAction[] =
-    canDelete
-      ? [
-          {
-            label: '删除聊天记录',
-            icon: Trash2,
-            destructive: true,
-            onSelect: () => void handleDelete(),
-          },
-        ]
-      : [];
+  const remove: MenuAction[] = canDelete
+    ? [
+        {
+          label: '删除聊天记录',
+          icon: Trash2,
+          destructive: true,
+          onSelect: () => void handleDelete(),
+        },
+      ]
+    : [];
 
   return (
     <>

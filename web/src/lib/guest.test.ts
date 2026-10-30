@@ -12,7 +12,9 @@ describe('read-only guest routes', () => {
   test.each([
     ['/chat', true],
     ['/chat/flow-x', true],
-    ['/tasks', true],
+    ['/automations', true],
+    ['/automations/a1', true],
+    ['/tasks', false],
     ['/memory', true],
     ['/settings', true],
     ['/setup/providers', false],
@@ -31,7 +33,7 @@ describe('read-only guest routes', () => {
   test('navigation only lists guest pages', () => {
     expect(filterNavItems(true, true).map((item) => item.path)).toEqual([
       '/chat',
-      '/tasks',
+      '/automations',
       '/memory',
       '/settings',
     ]);
@@ -74,9 +76,12 @@ describe('guest settings and palette', () => {
       theme: 'system',
       colorScheme: 'default',
       canCreate: false,
+      currentSession: { workspaceJid: 'web:a', sessionJid: 'web:a' },
     }).flatMap((group) => group.items.map((item) => item.id));
     expect(ids).not.toContain('action:new-conversation');
     expect(ids).not.toContain('action:create-workspace');
+    expect(ids).not.toContain('action:create-automation');
+    expect(ids).not.toContain('action:create-automation-from-session');
   });
 });
 
