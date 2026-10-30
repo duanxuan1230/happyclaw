@@ -1421,3 +1421,31 @@ test.describe('AskUserQuestion cards', () => {
     }
   });
 });
+
+test.describe('AskUserQuestion cards, own answers and keys', () => {
+  test('an own answer and the keyboard fill the composer', async ({ page }) => {
+    await page.goto(`${HARNESS_PATH}?ask=1`);
+    await expect(composer(page)).toBeVisible();
+    const steps = page.locator('[data-hc-ask-card]').nth(1);
+
+    const own = steps.getByRole('textbox', { name: /其他答案/ });
+    await own.fill('去海边');
+    await own.press('Enter');
+    await expect(steps).toContainText('问题 2/3');
+    if (page.viewportSize()!.width >= 640) {
+      // Keys while the card has focus: 1–9 pick, Enter moves on.
+      await steps.getByRole('button', { name: '水' }).focus();
+      await page.keyboard.press('2');
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('1');
+    } else {
+      await steps.getByRole('button', { name: '相机' }).click();
+      await steps.getByRole('button', { name: '下一题' }).click();
+      await steps.getByRole('button', { name: '8 点' }).click();
+    }
+    await steps.getByRole('button', { name: '填入输入框' }).click();
+    await expect
+      .poll(() => composerText(page))
+      .toBe('周末去哪？\n答：去海边\n带什么？\n答：相机\n几点出发？\n答：8 点');
+  });
+});

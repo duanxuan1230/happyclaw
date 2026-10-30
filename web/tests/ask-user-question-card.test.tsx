@@ -140,6 +140,74 @@ describe('AskUserQuestionCard', () => {
   });
 });
 
+describe('AskUserQuestionCard, own answers and keys', () => {
+  const input = () => container.querySelector('input')!;
+  const type = (value: string) =>
+    act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input(), value);
+      input().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const key = (target: Element, k: string) =>
+    act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: k,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+  const card = () => container.querySelector('[data-hc-ask-card]')!;
+
+  it('takes an own answer: it replaces a single choice, joins a multi-select', async () => {
+    await render([
+      { question: '周末去哪？', options: ['爬山', '看展'] },
+      { question: '带什么？', multiSelect: true, options: ['水', '伞'] },
+    ]);
+    await click('爬山');
+    await click('上一题');
+    await type('去海边');
+    expect(button('爬山').getAttribute('aria-pressed')).toBe('false');
+    await key(input(), 'Enter');
+    expect(text()).toContain('问题 2/2');
+    await click('水');
+    await type('防晒霜');
+    await key(input(), 'Enter');
+    expect(draft()?.text).toBe(
+      '周末去哪？\n答：去海边\n带什么？\n答：水、防晒霜',
+    );
+  });
+
+  it('picks options with 1–9 and moves on with Enter', async () => {
+    await render([
+      { question: 'A？', options: ['a1', 'a2'] },
+      { question: 'B？', multiSelect: true, options: ['b1', 'b2', 'b3'] },
+    ]);
+    await key(card(), '2');
+    expect(text()).toContain('问题 2/2');
+    await key(card(), '1');
+    await key(card(), '3');
+    await key(card(), '9');
+    expect(button('b3').getAttribute('aria-pressed')).toBe('true');
+    // Digits typed into 其他… are text, not picks.
+    await key(input(), '2');
+    expect(button('b2').getAttribute('aria-pressed')).toBe('false');
+    await key(card(), 'Enter');
+    expect(draft()?.text).toBe('A？\n答：a2\nB？\n答：b1、b3');
+  });
+
+  it("fills a lone question's own answer on Enter", async () => {
+    await render([{ question: '用哪个？', options: ['甲', '乙'] }]);
+    await type('都不要');
+    await key(input(), 'Enter');
+    expect(draft()?.text).toBe('都不要');
+  });
+});
+
 describe('composeReply', () => {
   it('gives a lone question its answers alone', () => {
     expect(composeReply([{ question: 'Q', options: [] }], [['a', 'b']])).toBe(

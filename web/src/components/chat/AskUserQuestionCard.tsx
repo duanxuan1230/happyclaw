@@ -1,4 +1,10 @@
-import { useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import { Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { StepQuestion } from '../../lib/stream-steps';
@@ -13,24 +19,44 @@ import { useShellStore } from '../../stores/shell';
  * - Several questions: one at a time; a single choice moves on by itself,
  *   a multi-select waits for 下一题. 填入输入框 writes every answer, each
  *   under its question, so the reply says which answer is for what.
+ * - 其他… takes an answer of the reader's own: for a single choice it
+ *   replaces the option, for a multi-select it is one more.
+ * - Keys, while the card has focus: 1–9 pick an option, Enter goes on to the
+ *   next question, or fills the composer on the last.
  */
 export function AskUserQuestionCard({
   questions,
 }: {
   questions: readonly StepQuestion[];
 }) {
-  const [answers, setAnswers] = useState<string[][]>(() =>
+  const [picked, setPicked] = useState<string[][]>(() =>
     questions.map(() => []),
   );
+  const [own, setOwn] = useState<string[]>(() => questions.map(() => ''));
   const [index, setIndex] = useState(0);
   const [filled, setFilled] = useState<string | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  // Moving to another question unmounts the focused option: the card takes
+  // focus instead, so the keys keep working.
+  const keepFocus = useRef(false);
+  useEffect(() => {
+    if (!keepFocus.current) return;
+    keepFocus.current = false;
+    const card = cardRef.current;
+    if (card && !card.contains(document.activeElement)) {
+      card.focus({ preventScroll: true });
+    }
+  }, [index]);
 
   if (questions.length === 0) return null;
   const total = questions.length;
   const at = Math.min(index, total - 1);
   const q = questions[at];
-  const chosen = answers[at] ?? [];
+  const chosen = picked[at] ?? [];
   const quick = total === 1 && !q.multiSelect;
+  const answers = questions.map((question, i) =>
+    mergeAnswer(picked[i] ?? [], own[i] ?? '', question.multiSelect),
+  );
   const reply = composeReply(questions, answers);
   const answered = answers.filter((a) => a.length > 0).length;
 
@@ -42,15 +68,57 @@ export function AskUserQuestionCard({
 
   const choose = (label: string) => {
     // Questions can grow while the call streams in; answers follow them.
-    const next = questions.map((_, i) => {
-      const a = answers[i] ?? [];
-      if (i !== at) return a;
-      if (!q.multiSelect) return [label];
-      return a.includes(label) ? a.filter((x) => x !== label) : [...a, label];
-    });
-    setAnswers(next);
+    setPicked(
+      questions.map((_, i) => {
+        const a = picked[i] ?? [];
+        if (i !== at) return a;
+        if (!q.multiSelect) return [label];
+        return a.includes(label) ? a.filter((x) => x !== label) : [...a, label];
+      }),
+    );
+    if (!q.multiSelect) {
+      // A single choice is the option or the reader's own answer, not both.
+      setOwn(questions.map((_, i) => (i === at ? '' : (own[i] ?? ''))));
+    }
     if (quick) fill(label);
     else if (!q.multiSelect && at < total - 1) setIndex(at + 1);
+  };
+
+  const write = (text: string) => {
+    setOwn(questions.map((_, i) => (i === at ? text : (own[i] ?? ''))));
+    if (!q.multiSelect && text.trim()) {
+      setPicked(questions.map((_, i) => (i === at ? [] : (picked[i] ?? []))));
+    }
+  };
+
+  /** Enter: on to the next question, or fill the composer on the last. */
+  const advance = () => {
+    if (at < total - 1) setIndex(at + 1);
+    else fill(quick ? (answers[0] ?? []).join('、') : reply);
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    keepFocus.current = true;
+    if (
+      event.nativeEvent.isComposing ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    const typing = event.target instanceof HTMLInputElement;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      advance();
+      return;
+    }
+    if (typing || !/^[1-9]$/.test(event.key)) return;
+    const option = q.options[Number(event.key) - 1];
+    if (option) {
+      event.preventDefault();
+      choose(option);
+    }
   };
 
   return (
@@ -58,7 +126,10 @@ export function AskUserQuestionCard({
       role="group"
       aria-label={total > 1 ? `问题 ${at + 1}/${total}` : q.question}
       data-hc-ask-card=""
-      className="mt-2 mb-2 rounded-lg bg-surface-raised p-3 font-sans ring-1 ring-surface-border"
+      ref={cardRef}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      className="mt-2 mb-2 rounded-lg outline-none bg-surface-raised p-3 font-sans ring-1 ring-surface-border"
     >
       {total > 1 && (
         <div className="mb-2 flex items-center gap-2 text-caption text-muted-foreground">
@@ -94,36 +165,47 @@ export function AskUserQuestionCard({
             </span>
           )}
         </div>
-        {q.options.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {q.options.map((label, oi) => {
-              const on = chosen.includes(label);
-              return (
-                <button
-                  key={oi}
-                  type="button"
-                  aria-pressed={on}
-                  onClick={() => choose(label)}
-                  className={cn(
-                    'inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-2.5 text-caption font-medium ring-1 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-10',
-                    on
-                      ? 'bg-foreground text-background ring-foreground'
-                      : 'bg-muted text-foreground ring-surface-border hover:bg-surface-hover',
-                  )}
-                >
-                  {on && <Check className="size-3.5" aria-hidden />}
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <div className="flex flex-wrap gap-1.5">
+          {q.options.map((label, oi) => {
+            const on = chosen.includes(label);
+            return (
+              <button
+                key={oi}
+                type="button"
+                aria-pressed={on}
+                aria-keyshortcuts={oi < 9 ? String(oi + 1) : undefined}
+                onClick={() => choose(label)}
+                className={cn(
+                  'inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-2.5 text-caption font-medium ring-1 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-10',
+                  on
+                    ? 'bg-foreground text-background ring-foreground'
+                    : 'bg-muted text-foreground ring-surface-border hover:bg-surface-hover',
+                )}
+              >
+                {on && <Check className="size-3.5" aria-hidden />}
+                {label}
+              </button>
+            );
+          })}
+          <input
+            type="text"
+            value={own[at] ?? ''}
+            onChange={(event) => write(event.target.value)}
+            placeholder="其他…"
+            aria-label={`${q.question} 的其他答案`}
+            enterKeyHint={at < total - 1 ? 'next' : 'done'}
+            className={cn(
+              'h-7 w-28 min-w-0 rounded-md bg-transparent px-2.5 text-caption text-foreground ring-1 ring-surface-border transition-[width,box-shadow] outline-none placeholder:text-muted-foreground focus:w-48 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-10 pointer-coarse:text-base',
+              (own[at] ?? '').trim() && 'w-48 ring-foreground/60',
+            )}
+          />
+        </div>
       </div>
       {quick ? (
         <div className="mt-2 text-caption text-muted-foreground">
           {filled
             ? '已填入输入框，可修改后发送'
-            : '点选项填入输入框，或直接输入回复后发送'}
+            : '点选项填入输入框，或写下其他答案后按回车'}
         </div>
       ) : (
         <div className="mt-3 flex items-center gap-1.5">
@@ -189,6 +271,17 @@ function NavButton({
       {children}
     </button>
   );
+}
+
+/** A question's answer: the options picked and the reader's own words. */
+export function mergeAnswer(
+  picked: readonly string[],
+  own: string,
+  multiSelect = false,
+): string[] {
+  const text = own.trim();
+  if (!text) return [...picked];
+  return multiSelect ? [...picked, text] : [text];
 }
 
 /**
