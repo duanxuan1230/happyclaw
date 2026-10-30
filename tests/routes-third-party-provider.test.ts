@@ -159,7 +159,7 @@ describe('third-party provider routes', () => {
     expect(status).toBe(400);
   });
 
-  test('duplicate keeps the key and starts disabled', async () => {
+  test('duplicate keeps the key', async () => {
     const provider = createThirdParty({ enabled: true });
     const { status, body } = await request(
       'POST',
@@ -168,7 +168,6 @@ describe('third-party provider routes', () => {
     expect(status).toBe(201);
     expect(body).toMatchObject({
       name: 'GLM (副本)',
-      enabled: false,
       hasAnthropicAuthToken: true,
     });
     expect(runtimeConfig.getProviderById(body.id)!.anthropicAuthToken).toBe(
@@ -184,7 +183,6 @@ describe('third-party provider routes', () => {
       { enabled: true },
     );
     expect(status).toBe(404);
-    expect(runtimeConfig.getProviderById(provider.id)!.enabled).toBe(false);
   });
 
   test('test connection falls back to the stored key without returning it', async () => {
@@ -242,10 +240,8 @@ describe('third-party provider routes', () => {
       weight: 7,
     });
     expect(withKey.status).toBe(201);
-    expect(runtimeConfig.getProviderById(withKey.body.id)).toMatchObject({
-      enabled: false,
-      weight: 1,
-    });
+    expect(withKey.body).not.toHaveProperty('enabled');
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).toEqual([]);
   });
 
   test('test connection needs an endpoint and a key', async () => {
