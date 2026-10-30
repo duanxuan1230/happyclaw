@@ -26,6 +26,33 @@ import { effortLabel } from './model-connections';
 
 const CONTEXT_PRESETS = [128_000, 200_000, 256_000, 1_000_000] as const;
 
+/**
+ * What a model added to a connection starts with. A third-party connection
+ * declares the window the registry suggests (launches use only declared
+ * windows); an official one does not, since above 200K that is the billed 1M
+ * opt-in. A model nothing is known about gets every effort, unverified, for
+ * the user to trim.
+ */
+export function withAddDefaults(
+  entry: ProviderModelEntry,
+  declareSuggestedWindow: boolean,
+): { entry: ProviderModelEntry; effortsUnverified: boolean } {
+  const next = { ...entry };
+  const known = resolveModelCapabilities(entry);
+  if (declareSuggestedWindow && !next.contextWindow) {
+    if (known.suggestedContextWindow) {
+      next.contextWindow = known.suggestedContextWindow;
+    }
+  }
+  if (known.effortsSource !== 'none') {
+    return { entry: next, effortsUnverified: false };
+  }
+  return {
+    entry: { ...next, efforts: [...MODEL_EFFORTS] },
+    effortsUnverified: true,
+  };
+}
+
 /** 200000 → 200K, 1000000 → 1M, 1050000 → 1.05M. */
 function formatContextWindow(tokens: number): string {
   const trim = (value: number) => String(Number(value.toFixed(2)));
@@ -105,7 +132,7 @@ export function ModelCapabilityFields({
       <ContextWindowField
         id={entry.id}
         value={entry.contextWindow}
-        inferredWindow={known.contextWindow}
+        suggestedWindow={resolved.suggestedContextWindow}
         onChange={setWindow}
         disabled={disabled}
       />
@@ -181,19 +208,20 @@ export function ModelCapabilityFields({
 }
 
 /**
- * The context window: one of the common sizes or a custom one. Empty means
- * the window is unknown (or, when the model is known, what is known).
+ * The context window: one of the common sizes or a custom one. Launches use
+ * only this; left empty, Claude Code runs the model at 200K. What the
+ * registry knows is offered as a one-tap suggestion.
  */
 function ContextWindowField({
   id,
   value,
-  inferredWindow,
+  suggestedWindow,
   onChange,
   disabled,
 }: {
   id: string;
   value: number | undefined;
-  inferredWindow: number | null;
+  suggestedWindow: number | null;
   onChange: (next: number | undefined) => void;
   disabled: boolean;
 }) {
@@ -239,12 +267,10 @@ function ContextWindowField({
         }}
         disabled={disabled}
         aria-label={`${id} 的上下文长度`}
-        className="w-32 text-caption"
+        className="w-40 text-caption"
       >
         <NativeSelectOption value="">
-          {inferredWindow
-            ? `上下文：${formatContextWindow(inferredWindow)}（自动）`
-            : '上下文：未知'}
+          上下文：未填（按 200K）
         </NativeSelectOption>
         {CONTEXT_PRESETS.map((tokens) => (
           <NativeSelectOption key={tokens} value={String(tokens)}>
@@ -275,6 +301,21 @@ function ContextWindowField({
           disabled={disabled}
           className="h-7 w-24 font-mono text-caption md:text-caption"
         />
+      )}
+      {suggestedWindow && suggestedWindow !== value && (
+        <button
+          type="button"
+          onClick={() => {
+            setChoosingCustom(false);
+            setInvalid(false);
+            onChange(suggestedWindow);
+          }}
+          disabled={disabled}
+          title="使用模型资料里的上下文长度"
+          className="shrink-0 rounded-md px-1.5 text-caption text-primary-text underline-offset-2 hover:underline disabled:opacity-50 pointer-coarse:min-h-11"
+        >
+          建议：{formatContextWindow(suggestedWindow)}
+        </button>
       )}
     </div>
   );

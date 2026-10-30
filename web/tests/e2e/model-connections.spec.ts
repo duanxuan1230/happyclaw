@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// Settings → 模型配置 over the model connections harness: the add wizard end
-// to end, at desktop and phone widths, and a protocol edit in the detail.
-// Every /api request is answered here.
+// Settings → 模型连接 over the model connections harness: the add wizard end
+// to end, at desktop and phone widths, an edit in the detail that stops
+// runners, and deleting a connection. Every /api request is answered here.
 
 const HARNESS_PATH = '/tests/e2e/model-connections-harness.html';
 const PROVIDERS = '/api/config/claude/providers';
@@ -11,15 +11,20 @@ interface Backend {
   providers: Record<string, unknown>[];
   posts: Array<{ path: string; body: unknown }>;
   patches: Array<{ path: string; body: unknown }>;
+  deletes: string[];
 }
+
+const PREFILL = {
+  API_TIMEOUT_MS: '3000000',
+  CLAUDE_CODE_NO_FLICKER: '1',
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+};
 
 function connection(overrides: Record<string, unknown> = {}) {
   return {
     id: 'glm',
     name: 'GLM 中转',
     type: 'third_party',
-    enabled: true,
-    weight: 1,
     anthropicBaseUrl: 'https://relay.example.test/anthropic',
     anthropicModel: 'glm-5.3',
     anthropicAuthMode: 'bearer',
@@ -37,7 +42,8 @@ function connection(overrides: Record<string, unknown> = {}) {
     codexOAuthCredentialsEmail: null,
     codexOAuthCredentialsPlanType: null,
     customEnv: {},
-    models: [{ id: 'glm-5.3' }, { id: 'glm-5.2', hidden: true }],
+    models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
+    roles: {},
     presetId: null,
     lastTest: {
       ok: true,
@@ -48,7 +54,6 @@ function connection(overrides: Record<string, unknown> = {}) {
       at: new Date(Date.now() - 3 * 60_000).toISOString(),
     },
     updatedAt: '2026-10-27T00:00:00.000Z',
-    health: null,
     ...overrides,
   };
 }
@@ -58,6 +63,7 @@ async function mockBackend(page: Page): Promise<Backend> {
     providers: [connection()],
     posts: [],
     patches: [],
+    deletes: [],
   };
   // Only the backend: Vite serves modules such as /src/api/client.ts too.
   await page.route(
@@ -69,18 +75,17 @@ async function mockBackend(page: Page): Promise<Backend> {
       const method = request.method();
       const body = request.postDataJSON?.() ?? null;
       if (method === 'GET' && path === PROVIDERS) {
-        return route.fulfill({
-          json: {
-            providers: backend.providers,
-            balancing: {
-              strategy: 'round-robin',
-              unhealthyThreshold: 3,
-              recoveryIntervalMs: 300_000,
-            },
-            enabledCount: backend.providers.filter((p) => p.enabled).length,
-            defaultModelConfigId: null,
-          },
-        });
+        return route.fulfill({ json: { providers: backend.providers } });
+      }
+      if (method === 'GET' && path === '/api/agent-profiles') {
+        return route.fulfill({ json: { profiles: [], model_configs: [] } });
+      }
+      if (method === 'DELETE' && path.startsWith(`${PROVIDERS}/`)) {
+        backend.deletes.push(path);
+        backend.providers = backend.providers.filter(
+          (p) => p.id !== path.split('/').pop(),
+        );
+        return route.fulfill({ json: { success: true } });
       }
       if (method === 'GET' && path.endsWith('/impact')) {
         return route.fulfill({ json: { activeRunners: 1, stoppedRunners: 3 } });
@@ -107,7 +112,7 @@ async function mockBackend(page: Page): Promise<Backend> {
             ok: true,
             probes: [
               {
-                model: 'deepseek-flash[1m]',
+                model: 'deepseek-flash',
                 ok: true,
                 status: 200,
                 latencyMs: 412,
@@ -127,7 +132,6 @@ async function mockBackend(page: Page): Promise<Backend> {
           anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
           anthropicModel: (body as { anthropicModel: string }).anthropicModel,
           models: (body as { models: unknown[] }).models,
-          enabled: false,
         });
         backend.providers.push(created);
         return route.fulfill({ status: 201, json: created });
@@ -188,8 +192,9 @@ async function addDeepSeek(page: Page, shots: string | null) {
 
   await expect(dialog.getByText('从服务商获取到 3 个模型')).toBeVisible();
   await expect(
-    dialog.getByRole('checkbox', { name: '使用 deepseek-flash[1m]' }),
+    dialog.getByRole('checkbox', { name: '使用 deepseek-flash' }),
   ).toBeChecked();
+  await expect(dialog.getByText('已选 2 / 共 3')).toBeVisible();
   await expect(
     dialog.getByRole('checkbox', {
       name: '使用 deepseek-reasoner-with-a-rather-long-model-identifier',
@@ -219,10 +224,17 @@ test.describe('adding a model connection', () => {
       presetId: 'deepseek',
       anthropicAuthToken: 'sk-e2e',
       anthropicAuthMode: 'bearer',
-      models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
+      anthropicModel: 'deepseek-flash',
+      customEnv: PREFILL,
+      models: [
+        { id: 'deepseek-flash', contextWindow: 1_048_576 },
+        { id: 'deepseek-v4-pro', contextWindow: 1_048_576 },
+      ],
+      roles: {},
     });
+    expect(created?.body).not.toHaveProperty('enabled');
     await expect(
-      page.getByRole('button', { name: '管理「DeepSeek」' }),
+      page.getByRole('button', { name: '编辑「DeepSeek」' }),
     ).toBeVisible();
   });
 
@@ -239,15 +251,18 @@ test.describe('adding a model connection', () => {
 });
 
 test.describe('managing a connection', () => {
-  test('a new default model states the runners it stops before saving', async ({
+  test('removing a model states the runners it stops before saving', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     const backend = await mockBackend(page);
     await page.goto(HARNESS_PATH);
-    await page.getByRole('button', { name: '管理「GLM 中转」' }).click();
+    await page.getByRole('button', { name: '编辑「GLM 中转」' }).click();
     const dialog = page.getByRole('dialog');
-    await expect(dialog.getByText('glm-5.2')).toBeVisible();
+    await expect(
+      dialog.getByRole('list', { name: '连接的模型' }).getByText('glm-5.2'),
+    ).toBeVisible();
+    await expect(dialog.getByText('后台与子代理')).toBeVisible();
     await expectDialogFits(page);
     if (process.env.MODEL_SHOTS) {
       await page.screenshot({
@@ -255,19 +270,33 @@ test.describe('managing a connection', () => {
         fullPage: true,
       });
     }
-    await dialog.getByRole('button', { name: 'glm-5.2 的更多操作' }).click();
-    // On a phone the row menu is an action sheet.
-    await page
-      .getByRole('dialog', { name: 'glm-5.2 的操作' })
-      .getByRole('button', { name: '设为默认模型' })
-      .click();
+    await dialog.getByRole('button', { name: '从连接中删除 glm-5.2' }).click();
     const confirm = page.getByRole('alertdialog');
     await expect(confirm).toContainText('保存会停止 3 个运行中的会话');
     await expect(confirm).toContainText('聊天记录保留');
     await confirm.getByRole('button', { name: '保存修改' }).click();
     await expect.poll(() => backend.patches.length).toBe(1);
     expect(backend.patches[0].body).toMatchObject({
-      anthropicModel: 'glm-5.2',
+      models: [{ id: 'glm-5.3' }],
     });
+  });
+
+  test('a connection is deleted from its row menu after confirming', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    const backend = await mockBackend(page);
+    await page.goto(HARNESS_PATH);
+    await page.getByRole('button', { name: '更多操作' }).click();
+    // On a phone the row menu is an action sheet.
+    await page
+      .getByRole('dialog', { name: '「GLM 中转」的操作' })
+      .getByRole('button', { name: '删除' })
+      .click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toContainText('确认删除模型连接「GLM 中转」');
+    await confirm.getByRole('button', { name: '确认删除' }).click();
+    await expect.poll(() => backend.deletes).toEqual([`${PROVIDERS}/glm`]);
+    await expect(page.getByText('还没有模型连接')).toBeVisible();
   });
 });
