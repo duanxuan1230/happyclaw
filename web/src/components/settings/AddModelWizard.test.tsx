@@ -84,11 +84,21 @@ afterEach(async () => {
   document.body.innerHTML = '';
 });
 
-async function render(enabledCount = 1) {
+const PREFILL = {
+  API_TIMEOUT_MS: '3000000',
+  CLAUDE_CODE_NO_FLICKER: '1',
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+};
+
+const DEEPSEEK_MODELS = [
+  { id: 'deepseek-flash', contextWindow: 1_048_576 },
+  { id: 'deepseek-v4-pro', contextWindow: 1_048_576 },
+];
+
+async function render() {
   await act(async () => {
     root.render(
       <AddModelWizard
-        enabledCount={enabledCount}
         onDone={onDone}
         onConnectionCreated={onConnectionCreated}
         onCancel={() => {}}
@@ -119,7 +129,7 @@ async function next() {
 }
 
 describe('vendor preset', () => {
-  test('checks the preset models, leaves discovered extras unchecked and saves what the test found', async () => {
+  test('checks the preset and known models, leaves unknown ones unchecked and saves what the test found', async () => {
     answer({
       [DISCOVER]: {
         ok: true,
@@ -129,6 +139,7 @@ describe('vendor preset', () => {
           { id: 'deepseek-flash' },
           { id: 'deepseek-v4-pro' },
           { id: 'deepseek-chat' },
+          { id: 'glm-5.3' },
         ],
       },
       [TEST]: OK_TEST,
@@ -153,18 +164,26 @@ describe('vendor preset', () => {
         presetId: 'deepseek',
         anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
         anthropicAuthToken: 'sk-ds',
+        customEnv: PREFILL,
       },
       45_000,
     );
-    expect(checkbox('deepseek-flash[1m]')?.getAttribute('aria-checked')).toBe(
+    expect(checkbox('deepseek-flash')?.getAttribute('aria-checked')).toBe(
       'true',
     );
-    expect(checkbox('deepseek-v4-pro[1m]')?.getAttribute('aria-checked')).toBe(
+    expect(checkbox('deepseek-v4-pro')?.getAttribute('aria-checked')).toBe(
       'true',
     );
+    // The registry knows glm-5.3, nothing knows deepseek-chat.
+    expect(checkbox('glm-5.3')?.getAttribute('aria-checked')).toBe('true');
     expect(checkbox('deepseek-chat')?.getAttribute('aria-checked')).toBe(
       'false',
     );
+    expect(text()).toContain('已选 3 / 共 4');
+    // No default radio, no 1M switch.
+    expect(document.querySelector('input[type="radio"]')).toBeNull();
+    expect(text()).not.toContain('1M 上下文');
+    await click(checkbox('glm-5.3'));
 
     await next();
     expect(mocks.post).toHaveBeenCalledWith(
@@ -174,16 +193,14 @@ describe('vendor preset', () => {
         presetId: 'deepseek',
         anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
         anthropicAuthToken: 'sk-ds',
-        anthropicModel: 'deepseek-flash[1m]',
+        customEnv: PREFILL,
+        anthropicModel: 'deepseek-flash',
       },
       60_000,
     );
     expect(text()).toContain('连接成功');
-    // Another connection is enabled: the new one stays out of the pool.
-    expect(
-      document.querySelector('#wizard-pool')?.getAttribute('aria-checked'),
-    ).toBe('false');
-    expect(text()).toContain('已有启用的连接，默认不加入');
+    expect(document.querySelector('#wizard-pool')).toBeNull();
+    expect(text()).not.toContain('自动池');
 
     await click(button('保存'));
     await flush();
@@ -193,9 +210,11 @@ describe('vendor preset', () => {
       presetId: 'deepseek',
       anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
       anthropicAuthToken: 'sk-ds',
-      anthropicModel: 'deepseek-flash[1m]',
-      models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
-      enabled: false,
+      customEnv: PREFILL,
+      // The first checked model, silently.
+      anthropicModel: 'deepseek-flash',
+      models: DEEPSEEK_MODELS,
+      roles: {},
       anthropicAuthMode: 'bearer',
     });
     // The saved connection is tested once more so its status is stored.
@@ -228,7 +247,7 @@ describe('vendor preset', () => {
     expect(text()).toContain('没能获取模型列表：没有访问权限');
     expect(text()).toContain('仍可使用下方的模型或手动添加');
     expect(text()).toContain('plan does not include models API');
-    expect(checkbox('deepseek-flash[1m]')?.getAttribute('aria-checked')).toBe(
+    expect(checkbox('deepseek-flash')?.getAttribute('aria-checked')).toBe(
       'true',
     );
     await next();
@@ -237,7 +256,7 @@ describe('vendor preset', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       PROVIDERS,
       expect.objectContaining({
-        models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
+        models: DEEPSEEK_MODELS,
         // The list proved nothing, so the test's header is kept.
         anthropicAuthMode: 'bearer',
       }),
@@ -263,7 +282,7 @@ describe('vendor preset', () => {
     expect(field('#wizard-api-key')).not.toBeNull();
     expect(field('#wizard-api-key')?.getAttribute('aria-invalid')).toBe('true');
     expect(text()).toContain('密钥无效：检查 API Key 是否完整');
-    expect(checkbox('deepseek-flash[1m]')).toBeNull();
+    expect(checkbox('deepseek-flash')).toBeNull();
     // The same key is asked about again, and refused again.
     await next();
     expect(
@@ -275,7 +294,7 @@ describe('vendor preset', () => {
     await type('#wizard-api-key', 'sk-good');
     expect(text()).not.toContain('密钥无效');
     await next();
-    expect(checkbox('deepseek-flash[1m]')).not.toBeNull();
+    expect(checkbox('deepseek-flash')).not.toBeNull();
   });
 
   test('custom headers travel with the draft, and a refusal with them moves on', async () => {
@@ -295,10 +314,10 @@ describe('vendor preset', () => {
     await type('#wizard-api-key', 'sk');
     await click(button('添加'));
     await type(
-      'input[aria-label="第 1 行环境变量 Key"]',
+      'input[aria-label="第 4 行环境变量 Key"]',
       'ANTHROPIC_CUSTOM_HEADERS',
     );
-    await type('textarea[aria-label="第 1 行环境变量值"]', 'X-Api-Token: t1');
+    await type('textarea[aria-label="第 4 行环境变量值"]', 'X-Api-Token: t1');
     await next();
     expect(mocks.post).toHaveBeenCalledWith(
       DISCOVER,
@@ -306,7 +325,10 @@ describe('vendor preset', () => {
         type: 'third_party',
         anthropicBaseUrl: 'https://relay.example.test',
         anthropicAuthToken: 'sk',
-        customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1' },
+        customEnv: {
+          ...PREFILL,
+          ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1',
+        },
       },
       45_000,
     );
@@ -321,7 +343,10 @@ describe('vendor preset', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       PROVIDERS,
       expect.objectContaining({
-        customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1' },
+        customEnv: {
+          ...PREFILL,
+          ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1',
+        },
       }),
     );
   });
@@ -351,12 +376,12 @@ describe('vendor preset', () => {
     );
   });
 
-  test('checking a model with no default makes it the default; unchecking hands it on', async () => {
+  test('全选 and 清空 act on the search results; the first checked model is the connection model', async () => {
     answer({
       [DISCOVER]: {
         ok: true,
         source: 'endpoint',
-        models: [{ id: 'glm-5.2' }, { id: 'glm-5.3' }],
+        models: [{ id: 'relay-a' }, { id: 'relay-b' }, { id: 'other-c' }],
       },
       [TEST]: OK_TEST,
     });
@@ -365,38 +390,231 @@ describe('vendor preset', () => {
     await type('#wizard-base-url', 'https://relay.example.test');
     await type('#wizard-api-key', 'sk');
     await next();
-    const passThrough = () =>
-      document.querySelectorAll<HTMLInputElement>('input[type="radio"]')[0];
-    const isDefault = (id: string) =>
-      document.querySelector<HTMLInputElement>(
-        `input[aria-label="把 ${id} 设为默认模型"]`,
-      )?.checked;
-    // Discovered models arrive unchecked; nothing is the default yet.
-    expect(passThrough().checked).toBe(true);
+    // Unknown models arrive unchecked, and the step cannot go on without one.
+    expect(text()).toContain('已选 0 / 共 3');
+    expect(button('下一步').disabled).toBe(true);
 
-    await click(checkbox('glm-5.2'));
-    expect(isDefault('glm-5.2')).toBe(true);
-    await click(checkbox('glm-5.3'));
-    expect(isDefault('glm-5.2')).toBe(true);
-    await click(checkbox('glm-5.2'));
-    expect(isDefault('glm-5.3')).toBe(true);
-    await click(checkbox('glm-5.3'));
-    expect(passThrough().checked).toBe(true);
+    await type('input[aria-label="搜索模型"]', 'relay');
+    expect(checkbox('other-c')).toBeNull();
+    await click(button('全选'));
+    expect(text()).toContain('已选 2 / 共 3');
+    await type('input[aria-label="搜索模型"]', '');
+    expect(checkbox('other-c')?.getAttribute('aria-checked')).toBe('false');
 
-    // 不指定 is still a deliberate choice next to checked models.
-    await click(checkbox('glm-5.2'));
-    expect(isDefault('glm-5.2')).toBe(true);
-    await click(passThrough());
-    expect(passThrough().checked).toBe(true);
-    await click(
-      document.querySelector('input[aria-label="把 glm-5.2 设为默认模型"]'),
-    );
+    await click(checkbox('other-c'));
+    await type('input[aria-label="搜索模型"]', 'relay-a');
+    await click(button('清空'));
+    expect(checkbox('relay-a')?.getAttribute('aria-checked')).toBe('false');
+    await type('input[aria-label="搜索模型"]', '');
+    expect(checkbox('relay-b')?.getAttribute('aria-checked')).toBe('true');
+    expect(text()).toContain('已选 2 / 共 3');
+
     await next();
     expect(mocks.post).toHaveBeenCalledWith(
       TEST,
-      expect.objectContaining({ anthropicModel: 'glm-5.2' }),
+      expect.objectContaining({ anthropicModel: 'relay-b' }),
       60_000,
     );
+  });
+
+  test('context, efforts and roles go with the saved models', async () => {
+    answer({
+      [DISCOVER]: {
+        ok: true,
+        source: 'endpoint',
+        models: [
+          { id: 'glm-5.3' },
+          { id: 'gpt-6.1-terra' },
+          {
+            id: 'vendor-x',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+            contextWindow: 400_000,
+          },
+          { id: 'relay-unknown' },
+        ],
+      },
+      [TEST]: OK_TEST,
+      [PROVIDERS]: makeProvider({ id: 'new' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await next();
+    await click(checkbox('gpt-6.1-terra'));
+    await click(checkbox('vendor-x'));
+    await click(checkbox('relay-unknown'));
+
+    // A family guess and an unknown model are marked.
+    const efforts = (id: string) =>
+      document.querySelector(`[role="group"][aria-label="${id} 的推理等级"]`)!;
+    expect(efforts('gpt-6.1-terra').textContent).toContain('推断');
+    expect(efforts('relay-unknown').textContent).toContain('未验证');
+    expect(efforts('glm-5.3').textContent).not.toContain('未验证');
+
+    // Trimming an unverified list makes it the user's.
+    const chip = [...efforts('relay-unknown').querySelectorAll('button')].find(
+      (node) => node.textContent === '最高',
+    );
+    await click(chip);
+    expect(efforts('relay-unknown').textContent).not.toContain('未验证');
+
+    // A window picked from the list.
+    const window = document.querySelector(
+      'select[aria-label="relay-unknown 的上下文长度"]',
+    ) as HTMLSelectElement;
+    expect(window.value).toBe('');
+    expect(window.selectedOptions[0].textContent).toContain('未知');
+    await act(async () => {
+      window.value = '256000';
+      window.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const role = (id: string, value: string) =>
+      act(async () => {
+        const select = field(id) as unknown as HTMLSelectElement;
+        select.value = value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    await role('#connection-role-subagent', 'gpt-6.1-terra');
+    await role('#connection-role-smallFast', 'relay-unknown');
+    await role('#connection-role-opus', 'glm-5.3');
+
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({
+        anthropicModel: 'glm-5.3',
+        models: [
+          { id: 'glm-5.3' },
+          { id: 'gpt-6.1-terra' },
+          {
+            id: 'vendor-x',
+            contextWindow: 400_000,
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+          },
+          {
+            id: 'relay-unknown',
+            contextWindow: 256_000,
+            efforts: ['low', 'medium', 'high', 'xhigh'],
+          },
+        ],
+        roles: {
+          subagent: 'gpt-6.1-terra',
+          smallFast: 'relay-unknown',
+          opus: 'glm-5.3',
+        },
+      }),
+    );
+  });
+
+  test('a role on a model unchecked later is not saved', async () => {
+    answer({
+      [DISCOVER]: {
+        ok: true,
+        source: 'endpoint',
+        models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
+      },
+      [TEST]: OK_TEST,
+      [PROVIDERS]: makeProvider({ id: 'new' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await next();
+    await act(async () => {
+      const select = field(
+        '#connection-role-subagent',
+      ) as unknown as HTMLSelectElement;
+      select.value = 'glm-5.2';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await click(checkbox('glm-5.2'));
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({ models: [{ id: 'glm-5.3' }], roles: {} }),
+    );
+  });
+});
+
+describe('environment', () => {
+  async function openCustom() {
+    answer({
+      [DISCOVER]: { ok: true, source: 'endpoint', models: [] },
+      [TEST]: OK_TEST,
+      [PROVIDERS]: makeProvider({ id: 'new' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+  }
+  const keyInput = (n: number) =>
+    field(`input[aria-label="第 ${n} 行环境变量 Key"]`);
+
+  test('starts with exactly the three runtime defaults', async () => {
+    await openCustom();
+    expect(
+      [1, 2, 3].map((n) => [
+        keyInput(n)?.value,
+        field(`input[aria-label="第 ${n} 行环境变量值"]`)?.value,
+      ]),
+    ).toEqual(Object.entries(PREFILL));
+    expect(keyInput(4)).toBeNull();
+  });
+
+  test('a deleted row and an emptied value are not saved', async () => {
+    await openCustom();
+    await type('input[aria-label="第 2 行环境变量值"]', '');
+    await click(
+      document.querySelectorAll('button[aria-label="删除环境变量"]')[0],
+    );
+    await next();
+    await type('input[aria-label="手动添加模型"]', 'relay-model');
+    await click(button('添加'));
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({
+        customEnv: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
+      }),
+    );
+  });
+
+  test('a model key is refused: 由模型设置决定', async () => {
+    await openCustom();
+    await click(button('添加'));
+    await type('input[aria-label="第 4 行环境变量 Key"]', 'ANTHROPIC_MODEL');
+    await type('input[aria-label="第 4 行环境变量值"]', 'glm-5.3');
+    expect(text()).toContain('ANTHROPIC_MODEL 由模型设置决定');
+    expect(button('下一步').disabled).toBe(true);
+    await type(
+      'input[aria-label="第 4 行环境变量 Key"]',
+      'CLAUDE_CODE_EFFORT_LEVEL',
+    );
+    expect(text()).toContain('CLAUDE_CODE_EFFORT_LEVEL 由模型设置决定');
+    await type('input[aria-label="第 4 行环境变量 Key"]', 'MY_FLAG');
+    expect(text()).not.toContain('由模型设置决定');
+    expect(button('下一步').disabled).toBe(false);
+  });
+
+  test('every third-party source offers it; official ones do not', async () => {
+    await render();
+    await click(buttonContaining('api.deepseek.com'));
+    expect(text()).toContain('高级设置 · 环境变量');
+    await click(button('上一步'));
+    await click(buttonContaining('Anthropic API Key'));
+    expect(text()).not.toContain('高级设置 · 环境变量');
   });
 });
 
@@ -473,7 +691,7 @@ describe('custom address', () => {
     await type('#wizard-api-key', 'sk-fake');
     await next();
     expect(text()).toContain('没能获取模型列表：地址不对');
-    await type('input[aria-label="手动添加模型"]', 'deepseek-v4-pro[1m]');
+    await type('input[aria-label="手动添加模型"]', 'relay-model');
     await click(button('添加'));
     await next();
     await click(button('保存'));
@@ -483,13 +701,19 @@ describe('custom address', () => {
       type: 'third_party',
       anthropicBaseUrl: 'https://relay.example.test/anthropic',
       anthropicAuthToken: 'sk-fake',
-      anthropicModel: 'deepseek-v4-pro[1m]',
-      models: [{ id: 'deepseek-v4-pro[1m]' }],
-      enabled: false,
+      customEnv: PREFILL,
+      anthropicModel: 'relay-model',
+      models: [
+        {
+          id: 'relay-model',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        },
+      ],
+      roles: {},
     });
   });
 
-  test('a model typed with [1m] turns its 1M switch on', async () => {
+  test('a model typed with [1m] comes in with a 1M window', async () => {
     answer({
       [DISCOVER]: { ok: true, source: 'endpoint', models: [] },
     });
@@ -498,14 +722,16 @@ describe('custom address', () => {
     await type('#wizard-base-url', 'https://relay.example.test');
     await type('#wizard-api-key', 'sk');
     await next();
-    await type('input[aria-label="手动添加模型"]', 'glm-5.3[1m]');
+    await type('input[aria-label="手动添加模型"]', 'relay-x[1m]');
     await click(button('添加'));
-    expect(checkbox('glm-5.3[1m]')?.getAttribute('aria-checked')).toBe('true');
+    expect(checkbox('relay-x')?.getAttribute('aria-checked')).toBe('true');
     expect(
-      document
-        .querySelector('[aria-label="glm-5.3[1m] 使用 1M 上下文"]')
-        ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+      (
+        document.querySelector(
+          'select[aria-label="relay-x 的上下文长度"]',
+        ) as HTMLSelectElement
+      ).value,
+    ).toBe('1000000');
   });
 });
 
@@ -602,7 +828,7 @@ describe('late answers', () => {
     expect(text()).toContain('获取到 1 个模型');
   });
 
-  test('a test result for an older default model is dropped', async () => {
+  test('a test result for an older connection model is dropped', async () => {
     let answerFirst!: (value: unknown) => void;
     let tests = 0;
     answer({
@@ -622,11 +848,7 @@ describe('late answers', () => {
     await next();
     await next();
     await click(button('上一步'));
-    await click(
-      document.querySelector(
-        '[aria-label="把 deepseek-v4-pro[1m] 设为默认模型"]',
-      ),
-    );
+    await click(checkbox('deepseek-flash'));
     await next();
     expect(text()).toContain('连接成功');
     await act(async () => {
@@ -639,17 +861,24 @@ describe('late answers', () => {
 });
 
 describe('official kinds', () => {
-  test('an Anthropic API key lists models unchecked and honors the pool switch', async () => {
+  test('an Anthropic API key checks known models and never claims a window it was not given', async () => {
     answer({
       [DISCOVER]: {
         ok: true,
         source: 'endpoint',
-        models: [{ id: 'claude-opus-4-7', name: 'Claude Opus 4.7' }],
+        models: [
+          {
+            id: 'claude-opus-5-5',
+            name: 'Claude Opus 5.5',
+            contextWindow: 1_000_000,
+          },
+          { id: 'claude-internal-x' },
+        ],
       },
       [TEST]: OK_TEST,
       [PROVIDERS]: makeProvider({ id: 'api', type: 'official' }),
     });
-    await render(0);
+    await render();
     await click(buttonContaining('Anthropic API Key'));
     await type('#wizard-api-key', 'sk-ant-1');
     await next();
@@ -658,30 +887,35 @@ describe('official kinds', () => {
       { type: 'official', anthropicApiKey: 'sk-ant-1' },
       45_000,
     );
-    expect(checkbox('claude-opus-4-7')?.getAttribute('aria-checked')).toBe(
+    expect(checkbox('claude-opus-5-5')?.getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(checkbox('claude-internal-x')?.getAttribute('aria-checked')).toBe(
       'false',
     );
-    expect(text()).toContain('不指定（由 Claude Code 选择）');
+    expect(text()).not.toContain('不指定');
+    // Official connections have no tiers to assign.
+    expect(text()).not.toContain('后台与子代理');
     await next();
     expect(mocks.post).toHaveBeenCalledWith(
       TEST,
-      { type: 'official', anthropicApiKey: 'sk-ant-1', anthropicModel: '' },
+      {
+        type: 'official',
+        anthropicApiKey: 'sk-ant-1',
+        anthropicModel: 'claude-opus-5-5',
+      },
       60_000,
     );
-    // Nothing else is enabled: like the server, it joins the pool.
-    const pool = document.querySelector('#wizard-pool') as HTMLElement;
-    expect(pool.getAttribute('aria-checked')).toBe('true');
-    expect(text()).toContain('目前没有其他启用的连接，默认加入');
-    await click(pool);
     await click(button('保存'));
     await flush();
+    // 1M on an official connection is the billed opt-in: only a deliberate
+    // pick declares it.
     expect(mocks.post).toHaveBeenCalledWith(PROVIDERS, {
       name: 'Anthropic API Key',
       type: 'official',
       anthropicApiKey: 'sk-ant-1',
-      anthropicModel: '',
-      models: [],
-      enabled: false,
+      anthropicModel: 'claude-opus-5-5',
+      models: [{ id: 'claude-opus-5-5' }],
     });
   });
 
@@ -711,7 +945,7 @@ describe('official kinds', () => {
       {
         type: 'official',
         claudeCredentialInput: 'sk-ant-oat01-x',
-        anthropicModel: '',
+        anthropicModel: 'opus',
       },
       60_000,
     );
@@ -774,10 +1008,10 @@ describe('official kinds', () => {
       { providerId: 'claude-new' },
       60_000,
     );
-    // The saved connection is tested by id: a new default is no reason to
-    // send the same check again.
+    // The saved connection is tested by id: another first model is no
+    // reason to send the same check again.
     await click(button('上一步'));
-    await click(document.querySelector('[aria-label="把 opus 设为默认模型"]'));
+    await click(checkbox('opus'));
     await next();
     expect(
       mocks.post.mock.calls.filter(([path]) => path === TEST),
@@ -787,8 +1021,8 @@ describe('official kinds', () => {
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/claude-new`,
       {
-        models: [{ id: 'opus' }, { id: 'sonnet' }, { id: 'haiku' }],
-        anthropicModel: 'opus',
+        models: [{ id: 'sonnet' }, { id: 'haiku' }],
+        anthropicModel: 'sonnet',
       },
       120_000,
     );
