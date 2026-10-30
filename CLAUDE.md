@@ -197,8 +197,7 @@ Web UI 约定：
   回收空闲最久、没有在途 IPC、后台任务、待续写和排队输入的暖容器。Host Runner 不受影响。
 - 可用连接都撞了用量上限且上游给出重置时刻时，输入连同该会话已排队的输入放回 durable
   队列，在重置后 60 秒加 0–30 秒抖动自动继续（WS `usage_limit_wait`）；同一输入最多连续
-  等待 3 次、单次不超过 7 天，超出按原逻辑失败。智能体绑定的连接只看这一个连接，自动池取
-  全池最早的重置时刻。新消息或「立即发送」结束等待并合批；`/break`、取消、`/clear`、
+  等待 3 次、单次不超过 7 天，超出按原逻辑失败。只看本轮绑定的那一个连接。新消息或「立即发送」结束等待并合批；`/break`、取消、`/clear`、
   `/fresh`、删除取消等待。等待期间不占 Runner 或容器名额。
 - 自动化到期时，调度器在一个事务里写运行记录并推进下次触发，再把提示词作为合成输入
   （`source_kind='automation_prompt'`、`messages.automation_run_id`）写进目标会话的
@@ -264,9 +263,14 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   问题交回主 Agent，Runner 也不把它的问题推给 Web 或飞书卡片；当前 CLI 本身就不给
   子代理这个工具。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
-  `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
-  （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
-  自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
+  `resolvePinnedModelConfig`）：会话手选 → 智能体自己的绑定 → 工作区自带的 Provider
+  环境变量 → 所有者的主智能体（默认 profile）→ 系统主 HappyClaw（最早创建的 active
+  admin 的默认 profile）。已删除或没有凭据的绑定跳到下一步。没有全局默认、自动池和
+  启用开关：绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序共用同一个函数。
+- 推理等级按会话手选 → 智能体显式档位 → 模型默认档位解析，只取该模型支持的档位，
+  不支持档位的模型不下发；不存在默认 `max`。模型支持哪些档位见
+  `resolveModelCapabilities`（`shared/model-providers.ts`）：连接上声明的 → 能力表 →
+  同系列推断（如 `gpt-6.1-terra` 取 `gpt-6.1-sol`）→ 无。ChatGPT 订阅连接仍用账号目录。
 - HappyClaw 拥有的 Claude 环境（后端开关、端点、凭据、模型层级、会话的 effort/压缩/
   上下文，清单在 `shared/claude-provider-env.ts`）不取自宿主进程继承的环境，也从管理员
   的 settings 层剔除（连同 `apiKeyHelper` 等取凭据的命令），不会写进挂载给 Agent 的会话
@@ -277,12 +281,19 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   本就能读到该连接的凭据。
 - 渠道格式说明随每轮的 `<channel_context>` 发送，不进 system prompt；换渠道或每十轮
   重发一次，在被替换或撤回前一直有效。
-- 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认
-  模型。会话和智能体按「连接 · 模型」选择（`session_model_selections.model`、
-  `agent_profiles.model`），换模型时开新的 SDK 会话并注入近期历史；只改 `[1m]` 后缀
-  不算换模型。连接的模型列表、预设和最近一次测试存在 V5 配置文件的可选字段里，不升
-  文件版本，旧版本读到会忽略、凭据不受影响。新建连接只有在没有其他启用的连接时才默认
-  加入自动池。测试连接和获取模型列表只有在上游确实接受了凭据时才记录认证头方式。
+- 一个模型配置（连接）是一份凭据、一个地址和一组模型；设置页只添加和维护连接，选哪个
+  模型属于智能体和会话。会话和智能体按「连接 · 模型」选择
+  （`session_model_selections.model`、`agent_profiles.model`），换模型时开新的 SDK
+  会话并注入近期历史。模型条目存上游原名、上下文长度和声明的档位，模型名里从不带
+  `[1m]`：`[1m]` 是 Claude Code 的开关（请求前剥掉，只把上下文上限抬到 1M；不认识的
+  模型上限 200K，`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 只能往下压），运行时按上下文长度
+  推导，大于 200K 才加，再用压缩窗口压回实际长度（`buildConnectionModelEnv`）；只改
+  上下文长度不算换模型。子代理、后台轻量调用和 opus/sonnet 档由连接的 `roles` 从同一
+  连接的模型里选，未设置时跟随本轮模型。连接环境变量只注入用户保存的非空值，新连接预填
+  `API_TIMEOUT_MS`、`CLAUDE_CODE_NO_FLICKER`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`；
+  模型相关的键（`CONNECTION_MODEL_ENV_KEYS`）不接受自由填写。这些都存在 V5 配置文件的
+  可选字段里，不升文件版本。测试连接和获取模型列表只有在上游确实接受了凭据时才记录
+  认证头方式。
 - 宿主机 Skills 由 `runtime_policy.skills.host` 独立选择，不能通过
   `host_claude` 开关隐式获得；每个智能体都存显式值，新建、复制、导入一律写显式值。
 - 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。项目根按 CLI
