@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 const { warnMock } = vi.hoisted(() => ({ warnMock: vi.fn() }));
 vi.mock('../src/logger.js', () => ({
@@ -469,6 +469,8 @@ describe('MacosKeychainCredentialStore', () => {
 });
 
 describe('Keychain claudeAiOauth cleared by Claude Code', () => {
+  beforeEach(() => warnMock.mockClear());
+
   test('recognizes only fully blanked OAuth values as cleared', () => {
     expect(isClearedClaudeAiOauth(CLEARED_BY_CLAUDE_CODE)).toBe(true);
     expect(isClearedClaudeAiOauth({})).toBe(true);
@@ -491,7 +493,6 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
   });
 
   test('replaces a cleared item with the selected provider and preserves MCP OAuth', async () => {
-    warnMock.mockClear();
     const fake = new FakeKeychain();
     const service = claudeKeychainServiceName(CONFIG_DIR);
     const ownershipService = claudeKeychainOwnershipServiceName(CONFIG_DIR);
@@ -532,9 +533,9 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
       folder: 'main',
       previousProviderId: 'revoked-account',
       providerId: 'official-b',
+      likelyRevoked: false,
     });
     expect(message).toContain('cleared by Claude Code');
-    expect(message).not.toContain('probably revoked');
     const logged = JSON.stringify(warnMock.mock.calls);
     expect(logged).not.toContain(REFRESHED.accessToken);
     expect(logged).not.toContain(REFRESHED.refreshToken);
@@ -553,7 +554,6 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
   });
 
   test('replaces a cleared item even when the same provider still owns it', async () => {
-    warnMock.mockClear();
     const fake = new FakeKeychain();
     const service = claudeKeychainServiceName(CONFIG_DIR);
     fake.items.set(service, JSON.stringify({ claudeAiOauth: OAUTH }));
@@ -582,8 +582,9 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
     expect(context).toMatchObject({
       previousProviderId: 'official-a',
       providerId: 'official-a',
+      likelyRevoked: true,
     });
-    expect(message).toContain('probably revoked');
+    expect(message).toContain('cleared by Claude Code');
     const logged = JSON.stringify(warnMock.mock.calls);
     expect(logged).not.toContain(OAUTH.accessToken);
     expect(logged).not.toContain(OAUTH.refreshToken);
@@ -652,7 +653,6 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
   });
 
   test('valid credentials owned by another provider follow the unchanged switch path', async () => {
-    warnMock.mockClear();
     const fake = new FakeKeychain();
     const service = claudeKeychainServiceName(CONFIG_DIR);
     fake.items.set(
