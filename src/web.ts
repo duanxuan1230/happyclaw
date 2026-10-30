@@ -45,6 +45,12 @@ import {
   getAllCookieValues,
   tryVerifyAny,
 } from './middleware/auth.js';
+import { guestGuardMiddleware } from './middleware/guest-guard.js';
+import {
+  GUEST_READ_ONLY_ERROR,
+  canViewGroup,
+  getGuestAccountState,
+} from './guest-access.js';
 
 // Route modules
 import authRoutes from './routes/auth.js';
@@ -75,6 +81,7 @@ import { getSessionWorktree } from './session-worktree-store.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
+import guestRoutes from './routes/guests.js';
 import { codexGatewayApp } from './codex-gateway/gateway.js';
 import { initCodexCatalogSync } from './codex-gateway/model-catalog-sync.js';
 import { CODEX_GATEWAY_ROUTE } from './codex-gateway/types.js';
@@ -329,6 +336,10 @@ app.use(
   }),
 );
 
+// Read-only guest accounts: default-deny allowlist ahead of every route
+// module (see src/middleware/guest-guard.ts). Non-guest requests pass through.
+app.use('/api/*', guestGuardMiddleware);
+
 // --- Global State ---
 
 let deps: WebDeps | null = null;
@@ -358,6 +369,7 @@ app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
 app.route('/api/bug-report', bugReportRoutes);
 app.route('/api/channel-accounts', channelAccountRoutes);
+app.route('/api/guests', guestRoutes);
 // 不挂在 /api/* 下：网关用 provider gateway token 鉴权（x-api-key），
 // 不是浏览器 Cookie 会话，不需要也不应该套用 /api/* 的 CORS/Cookie 中间件。
 app.route(CODEX_GATEWAY_ROUTE, codexGatewayApp);
@@ -770,8 +782,11 @@ app.get('/api/follow-ups', authMiddleware, async (c) => {
   const group = getRegisteredGroup(baseJid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup(authUser, group)) {
-    return c.json({ error: 'Access denied' }, 403);
+  // Read-only: granted guests may see the visible queue, never act on it.
+  if (!canViewGroup(authUser, group)) {
+    return authUser.role === 'guest'
+      ? c.json({ error: 'Group not found' }, 404)
+      : c.json({ error: 'Access denied' }, 403);
   }
   return c.json({
     items: listQueuedFollowUps(chatJid).map(presentAutomationMessage),
@@ -1913,6 +1928,15 @@ function setupWebSocket(server: any): WebSocketServer {
       socket.destroy();
       return;
     }
+    // A guest whose owner is disabled/deleted is cut off like a disabled user.
+    if (
+      session.role === 'guest' &&
+      !getGuestAccountState(session.user_id).valid
+    ) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     request.__happyclawSessionId = token;
 
     wss.handleUpgrade(request, socket, head, (ws) => {
@@ -2089,9 +2113,23 @@ function setupWebSocket(server: any): WebSocketServer {
           ws.send(JSON.stringify(msg));
         };
 
+        // A liveness probe changes nothing; every socket gets its pong.
         if (msg.type === 'ping') {
           const pong: WsMessageOut = { type: 'pong' };
           ws.send(JSON.stringify(pong));
+          return;
+        }
+
+        // Guest sockets are receive-only. Every other client message type
+        // (send, terminal, and anything added later) is refused before
+        // dispatch.
+        if (session.role === 'guest') {
+          sendWsError(
+            GUEST_READ_ONLY_ERROR,
+            typeof (msg as { chatJid?: unknown })?.chatJid === 'string'
+              ? (msg as { chatJid: string }).chatJid
+              : undefined,
+          );
           return;
         }
 
@@ -2719,7 +2757,13 @@ function safeBroadcast(
       continue;
     }
 
-    if (adminOnly && session.role !== 'admin') {
+    // Host-mode workspace events are admin-only, except for a guest whose
+    // active grant on this workspace already put it in allowedUserIds.
+    if (
+      adminOnly &&
+      session.role !== 'admin' &&
+      !(session.role === 'guest' && allowedUserIds?.has(session.user_id))
+    ) {
       continue;
     }
 
@@ -4154,6 +4198,14 @@ let wss: WebSocketServer | null = null;
  * construction). The current caller stays within the `/clear` ACL path, which
  * needs only `queue.stopGroup` / `getSessions` / `setLastAgentTimestamp`.
  */
+/**
+ * Test-only: attach the WebSocket gateway to a caller-owned HTTP server (bind
+ * it to an ephemeral loopback port). The caller closes the returned server.
+ */
+export function attachWebSocketForTest(server: unknown): WebSocketServer {
+  return setupWebSocket(server);
+}
+
 export function createAppForTest(webDeps: WebDeps): typeof app {
   webDeps.broadcastNewMessage = broadcastNewMessage;
   webDeps.broadcastMessageDeleted = broadcastMessageDeleted;

@@ -78,6 +78,8 @@ export interface CommandSourceInput {
   sessionLimit?: number;
   /** The session open on the chat page, if any. */
   currentSession?: { workspaceJid: string; sessionJid: string } | null;
+  /** False for read-only guests: no create actions (conversation, workspace, automation). */
+  canCreate?: boolean;
 }
 
 const THEME_LABELS: Record<Theme, string> = {
@@ -106,7 +108,7 @@ function workspaceLabel(group: GroupInfo): string {
 export function buildCommandGroups(
   input: CommandSourceInput,
 ): CommandGroupSpec[] {
-  const actions: CommandItemSpec[] = [
+  const createActions: CommandItemSpec[] = [
     {
       id: 'action:new-conversation',
       label: '新对话',
@@ -143,6 +145,9 @@ export function buildCommandGroups(
           },
         ]
       : []),
+  ];
+  const actions: CommandItemSpec[] = [
+    ...(input.canCreate === false ? [] : createActions),
     {
       id: 'action:toggle-sidebar',
       label: '切换侧边栏',

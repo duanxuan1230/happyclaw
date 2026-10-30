@@ -38,7 +38,7 @@ import {
   workspaceFilesUrl,
 } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
-import { useAuthStore } from '../../stores/auth';
+import { useAuthStore, useIsGuest } from '../../stores/auth';
 import { useScrollIsolation } from '../../hooks/useScrollIsolation';
 import { api } from '../../api/client';
 import { withBasePath } from '../../utils/url';
@@ -480,10 +480,13 @@ function MarkdownFileViewer({
   groupJid,
   file,
   onClose,
+  readOnly = false,
 }: {
   groupJid: string;
   file: FileEntry;
   onClose: () => void;
+  /** Preview only (read-only guests): no edit mode, no save. */
+  readOnly?: boolean;
 }) {
   const { getFileContent, saveFileContent } = useFileStore();
   const [content, setContent] = useState('');
@@ -527,7 +530,7 @@ function MarkdownFileViewer({
   }, [groupJid, file.path, getFileContent]);
 
   const doSave = async () => {
-    if (!dirty || saving || mode !== 'edit') return;
+    if (readOnly || !dirty || saving || mode !== 'edit') return;
     setSaving(true);
     const ok = await saveFileContent(groupJid, file.path, editContent);
     setSaving(false);
@@ -573,18 +576,20 @@ function MarkdownFileViewer({
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <SegmentedControl
-              label="查看方式"
-              value={mode}
-              options={MARKDOWN_MODE_OPTIONS}
-              onChange={(next) => {
-                if (next === 'edit') {
-                  if (mode !== 'edit') switchToEdit();
-                } else {
-                  switchToPreview();
-                }
-              }}
-            />
+            {!readOnly && (
+              <SegmentedControl
+                label="查看方式"
+                value={mode}
+                options={MARKDOWN_MODE_OPTIONS}
+                onChange={(next) => {
+                  if (next === 'edit') {
+                    if (mode !== 'edit') switchToEdit();
+                  } else {
+                    switchToPreview();
+                  }
+                }}
+              />
+            )}
             {mode === 'edit' && (
               <Button
                 onClick={doSave}
@@ -653,9 +658,11 @@ function MarkdownFileViewer({
 
         {/* Footer */}
         <div className={PREVIEW_FOOTER_CLASS}>
-          {mode === 'edit'
-            ? 'Ctrl/Cmd+S 保存 · Esc 关闭'
-            : '点击「编辑」修改内容 · Esc 关闭'}
+          {readOnly
+            ? 'Esc 关闭'
+            : mode === 'edit'
+              ? 'Ctrl/Cmd+S 保存 · Esc 关闭'
+              : '点击「编辑」修改内容 · Esc 关闭'}
         </div>
       </div>
     </PreviewDialog>
@@ -927,7 +934,13 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   const [preview, setPreview] = useState<PreviewState>(null);
 
   const isStreaming = useChatStore((s) => !!s.streaming[groupJid]);
-  const canOpenLocalFolder = useAuthStore((s) => s.user?.role === 'admin');
+  const isGuest = useIsGuest();
+  const groupReadOnly = useChatStore((s) => !!s.groups[groupJid]?.read_only);
+  // Read-only viewers (guests) browse, preview and download only.
+  const readOnly = isGuest || groupReadOnly;
+  const canOpenLocalFolder = useAuthStore(
+    (s) => s.user?.role === 'admin' && !readOnly,
+  );
   const prevStreamingRef = useRef(false);
   const fileListScrollRef = useRef<HTMLDivElement>(null);
 
@@ -992,13 +1005,13 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
         setPreview({ kind: 'video', file: item });
       } else if (AUDIO_EXTENSIONS.has(ext)) {
         setPreview({ kind: 'audio', file: item });
-      } else if (ext === 'md' && isEntryEditable(item)) {
+      } else if (ext === 'md' && (readOnly || isEntryEditable(item))) {
         setPreview({ kind: 'markdown', file: item });
       } else {
         setPreview({ kind: 'text', file: item });
       }
     },
-    [groupJid, navigateTo],
+    [groupJid, navigateTo, readOnly],
   );
 
   const handleDownload = (item: FileEntry) => {
@@ -1311,7 +1324,8 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                       />
                       {/* Edit button for editable text files (系统文件里的
                           CLAUDE.md 例外也可编辑，但仍然没有删除按钮) */}
-                      {isEntryEditable(item) &&
+                      {!readOnly &&
+                        isEntryEditable(item) &&
                         TEXT_EXTENSIONS.has(getFileExt(item.name)) && (
                           <IconButton
                             label="编辑文件"
@@ -1330,7 +1344,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                           className={FILE_ACTION_CLASS}
                         />
                       )}
-                      {!item.isSystem && (
+                      {!readOnly && !item.isSystem && (
                         <IconButton
                           label="删除文件"
                           icon={<Trash2 />}
@@ -1352,17 +1366,19 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       </div>
 
       {/* Footer */}
-      <div className="shrink-0 space-y-2 border-t border-surface-border p-3">
-        <Button
-          variant="outline"
-          onClick={handleCreateDir}
-          className="w-full phone:h-11"
-        >
-          <FolderPlus />
-          新建文件夹
-        </Button>
-        <FileUploadZone groupJid={groupJid} />
-      </div>
+      {!readOnly && (
+        <div className="shrink-0 space-y-2 border-t border-surface-border p-3">
+          <Button
+            variant="outline"
+            onClick={handleCreateDir}
+            className="w-full phone:h-11"
+          >
+            <FolderPlus />
+            新建文件夹
+          </Button>
+          <FileUploadZone groupJid={groupJid} />
+        </div>
+      )}
 
       {isPhone && (
         <ActionSheet
@@ -1442,7 +1458,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           onClose={() => setPreview(null)}
         />
       )}
-      {preview?.kind === 'edit' && (
+      {preview?.kind === 'edit' && !readOnly && (
         <TextEditor
           groupJid={groupJid}
           file={preview.file}
@@ -1454,6 +1470,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           groupJid={groupJid}
           file={preview.file}
           onClose={() => setPreview(null)}
+          readOnly={readOnly}
         />
       )}
       {preview?.kind === 'pdf' && (

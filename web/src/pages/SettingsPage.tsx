@@ -37,6 +37,8 @@ import {
   SystemSettingsSection,
 } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
+import { GuestsSection } from '../components/settings/GuestsSection';
+import { GUEST_SCOPE_DESCRIPTION, GUEST_SETTINGS_TABS } from '../lib/guest';
 import { UsersPage } from './UsersPage';
 import { MonitorPage, MonitorRefreshButton } from './MonitorPage';
 import type { SettingsTab } from '../components/settings/types';
@@ -55,6 +57,7 @@ const VALID_TABS: SettingsTab[] = [
   'preferences',
   'my-channels',
   'security',
+  'guests',
   'groups',
   'agent-profiles',
   'memory',
@@ -114,7 +117,12 @@ export function SettingsPage() {
     !!currentUser?.permissions.includes('manage_invites') ||
     !!currentUser?.permissions.includes('view_audit_log');
 
-  const defaultTab: SettingsTab = canManageSystemConfig ? 'claude' : 'profile';
+  const isGuest = currentUser?.role === 'guest';
+  const defaultTab: SettingsTab = isGuest
+    ? 'security'
+    : canManageSystemConfig
+      ? 'claude'
+      : 'profile';
   const rawTabValue = searchParams.get('tab');
   // Keep bookmarks and already-open tabs from the retired automation page on
   // the closest remaining settings surface instead of falling back to models.
@@ -126,6 +134,11 @@ export function SettingsPage() {
     if (mustChangePassword) return 'security';
     const raw = rawTab;
     if (raw && VALID_TABS.includes(raw)) {
+      // Guests keep only their own password, devices and local preferences.
+      if (isGuest) {
+        const allowed: readonly SettingsTab[] = GUEST_SETTINGS_TABS;
+        return allowed.includes(raw) ? raw : defaultTab;
+      }
       if (SYSTEM_TABS.includes(raw) && !canManageSystemConfig)
         return defaultTab;
       if (
@@ -148,6 +161,7 @@ export function SettingsPage() {
     mustChangePassword,
     defaultTab,
     currentUser?.role,
+    isGuest,
   ]);
 
   // A phone shows the section list until a section is picked (the URL names
@@ -191,6 +205,7 @@ export function SettingsPage() {
     preferences: '常规',
     'my-channels': '消息渠道',
     security: '安全与设备',
+    guests: '访客',
     groups: '会话管理',
     'agent-profiles': '智能体',
     memory: 'Workspace Memory',
@@ -209,6 +224,7 @@ export function SettingsPage() {
     preferences: '对话行为、界面外观与通知偏好，只保存在当前浏览器。',
     'my-channels': '连接渠道机器人账号，并管理已接入的群聊与会话。',
     security: '修改密码，查看并撤销其他设备上的登录会话。',
+    guests: GUEST_SCOPE_DESCRIPTION,
     appearance:
       '系统品牌影响站点标题、欢迎文案和侧边栏 Logo，不会改变 HappyClaw 或自定义智能体的名称。',
     claude: '添加模型连接和它们提供的模型；用哪个模型在智能体和对话里选。',
@@ -228,6 +244,7 @@ export function SettingsPage() {
     preferences: '仅当前设备',
     'my-channels': '账户 · 所有设备同步',
     security: '账户',
+    guests: '账户',
     appearance: '系统 · 全局生效',
     claude: '系统 · 全局生效',
     system: '系统 · 全局生效',
@@ -240,7 +257,9 @@ export function SettingsPage() {
   };
 
   const legacyRoute =
-    !mustChangePassword && rawTab ? LEGACY_TAB_ROUTES[rawTab] : undefined;
+    !mustChangePassword && !isGuest && rawTab
+      ? LEGACY_TAB_ROUTES[rawTab]
+      : undefined;
   if (legacyRoute) return <Navigate to={legacyRoute} replace />;
   const renderSection = () => (
     <div data-settings-content="true" className="min-w-0 flex-1">
@@ -313,6 +332,7 @@ export function SettingsPage() {
             {activeTab === 'preferences' && <PreferencesSection />}
             {activeTab === 'my-channels' && <UserChannelsSection />}
             {activeTab === 'security' && <SecuritySection />}
+            {activeTab === 'guests' && <GuestsSection />}
             {activeTab === 'about' && <AboutSection />}
           </>
         )}
@@ -327,6 +347,7 @@ export function SettingsPage() {
     canManageBilling,
     canManageUsers: !!canManageUsers,
     isAdmin: currentUser?.role === 'admin',
+    isGuest,
     mustChangePassword,
   };
 
