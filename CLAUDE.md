@@ -237,6 +237,13 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - `AGENTS`：工作流、输入输出、默认值、分支和失败处理。
 - `TOOLS`：Skill、MCP 和工具的选择方式与限制，可为空。
 
+System prompt 是 Claude Code preset（`prompt_mode=append`，主动模式除外）加 HappyClaw
+的 PromptPlan。PromptPlan 的第一块是引擎层：带 preset 时为 `runtime-adaptation`，说明
+preset 里终端编程 CLI 的假设（身份、请求范围、渲染、篇幅、`/help`）在 HappyClaw 中怎么
+改；不带 preset 时为 `runtime-baseline`，补上 preset 原本给的工作基础。Agent 提示词取代
+preset 的身份和默认风格，只低于平台的安全、权限、工具和交付规则。preset 原文由
+`tests/fixtures/claude-code-preset.txt` 固定。
+
 运行时能力不是简单拼接文本：
 
 1. `claude-context-resolver` 解析 managed 或 `host_claude` 上下文。
@@ -593,7 +600,9 @@ npm run self-test
 - 修改文档后运行 `npm run docs:check`。
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile；
   升级后重跑 `node tests/e2e/turn-context-dedup.mjs`，它固定 SessionStart(compact)
-  补发的位置。
+  补发的位置。preset 变了时 `tests/agent-runner-claude-preset.integration.test.ts`
+  失败：对照差异复查 `prompts/runtime-adaptation.md`，再用
+  `npx vitest run tests/agent-runner-claude-preset.integration.test.ts --update` 更新快照。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。

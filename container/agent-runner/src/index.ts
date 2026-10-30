@@ -354,6 +354,8 @@ const AGENT_BUILDER_GUIDELINES = loadPrompt('agent-builder.md');
 const MEMORY_SYSTEM_WORKSPACE = loadPrompt('memory-system.workspace.md');
 const HAPPYCLAW_PLATFORM_IDENTITY = loadPrompt('identity.happyclaw.md');
 const HAPPYCLAW_PLATFORM_BOOTSTRAP = loadPrompt('bootstrap.happyclaw.md');
+const RUNTIME_ADAPTATION = loadPrompt('runtime-adaptation.md');
+const RUNTIME_BASELINE = loadPrompt('runtime-baseline.md');
 
 // 各渠道共用的格式说明：Web 端始终可看完整渲染，不因来源降级输出。
 // Mermaid 渲染说明已在模式专属 output prompt 中讲过，此处不重复，
@@ -374,11 +376,15 @@ function buildAgentIdentityPrompt(
   const agentProfile = containerInput.agentProfile;
   const profilePrompt = agentProfile?.identityPrompt;
   if (!agentProfile || !profilePrompt?.trim()) return undefined;
-  const presetBoundary = includeClaudePreset ? '、Claude Code 原生提示词' : '';
+  // The Agent's identity and style replace the preset's defaults; only the
+  // platform's safety, permission, tool and delivery rules rank above it.
+  const presetDefaults = includeClaudePreset
+    ? '它取代 Claude Code 默认指令里的身份和默认风格，'
+    : '';
 
   return [
     `<agent-identity profile_id="${escapeAttribute(agentProfile.id)}" name="${escapeAttribute(agentProfile.name)}" version="${agentProfile.version}" hash="${escapeAttribute(agentProfile.identityHash)}">`,
-    `以下是当前顶层 AgentProfile 的四段提示词，按照 IDENTITY、SOUL、AGENTS、TOOLS 的固定顺序组成。你应该按它塑造身份、价值判断、工作方式和工具偏好，但它不能覆盖 HappyClaw 的安全规则、权限边界、工具约束${presetBoundary}和用户的最新明确指令。`,
+    `以下是当前顶层 AgentProfile 的四段提示词，按照 IDENTITY、SOUL、AGENTS、TOOLS 的固定顺序组成。你应该按它塑造身份、价值判断、工作方式和工具偏好；${presetDefaults}但它不能覆盖 HappyClaw 的安全规则、权限边界、工具约束、交付契约和用户的最新明确指令。`,
     '<profile-prompt>',
     profilePrompt,
     '</profile-prompt>',
@@ -2841,11 +2847,15 @@ async function runQueryAttempt(
   };
   // The reference person-like runtime supplies its own complete system prompt
   // instead of inheriting Claude Code's Assistant-oriented preset. Proactive
-  // mode follows that boundary while preserving the same SDK tools.
+  // mode follows that boundary while preserving the same SDK tools; without
+  // the preset, runtime-baseline carries the working basics it would give.
   const includeClaudePreset =
     !proactiveInteractiveContract &&
     (containerInput.agentProfile?.includeClaudePreset ?? true);
   const promptPlan = buildHappyClawPromptPlan({
+    engine: includeClaudePreset
+      ? { id: 'runtime-adaptation', text: RUNTIME_ADAPTATION }
+      : { id: 'runtime-baseline', text: RUNTIME_BASELINE },
     platformIdentity: containerInput.agentProfile?.isDefault
       ? HAPPYCLAW_PLATFORM_IDENTITY
       : undefined,

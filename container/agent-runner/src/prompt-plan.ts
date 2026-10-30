@@ -34,6 +34,15 @@ export interface HappyClawPromptSources {
   platformIdentity?: string;
   platformBootstrap?: string;
   agentIdentity?: string;
+  /**
+   * The engine layer: with the Claude Code preset, how it applies here
+   * (`runtime-adaptation`); without it, the working basics it would have
+   * given (`runtime-baseline`).
+   */
+  engine?: {
+    id: 'runtime-adaptation' | 'runtime-baseline';
+    text: string;
+  };
   interaction: string;
   security: string;
   memory?: {
@@ -145,6 +154,14 @@ export function hasBackgroundTaskTools(
   return allowedTools.includes('Task');
 }
 
+const ENGINE_CONDITIONS: Record<
+  NonNullable<HappyClawPromptSources['engine']>['id'],
+  string
+> = {
+  'runtime-adaptation': 'Claude Code preset is included',
+  'runtime-baseline': 'Claude Code preset is not included',
+};
+
 function wrap(tag: string, text: string): string {
   if (!text.trim()) return '';
   return `<${tag}>\n${text}\n</${tag}>`;
@@ -155,6 +172,20 @@ export function buildHappyClawPromptPlan(
   sources: HappyClawPromptSources,
 ): PromptPlan {
   const inputs: PromptBlockInput[] = [];
+
+  // Directly after the Claude Code preset (or in its place), ahead of the
+  // identity it defers to.
+  if (sources.engine) {
+    inputs.push({
+      id: sources.engine.id,
+      version: 1,
+      scope: 'main',
+      owner: 'platform',
+      required: true,
+      condition: ENGINE_CONDITIONS[sources.engine.id],
+      text: wrap(sources.engine.id, sources.engine.text),
+    });
+  }
 
   if (sources.platformIdentity) {
     inputs.push({
