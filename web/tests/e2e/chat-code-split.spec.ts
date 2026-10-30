@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
 // The editor (Tiptap, ProseMirror, the cindy composer) is most of the chat
-// page's code. The phone's conversation list must not fetch it; opening a
-// conversation loads it and the composer works.
+// page's code. The phone's conversation list renders without it and only
+// warms it once idle; opening a conversation loads it and the composer works.
 //
 // Covers the split in LazyMessageInput. With a current workspace already set,
 // the home also depends on ChatPage not mounting the hidden ChatView behind
@@ -38,6 +38,11 @@ test('the phone home loads no editor code; a conversation loads it', async ({
   isMobile,
 }) => {
   test.skip(!isMobile, 'phone home');
+  // Idle never comes here, so only rendering could pull the editor in.
+  await page.addInitScript(() => {
+    window.requestIdleCallback = () => 0;
+    window.cancelIdleCallback = () => undefined;
+  });
   const requested = recordEditorRequests(page);
 
   await page.goto(`${HARNESS_PATH}?${new URLSearchParams({ route: '/chat' })}`);
@@ -53,4 +58,15 @@ test('the phone home loads no editor code; a conversation loads it', async ({
   await page.keyboard.type('你好');
   await expect(editor).toHaveText('你好');
   await expect(page.locator('[data-composer-fallback]')).toHaveCount(0);
+});
+
+test('the phone home warms the editor once idle', async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(!isMobile, 'phone home');
+  const requested = recordEditorRequests(page);
+  await page.goto(`${HARNESS_PATH}?${new URLSearchParams({ route: '/chat' })}`);
+  await expect(page.locator('[data-hc-phone-home]')).toBeVisible();
+  await expect.poll(() => requested.length).toBeGreaterThan(0);
 });

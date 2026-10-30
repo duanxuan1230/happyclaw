@@ -17,7 +17,8 @@ import { useIsPhone } from '../components/layout/phone';
 import { ConfirmDialog } from '../components/common';
 import { RenameDialog } from '../components/chat/RenameDialog';
 import { lazyBugReportDialog } from '../components/common/lazy-dialogs';
-import { useOpenedOnce } from '../lib/preloaded-component';
+import { preloadWhenIdle, useOpenedOnce } from '../lib/preloaded-component';
+import { preloadMessageInput } from '../components/chat/LazyMessageInput';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { SkeletonCardList } from '../components/common/Skeletons';
 import { findRouteGroupJid } from '../lib/route-workspace';
@@ -61,6 +62,12 @@ export function ChatPage() {
   // Phones have one list (workspaces with their sessions) instead of the
   // workspace list → session list → chat levels of narrow windows.
   const isPhone = useIsPhone();
+  // The phone home renders without the editor; fetch it once the list is
+  // idle so the first conversation opened has its composer ready.
+  useEffect(() => {
+    if (!isPhone) return;
+    return preloadWhenIdle(preloadMessageInput);
+  }, [isPhone]);
   const phoneSessionsLink =
     isPhone && !!groupFolder && searchParams.get('sessions') === '1';
   // On a phone the home list stays mounted under an open conversation, so
