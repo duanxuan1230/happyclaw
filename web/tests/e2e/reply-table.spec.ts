@@ -57,6 +57,23 @@ test.describe('reply tables', () => {
     const first = block.locator('td').first();
     const narrow = page.viewportSize()!.width < 640;
     await expect(first).toHaveCSS('position', narrow ? 'sticky' : 'static');
+    if (narrow) {
+      // Scrolled sideways, the pinned column is not washed out by the fade.
+      const scroller = sink
+        .locator('[data-md-table]', { hasText: '列 1 Column' })
+        .locator('[data-scroll-fade]');
+      await scroller.evaluate((element) => {
+        element.scrollLeft = 120;
+      });
+      await expect(scroller).toHaveAttribute('data-scroll-fade', /start|both/);
+      const mask = await scroller.evaluate(
+        (element) => getComputedStyle(element).maskImage,
+      );
+      expect(
+        mask.startsWith('linear-gradient(to right, rgb(0, 0, 0)') ||
+          mask === 'none',
+      ).toBe(true);
+    }
   });
 
   test('a streaming table holds its tools hidden until the reply settles', async ({
