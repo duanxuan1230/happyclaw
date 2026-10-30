@@ -299,7 +299,7 @@ export function DetailPanel({
       className={cn(
         // `clip` rounds the corners without becoming a scroll container, so
         // the panel keeps its content height inside flex sheets.
-        'overflow-clip rounded-xl bg-surface-raised ring-1 ring-surface-border',
+        'overflow-clip rounded-xl bg-surface-raised ring-1 ring-surface-border [--md-table-bg:var(--surface-raised)]',
         className,
       )}
     >

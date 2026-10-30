@@ -34,7 +34,7 @@ export function DetailSheet({
       <SheetContent
         side="bottom"
         aria-describedby={undefined}
-        className={className}
+        className={cn('[--md-table-bg:var(--surface-raised)]', className)}
       >
         <SheetHeader
           className={cn('pb-2', action && 'flex-row items-center gap-2')}

@@ -154,6 +154,43 @@ test.describe('chat Markdown rendering', () => {
     );
   });
 
+  test('a settled reply wraps without a lone last character; a streaming one does not re-break', async ({
+    page,
+  }) => {
+    const sink = await openMarkdown(page);
+    const wrap = (locator: Locator) =>
+      locator.evaluate((element) => getComputedStyle(element).textWrapStyle);
+    expect(await wrap(sink.locator('p').first())).toBe('pretty');
+    expect(await wrap(sink.locator('li').first())).toBe('pretty');
+    expect(await wrap(sink.locator('h1').first())).toBe('balance');
+
+    const reply =
+      '流式回复的第一段，已经写完了。\n\n## 小标题\n\n第二段还在一个字一个字地出来';
+    await page.evaluate((text) => {
+      (window as MarkdownHarnessWindow).markdownHarness.setPartial(text);
+    }, reply);
+    const streaming = page.locator('p', { hasText: '第二段还在' }).last();
+    await expect(streaming).toBeVisible();
+    expect(await wrap(streaming)).not.toBe('pretty');
+    // A block that closed keeps the plain wrap while the reply streams on,
+    // also once its words are in and it renders as final Markdown: wrapping
+    // it again would move the open block under it.
+    const closed = page.locator('p', { hasText: '流式回复的第一段' }).last();
+    await expect(closed.locator('.hc-stream-word')).toHaveCount(0);
+    expect(await wrap(closed)).not.toBe('pretty');
+    expect(
+      await wrap(page.locator('h2', { hasText: '小标题' }).last()),
+    ).not.toBe('balance');
+
+    // Once the reply is final, all of it wraps for looks.
+    await appendReply(page, `${reply}。`);
+    // The streaming copy is gone; only the final message has it.
+    await expect(page.locator('p', { hasText: '第二段还在' })).toHaveCount(1);
+    expect(
+      await wrap(page.locator('p', { hasText: '流式回复的第一段' }).last()),
+    ).toBe('pretty');
+  });
+
   test('footnote references jump within the message', async ({
     page,
     context,

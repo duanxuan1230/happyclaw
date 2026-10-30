@@ -81,11 +81,15 @@ export function SubAgentBody({
       )}
       {task.textTail && (
         <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
+          {/* Only the tail of the sub-agent's words, always streaming: a
+              table here may be cut off, and its tools would never become
+              usable. */}
           <MarkdownRenderer
             content={textTailMarkdown}
             groupJid={groupJid}
             variant="docs"
             streaming
+            tableTools={false}
           />
         </div>
       )}
@@ -163,7 +167,7 @@ export const SubAgentCard = memo(function SubAgentCard({
     'flex min-h-9 w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left pointer-coarse:min-h-11';
 
   return (
-    <div className="overflow-hidden rounded-lg bg-surface-raised font-sans ring-1 ring-surface-border">
+    <div className="overflow-hidden rounded-lg bg-surface-raised font-sans ring-1 ring-surface-border [--md-table-bg:var(--surface-raised)]">
       {hasBody ? (
         <button
           type="button"
