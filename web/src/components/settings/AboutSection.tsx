@@ -16,7 +16,7 @@ function ExternalAnchor({
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex items-center gap-1 rounded-sm text-body font-medium text-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
+      className="inline-flex items-center gap-1 rounded-sm text-body font-medium text-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 phone:min-h-11"
     >
       {children}
       <ExternalLink className="size-3 text-muted-foreground" />

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  ChevronRight,
   CreditCard,
   Gauge,
   Info,
@@ -24,6 +25,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { ListGroup, ListRow } from '@/components/common/ListRow';
 import { SearchInput } from '@/components/common/SearchInput';
 import { sidebarRowClass } from '@/components/layout/sidebar/SidebarItem';
 import { cn } from '@/lib/utils';
@@ -223,6 +225,11 @@ interface SettingsNavProps {
   mustChangePassword: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /**
+   * `sidebar`: the desktop column plus a sheet for narrow windows. `page`:
+   * the phone's full-page section list.
+   */
+  variant?: 'sidebar' | 'page';
 }
 
 const navRowClass = cn(sidebarRowClass, 'gap-2.5 pointer-coarse:h-11');
@@ -237,6 +244,7 @@ export function SettingsNav({
   mustChangePassword,
   open,
   onOpenChange,
+  variant = 'sidebar',
 }: SettingsNavProps) {
   const [query, setQuery] = useState('');
   const sections = getSettingsSections({
@@ -288,6 +296,56 @@ export function SettingsNav({
       ariaLabel="搜索设置项"
     />
   );
+
+  if (variant === 'page') {
+    // A phone's settings home (cindy's settings screen): grouped rows that
+    // each open their section as a page of its own.
+    const renderPageItem = (item: NavItem) => (
+      <ListRow
+        key={item.key}
+        media={
+          <item.icon
+            aria-hidden="true"
+            className="size-5 text-muted-foreground"
+          />
+        }
+        title={item.label}
+        meta={
+          <ChevronRight
+            aria-hidden="true"
+            className="size-4 text-faint-foreground"
+          />
+        }
+        disabled={disabled(item)}
+        onClick={() => onTabChange(item.key)}
+        className="active:bg-surface-hover"
+      />
+    );
+    const pageGroups = [
+      ...visibleSections,
+      ...(showAbout ? [{ label: '', items: [aboutItem] }] : []),
+    ];
+    return (
+      <nav aria-label="设置导航" className="space-y-5 px-4 pt-2 pb-6">
+        {search}
+        {pageGroups.map((section) => (
+          <section key={section.label || 'about'} className="space-y-1.5">
+            {section.label && (
+              <h2 className="px-4 text-caption font-medium text-muted-foreground">
+                {section.label}
+              </h2>
+            )}
+            <ListGroup>{section.items.map(renderPageItem)}</ListGroup>
+          </section>
+        ))}
+        {pageGroups.length === 0 && (
+          <p className="py-6 text-center text-caption text-muted-foreground">
+            没有匹配的设置
+          </p>
+        )}
+      </nav>
+    );
+  }
 
   const navigation = (
     <>

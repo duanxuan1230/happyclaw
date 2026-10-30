@@ -6,8 +6,10 @@ import { IconButton } from '@/components/common/IconButton';
 import { Button } from '@/components/ui/button';
 import {
   Sheet,
+  SheetBody,
   SheetContent,
   SheetDescription,
+  SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Spinner } from '@/components/ui/spinner';
@@ -163,7 +165,36 @@ export function McpServersPage() {
 
   return (
     <div className="space-y-4">
-      <CapabilitySectionActions>
+      <CapabilitySectionActions
+        phoneAction={
+          <IconButton
+            label="添加 MCP 服务器"
+            icon={<Plus className="size-5" />}
+            size="icon"
+            hideTooltip
+            onClick={() => setShowAddDialog(true)}
+            className="size-11 rounded-full text-foreground"
+          />
+        }
+        phoneMenu={[
+          ...(isAdmin
+            ? [
+                {
+                  label: syncing ? '导入中...' : '导入宿主机副本',
+                  icon: Download,
+                  onSelect: () => void handleSync(),
+                  disabled: syncing,
+                },
+              ]
+            : []),
+          {
+            label: '刷新',
+            icon: RefreshCw,
+            onSelect: () => void loadServers(),
+            disabled: loading,
+          },
+        ]}
+      >
         {isAdmin && (
           <Button
             variant="outline"
@@ -274,13 +305,20 @@ export function McpServersPage() {
       >
         <SheetContent
           side="bottom"
-          className="max-h-[88dvh] gap-0 overflow-y-auto rounded-t-xl p-0 pt-8 *:data-[slot=detail-panel]:rounded-none *:data-[slot=detail-panel]:ring-0"
+          className="max-h-[88dvh] gap-0 rounded-t-xl p-0"
         >
-          <SheetTitle className="sr-only">MCP 服务器详情</SheetTitle>
-          <SheetDescription className="sr-only">
-            查看所选 MCP 服务器的连接方式与密钥配置
-          </SheetDescription>
-          {!isDesktop && detail}
+          {/* The header drags the sheet and stays put; only the body scrolls. */}
+          <SheetHeader className="pt-1 pr-14 pb-2">
+            <SheetTitle className="text-label text-muted-foreground">
+              MCP 服务器详情
+            </SheetTitle>
+            <SheetDescription className="sr-only">
+              查看所选 MCP 服务器的连接方式与密钥配置
+            </SheetDescription>
+          </SheetHeader>
+          <SheetBody className="*:data-[slot=detail-panel]:rounded-none *:data-[slot=detail-panel]:ring-0">
+            {!isDesktop && detail}
+          </SheetBody>
         </SheetContent>
       </Sheet>
 

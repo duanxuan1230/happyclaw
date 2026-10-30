@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type ComponentType } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type RefObject,
+} from 'react';
 import { cn } from '@/lib/utils';
 
 export interface SegmentedOption<V extends string = string> {
@@ -24,20 +30,16 @@ const FADE_END =
 const FADE_BOTH =
   '[mask-image:linear-gradient(to_right,transparent,black_1.5rem,black_calc(100%-1.5rem),transparent)]';
 
-/** Compact single-choice switcher (pressed-button group). */
-export function SegmentedControl<V extends string = string>({
-  label,
-  value,
-  options,
-  onChange,
-  size = 'default',
-  className,
-}: SegmentedControlProps<V>) {
-  // When the options overflow (narrow phones), the clipped edge fades out so
-  // it reads as scrollable; there is no fade while everything fits.
-  const ref = useRef<HTMLDivElement>(null);
+/**
+ * The mask class that fades whichever edge of a horizontal scroller still
+ * hides content, or `false` while everything fits. `contentKey` re-measures
+ * when the content can change width without resizing the box.
+ */
+export function useScrollEdgeFade(
+  ref: RefObject<HTMLElement | null>,
+  contentKey?: unknown,
+): string | false {
   const [edges, setEdges] = useState({ start: false, end: false });
-  const optionKey = options.map((option) => option.label).join('\n');
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
@@ -61,8 +63,31 @@ export function SegmentedControl<V extends string = string>({
       node.removeEventListener('scroll', update);
       observer.disconnect();
     };
-    // Options can change width without resizing the clipped box.
-  }, [optionKey]);
+  }, [ref, contentKey]);
+  return edges.start && edges.end
+    ? FADE_BOTH
+    : edges.start
+      ? FADE_START
+      : edges.end && FADE_END;
+}
+
+/** Compact single-choice switcher (pressed-button group). */
+export function SegmentedControl<V extends string = string>({
+  label,
+  value,
+  options,
+  onChange,
+  size = 'default',
+  className,
+}: SegmentedControlProps<V>) {
+  // When the options overflow (narrow phones), the clipped edge fades out so
+  // it reads as scrollable; there is no fade while everything fits.
+  const ref = useRef<HTMLDivElement>(null);
+  // Options can change width without resizing the clipped box.
+  const fade = useScrollEdgeFade(
+    ref,
+    options.map((option) => option.label).join('\n'),
+  );
 
   return (
     <div
@@ -72,11 +97,7 @@ export function SegmentedControl<V extends string = string>({
       data-slot="segmented-control"
       className={cn(
         'inline-flex min-w-0 max-w-full gap-0.5 overflow-x-auto rounded-lg bg-muted p-0.5',
-        edges.start && edges.end
-          ? FADE_BOTH
-          : edges.start
-            ? FADE_START
-            : edges.end && FADE_END,
+        fade,
         className,
       )}
     >

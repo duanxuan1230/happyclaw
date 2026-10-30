@@ -181,6 +181,7 @@ export function AuditLogTab({ setError }: AuditLogTabProps) {
           ))}
         </NativeSelect>
         <Input
+          variant="code"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           onKeyDown={loadOnEnter}
@@ -189,6 +190,7 @@ export function AuditLogTab({ setError }: AuditLogTabProps) {
           className="w-full sm:w-40"
         />
         <Input
+          variant="code"
           value={actorUsername}
           onChange={(e) => setActorUsername(e.target.value)}
           onKeyDown={loadOnEnter}

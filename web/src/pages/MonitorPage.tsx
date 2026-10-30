@@ -20,11 +20,13 @@ import {
 } from 'lucide-react';
 import {
   DataTable,
+  IconButton,
   ListGroup,
   PageContainer,
   PageHeader,
   type DataTableColumn,
 } from '@/components/common';
+import { PhonePageHeader } from '@/components/layout/PhonePageHeader';
 import {
   SettingsGroup,
   SettingsRow,
@@ -50,9 +52,27 @@ const CLAUDE_STATUS_DOT: Record<
 };
 
 /** Refresh control, also rendered in the settings header when embedded. */
-export function MonitorRefreshButton() {
+export function MonitorRefreshButton({
+  compact = false,
+}: {
+  /** An icon button for the phone's top bar. */
+  compact?: boolean;
+}) {
   const loading = useMonitorStore((s) => s.loading);
   const loadStatus = useMonitorStore((s) => s.loadStatus);
+  if (compact) {
+    return (
+      <IconButton
+        label="刷新"
+        icon={<RefreshCw className={cn('size-5', loading && 'animate-spin')} />}
+        size="icon"
+        hideTooltip
+        onClick={loadStatus}
+        disabled={loading}
+        className="size-11 rounded-full text-foreground"
+      />
+    );
+  }
   return (
     <Button variant="outline" onClick={loadStatus} disabled={loading}>
       <RefreshCw className={cn(loading && 'animate-spin')} />
@@ -417,10 +437,15 @@ export function MonitorPage({ embedded = false }: MonitorPageProps) {
 
   return (
     <PageContainer size="wide" className="space-y-6">
+      <PhonePageHeader
+        title="系统监控"
+        action={<MonitorRefreshButton compact />}
+      />
       <PageHeader
         title="系统监控"
         subtitle="实时监控系统状态（10秒自动刷新）"
         actions={<MonitorRefreshButton />}
+        className="phone:hidden"
       />
       {content}
     </PageContainer>
