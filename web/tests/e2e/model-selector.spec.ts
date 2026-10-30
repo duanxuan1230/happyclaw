@@ -607,3 +607,34 @@ test.describe('model picker', () => {
     }
   });
 });
+
+test.describe('phone model sheet at 390px', () => {
+  test('the levels and the rail fit, every level reachable', async ({
+    page,
+    isMobile,
+  }) => {
+    test.skip(!isMobile, 'the levels sit in the sheet on a phone');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openHarness(page, {
+      selectedModelConfigId: 'chatgpt',
+      selectedModel: 'gpt-6-astra',
+    });
+    await modelButton(page).click();
+    const sheet = page.getByRole('dialog');
+    await expect(sheet).toBeVisible();
+    await expect(
+      sheet.getByRole('button', { name: '最近', exact: true }),
+    ).toBeVisible();
+    const row = await page.locator('[data-effort-segments]').boundingBox();
+    expect(row!.x).toBeGreaterThanOrEqual(0);
+    expect(row!.x + row!.width).toBeLessThanOrEqual(390.5);
+    // 默认 and all five levels fit, or scroll inside the row.
+    for (const label of ['默认', '低', '中', '高', '超高', '最高']) {
+      const segment = effortSegment(page, label);
+      await segment.scrollIntoViewIfNeeded();
+      const box = await segment.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390.5);
+    }
+  });
+});

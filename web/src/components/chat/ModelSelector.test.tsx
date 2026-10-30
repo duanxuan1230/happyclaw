@@ -173,11 +173,7 @@ function connectionSelection(
         kind: 'official',
         model: 'opus',
         usable: true,
-        models: [
-          entry('opus'),
-          entry('sonnet'),
-          entry('haiku'),
-        ],
+        models: [entry('opus'), entry('sonnet'), entry('haiku')],
       },
       {
         id: 'glm',
@@ -439,9 +435,7 @@ describe('the trigger', () => {
     );
     await rerender();
     expect(trigger().textContent).toBe('glm-5.3');
-    expect(trigger().getAttribute('aria-label')).toBe(
-      '模型：GLM · glm-5.3',
-    );
+    expect(trigger().getAttribute('aria-label')).toBe('模型：GLM · glm-5.3');
   });
 
   test('names the picked model and is read-only without Modify', async () => {
@@ -1601,19 +1595,22 @@ describe('the default row', () => {
     ['agent', '智能体默认'],
     ['owner_main', '跟随主智能体'],
     ['system_main', '跟随主 HappyClaw'],
-  ] as const)('reads %s as 「%s」 with the connection and model it runs', async (source, label) => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        default: { source, modelConfigId: 'glm', model: 'glm-4.6' },
-      }),
-    );
-    await render(null);
-    expect(trigger().textContent).toBe('glm-4.6');
-    await open();
-    expect(titles()[0]).toBe(label);
-    expect(detail(label)).toBe('GLM · glm-4.6');
-    expect(checked()[0].getAttribute('title')).toBe(label);
-  });
+  ] as const)(
+    'reads %s as 「%s」 with the connection and model it runs',
+    async (source, label) => {
+      mocks.get.mockResolvedValue(
+        connectionSelection({
+          default: { source, modelConfigId: 'glm', model: 'glm-4.6' },
+        }),
+      );
+      await render(null);
+      expect(trigger().textContent).toBe('glm-4.6');
+      await open();
+      expect(titles()[0]).toBe(label);
+      expect(detail(label)).toBe('GLM · glm-4.6');
+      expect(checked()[0].getAttribute('title')).toBe(label);
+    },
+  );
 
   test('a workspace env override says so and names no connection', async () => {
     mocks.get.mockResolvedValue(
