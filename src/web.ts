@@ -9,6 +9,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'crypto';
 import { TerminalManager } from './terminal-manager.js';
 import { resolveFeishuCliBoundAccountId } from './feishu-cli-runtime.js';
+import {
+  getWebMessageDedup,
+  recordWebMessageDedup,
+} from './runtime-state-store.js';
 
 // Web context and shared utilities
 import {
@@ -89,6 +93,8 @@ import {
   getChannelMount,
   getJidsByFolder,
   getMessageCursor,
+  getMessagesSince,
+  getQueuedFollowUp,
   storeMessageDirect,
   deleteUserSession,
   updateSessionLastActive,
@@ -125,6 +131,7 @@ import type {
   UserRole,
   MessageCursor,
   RunFinishReason,
+  RegisteredGroup,
 } from './types.js';
 import {
   WEB_PORT,
@@ -390,151 +397,370 @@ app.post('/api/messages', authMiddleware, async (c) => {
     }
   }
 
-  // /clear: reset session without entering message pipeline.
-  // Permission: owner-only (canModifyGroup) — aligned with `reset-session`
-  // route, since /clear has the same destructive effect (clears agent
-  // session files, stops sibling containers, drops conversation history).
-  if (isClearCommand(content)) {
-    if (
-      !canModifyGroup(
-        { id: authUser.id, role: authUser.role },
-        { ...group, jid: chatJid },
-      )
-    ) {
-      return c.json({ error: 'Only the workspace owner can run /clear' }, 403);
-    }
-    if (!deps) return c.json({ error: 'Server not initialized' }, 500);
-    try {
-      await executeSessionReset(
-        chatJid,
-        group.folder,
-        {
-          queue: deps.queue,
-          sessions: deps.getSessions(),
-          broadcast: broadcastNewMessage,
-          setLastAgentTimestamp: deps.setLastAgentTimestamp,
-        },
-        agentId,
-      );
-      return c.json({ success: true, cleared: true });
-    } catch (err) {
-      logger.error({ chatJid, err }, '/clear command failed');
-      const errId = crypto.randomUUID();
-      const errTs = new Date().toISOString();
-      ensureChatExists(chatJid);
-      storeMessageDirect(
-        errId,
-        chatJid,
-        '__system__',
-        'system',
-        SESSION_RESET_FAILURE_MESSAGE,
-        errTs,
-        true,
-      );
-      broadcastNewMessage(chatJid, {
-        id: errId,
-        chat_jid: chatJid,
-        sender: '__system__',
-        sender_name: 'system',
-        content: SESSION_RESET_FAILURE_MESSAGE,
-        timestamp: errTs,
-        is_from_me: true,
-      });
-      return c.json({ error: '清除上下文失败' }, 500);
-    }
-  }
-
-  // /fresh [notes]: zero-summary window switch. Same owner gate as /clear.
-  const freshCommand = parseFreshCommand(content);
-  if (freshCommand) {
-    if (
-      !canModifyGroup(
-        { id: authUser.id, role: authUser.role },
-        { ...group, jid: chatJid },
-      )
-    ) {
-      return c.json({ error: 'Only the workspace owner can run /fresh' }, 403);
-    }
-    if (!deps) return c.json({ error: 'Server not initialized' }, 500);
-    try {
-      const snapshot = await captureWorkspaceSnapshot(
-        resolveWorkspaceProjectRoot(group, { agentId }),
-      );
-      const handoff = formatFreshWindowHandoff({
-        notes: freshCommand.notes,
-        snapshot,
-      });
-      await executeFreshWindowReset(
-        chatJid,
-        group.folder,
-        {
-          queue: deps.queue,
-          sessions: deps.getSessions(),
-          broadcast: broadcastNewMessage,
-          setLastAgentTimestamp: deps.setLastAgentTimestamp,
-        },
-        { agentId, handoff },
-      );
-      return c.json({ success: true, cleared: true, fresh: true });
-    } catch (err) {
-      logger.error({ chatJid, err }, '/fresh command failed');
-      const errId = crypto.randomUUID();
-      const errTs = new Date().toISOString();
-      ensureChatExists(chatJid);
-      storeMessageDirect(
-        errId,
-        chatJid,
-        '__system__',
-        'system',
-        SESSION_FRESH_WINDOW_FAILURE_MESSAGE,
-        errTs,
-        true,
-      );
-      broadcastNewMessage(chatJid, {
-        id: errId,
-        chat_jid: chatJid,
-        sender: '__system__',
-        sender_name: 'system',
-        content: SESSION_FRESH_WINDOW_FAILURE_MESSAGE,
-        timestamp: errTs,
-        is_from_me: true,
-      });
-      return c.json({ error: '零摘要换窗失败' }, 500);
-    }
-  }
-
-  if (agentId) {
-    const result = await handleAgentConversationMessage(
-      chatJid,
-      agentId,
-      content.trim(),
-      authUser.id,
-      authUser.display_name || authUser.username,
-      attachments,
-      followUpBehavior,
+  // /clear and /fresh: reset the session without entering the message
+  // pipeline. Owner-only (canModifyGroup), aligned with `reset-session`,
+  // since both clear agent session files and stop sibling containers.
+  const isClear = isClearCommand(content);
+  const freshCommand = isClear ? null : parseFreshCommand(content);
+  if (
+    (isClear || freshCommand) &&
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: chatJid },
+    )
+  ) {
+    return c.json(
+      {
+        error: `Only the workspace owner can run ${isClear ? '/clear' : '/fresh'}`,
+      },
+      403,
     );
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-    return c.json({ success: true, ...result });
   }
 
-  const result = await handleWebUserMessage(
-    chatJid,
-    content.trim(),
-    attachments,
-    authUser.id,
-    authUser.display_name || authUser.username,
-    followUpBehavior,
-  );
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({
-    success: true,
-    messageId: result.messageId,
-    timestamp: result.timestamp,
-    ingestSequence: result.ingestSequence,
-    disposition: result.disposition,
-    runId: result.runId,
-  });
+  const trimmedContent = content.trim();
+  const send = async (
+    idempotency?: WebSendIdempotency,
+  ): Promise<WebSendOutcome> => {
+    if (isClear || freshCommand) {
+      return runSessionResetCommand(
+        chatJid,
+        group,
+        agentId,
+        freshCommand,
+        idempotency?.clientMessageId,
+      );
+    }
+    const displayName = authUser.display_name || authUser.username;
+    const result = agentId
+      ? await handleAgentConversationMessage(
+          chatJid,
+          agentId,
+          trimmedContent,
+          authUser.id,
+          displayName,
+          attachments,
+          followUpBehavior,
+          idempotency,
+        )
+      : await handleWebUserMessage(
+          chatJid,
+          trimmedContent,
+          attachments,
+          authUser.id,
+          displayName,
+          followUpBehavior,
+          idempotency,
+        );
+    if (!result.ok) {
+      return { status: result.status, body: { error: result.error } };
+    }
+    const { ok: _ok, ...accepted } = result;
+    return { status: 200, body: { success: true, ...accepted } };
+  };
+
+  const { clientMessageId } = validation.data;
+  const outcome = clientMessageId
+    ? await sendOnce(
+        {
+          userId: authUser.id,
+          chatJid,
+          clientMessageId,
+          fingerprint: webSendFingerprint(
+            agentId,
+            trimmedContent,
+            attachments,
+            followUpBehavior,
+          ),
+        },
+        send,
+        (messageId) => requeueStoredWebInput(chatJid, agentId, messageId),
+      )
+    : await send();
+  return c.json(outcome.body, outcome.status);
 });
+
+/**
+ * Hand a stored Web input whose request failed before it was queued to the
+ * queue again, if its conversation still exists and the input still waits.
+ *
+ * - A durable follow-up (sent while a run was active) waits for its lane's
+ *   dispatcher, which the failed step may never have reached; dispatching is
+ *   a no-op while the lane runs, and the run drains the queue when it ends.
+ * - Any other input waits behind its lane's pull cursor: the main chat is
+ *   checked again, a session (`#agent:`) processed again. Both only read
+ *   what is still pending, and a running lane is left to finish first.
+ */
+function requeueStoredWebInput(
+  chatJid: string,
+  agentId: string | undefined,
+  messageId: string,
+): void {
+  if (!deps) return;
+  const laneJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
+  if (agentId) {
+    const agent = getAgent(agentId);
+    if (!agent || agent.kind !== 'conversation' || agent.chat_jid !== chatJid) {
+      return;
+    }
+  } else if (!getRegisteredGroup(chatJid)) {
+    return;
+  }
+  if (getQueuedFollowUp(laneJid, messageId)) {
+    deps.dispatchQueuedFollowUps?.(laneJid);
+    return;
+  }
+  const pullCursor = deps.getLastAgentTimestamp()[laneJid] ?? {
+    timestamp: '',
+    id: '',
+  };
+  const pending = getMessagesSince(laneJid, pullCursor).some(
+    (message) => message.id === messageId,
+  );
+  if (!pending || deps.queue.getActiveQueryId(laneJid)) return;
+  if (!agentId) {
+    deps.queue.enqueueMessageCheck(chatJid);
+    return;
+  }
+  const processAgentConversation = deps.processAgentConversation;
+  if (!processAgentConversation) return;
+  deps.queue.enqueueTask(laneJid, `agent-conv:${agentId}:${Date.now()}`, () =>
+    processAgentConversation(chatJid, agentId),
+  );
+}
+
+/** Run `/clear` or `/fresh [notes]`; failures post a system message. */
+async function runSessionResetCommand(
+  chatJid: string,
+  group: RegisteredGroup,
+  agentId: string | undefined,
+  freshCommand: ReturnType<typeof parseFreshCommand>,
+  clientMessageId: string | undefined,
+): Promise<WebSendOutcome> {
+  if (!deps) return { status: 500, body: { error: 'Server not initialized' } };
+  const resetDeps = {
+    queue: deps.queue,
+    sessions: deps.getSessions(),
+    // The divider and reset notices carry the command's key, like a message.
+    broadcast: (
+      jid: string,
+      msg: Parameters<typeof broadcastNewMessage>[1],
+      ...rest: [agentId?: string, source?: string]
+    ) =>
+      broadcastNewMessage(
+        jid,
+        clientMessageId ? { ...msg, client_message_id: clientMessageId } : msg,
+        ...rest,
+      ),
+    setLastAgentTimestamp: deps.setLastAgentTimestamp,
+  };
+  try {
+    if (!freshCommand) {
+      await executeSessionReset(chatJid, group.folder, resetDeps, agentId);
+      return { status: 200, body: { success: true, cleared: true } };
+    }
+    const snapshot = await captureWorkspaceSnapshot(
+      resolveWorkspaceProjectRoot(group, { agentId }),
+    );
+    const handoff = formatFreshWindowHandoff({
+      notes: freshCommand.notes,
+      snapshot,
+    });
+    await executeFreshWindowReset(chatJid, group.folder, resetDeps, {
+      agentId,
+      handoff,
+    });
+    return { status: 200, body: { success: true, cleared: true, fresh: true } };
+  } catch (err) {
+    logger.error(
+      { chatJid, err },
+      freshCommand ? '/fresh command failed' : '/clear command failed',
+    );
+    const failure = freshCommand
+      ? SESSION_FRESH_WINDOW_FAILURE_MESSAGE
+      : SESSION_RESET_FAILURE_MESSAGE;
+    const errId = crypto.randomUUID();
+    const errTs = new Date().toISOString();
+    ensureChatExists(chatJid);
+    storeMessageDirect(
+      errId,
+      chatJid,
+      '__system__',
+      'system',
+      failure,
+      errTs,
+      true,
+    );
+    broadcastNewMessage(chatJid, {
+      id: errId,
+      chat_jid: chatJid,
+      sender: '__system__',
+      sender_name: 'system',
+      content: failure,
+      timestamp: errTs,
+      is_from_me: true,
+    });
+    return {
+      status: 500,
+      body: { error: freshCommand ? '零摘要换窗失败' : '清除上下文失败' },
+    };
+  }
+}
+
+type WebSendOutcome = {
+  status: 200 | 404 | 409 | 500;
+  body: Record<string, unknown>;
+};
+
+/** Handed to the message handlers when a send carries a clientMessageId. */
+interface WebSendIdempotency {
+  clientMessageId: string;
+  /**
+   * Called as soon as the message is stored, before anything that can still
+   * fail: from then on a resend must not store it again, even if this
+   * request ends in an error.
+   */
+  onStored(accepted: {
+    messageId: string;
+    timestamp: string;
+    ingestSequence?: number;
+  }): void;
+}
+
+/** Sends being processed, by idempotency key; a concurrent resend joins it. */
+const inFlightWebSends = new Map<
+  string,
+  { fingerprint: string; done: Promise<unknown> }
+>();
+
+/** What a resend must repeat to count as the same send. */
+function webSendFingerprint(
+  agentId: string | undefined,
+  content: string,
+  attachments: Array<{ data: string; mimeType?: string }> | undefined,
+  followUpBehavior: FollowUpMode,
+): string {
+  // Field by field with length prefixes: unambiguous, and the (possibly
+  // tens of MB of) attachment data is hashed without being copied.
+  const hash = crypto.createHash('sha256');
+  const field = (value: string) =>
+    hash.update(`${value.length}:`).update(value);
+  field(agentId ?? '');
+  field(followUpBehavior);
+  field(content);
+  for (const att of attachments ?? []) {
+    field(att.mimeType ?? '');
+    field(att.data);
+  }
+  return hash.digest('hex');
+}
+
+const DEDUP_CONFLICT: WebSendOutcome = {
+  status: 409,
+  body: { error: 'clientMessageId was already used for a different message' },
+};
+
+/**
+ * Run `send` at most once per (user, chat, clientMessageId). A resend of a
+ * send that stored its message, or finished, gets the first answer back
+ * without doing anything; one that arrives while the first is still running
+ * waits for it. A send that failed before storing anything is not
+ * remembered, so its resend is processed normally; one that failed after
+ * storing answers 500 with `stored: true`, and it and its replays `requeue`
+ * the stored input. Callers check access before this, and the user is part
+ * of the key.
+ */
+async function sendOnce(
+  key: {
+    userId: string;
+    chatJid: string;
+    clientMessageId: string;
+    fingerprint: string;
+  },
+  send: (idempotency: WebSendIdempotency) => Promise<WebSendOutcome>,
+  requeue: (messageId: string) => void,
+): Promise<WebSendOutcome> {
+  const { userId, chatJid, clientMessageId, fingerprint } = key;
+  const mapKey = JSON.stringify([userId, chatJid, clientMessageId]);
+  for (;;) {
+    const inFlight = inFlightWebSends.get(mapKey);
+    if (!inFlight) break;
+    if (inFlight.fingerprint !== fingerprint) return DEDUP_CONFLICT;
+    // Whatever the first attempt did, look again: it either left a record
+    // to answer from or failed, and then this resend is processed.
+    await inFlight.done.catch(() => undefined);
+  }
+  const stored = getWebMessageDedup(userId, chatJid, clientMessageId);
+  if (stored) {
+    if (stored.fingerprint !== fingerprint) return DEDUP_CONFLICT;
+    const { partial, ...response } = stored.response;
+    // Stored, but the first attempt failed before finishing: queue it again.
+    if (partial && typeof response.messageId === 'string') {
+      requeueSafely(() => requeue(response.messageId as string), chatJid);
+    }
+    return { status: 200, body: { ...response, deduplicated: true } };
+  }
+
+  const remember = (response: Record<string, unknown>) => {
+    try {
+      recordWebMessageDedup({
+        userId,
+        chatJid,
+        clientMessageId,
+        fingerprint,
+        response,
+      });
+    } catch (err) {
+      // The send went through; failing the request now would only make the
+      // client resend it.
+      logger.warn(
+        { chatJid, clientMessageId, err },
+        'Failed to record Web send idempotency key',
+      );
+    }
+  };
+  let storedMessageId: string | undefined;
+  // Registered before the first await, so no concurrent resend can slip in.
+  const done = send({
+    clientMessageId,
+    onStored: (accepted) => {
+      storedMessageId = accepted.messageId;
+      remember({ success: true, ...accepted, partial: true });
+    },
+  });
+  inFlightWebSends.set(mapKey, { fingerprint, done });
+  try {
+    const outcome = await done;
+    if (outcome.status === 200) remember(outcome.body);
+    return outcome;
+  } catch (err) {
+    if (storedMessageId === undefined) throw err;
+    // The message is stored: tell the client so, and make sure it runs.
+    logger.error(
+      { chatJid, clientMessageId, messageId: storedMessageId, err },
+      'Web send failed after its message was stored',
+    );
+    const messageId = storedMessageId;
+    requeueSafely(() => requeue(messageId), chatJid);
+    return {
+      status: 500,
+      body: {
+        error: '消息已保存，但处理失败',
+        stored: true,
+        messageId: storedMessageId,
+      },
+    };
+  } finally {
+    inFlightWebSends.delete(mapKey);
+  }
+}
+
+function requeueSafely(requeue: () => void, chatJid: string): void {
+  try {
+    requeue();
+  } catch (err) {
+    logger.warn({ chatJid, err }, 'Failed to requeue a stored Web input');
+  }
+}
 
 app.get('/api/follow-ups', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
@@ -639,6 +865,7 @@ async function handleWebUserMessage(
   userId = 'web-user',
   displayName = 'Web',
   followUpBehavior: FollowUpMode = 'queue',
+  idempotency?: WebSendIdempotency,
 ): Promise<
   | {
       ok: true;
@@ -720,6 +947,11 @@ async function handleWebUserMessage(
     timestamp,
     id: messageId,
   };
+  idempotency?.onStored({
+    messageId,
+    timestamp,
+    ingestSequence: messageCursor.sequence,
+  });
 
   broadcastNewMessage(chatJid, {
     id: messageId,
@@ -730,6 +962,7 @@ async function handleWebUserMessage(
     timestamp,
     is_from_me: false,
     attachments: attachmentsStr,
+    client_message_id: idempotency?.clientMessageId,
     delivery_mode: activeRunId ? effectiveFollowUpBehavior : null,
     delivery_status: deliveryStatus,
     delivery_run_id: activeRunId,
@@ -1050,6 +1283,7 @@ async function handleAgentConversationMessage(
   displayName: string,
   attachments?: Array<{ type: 'image'; data: string; mimeType?: string }>,
   followUpBehavior: FollowUpMode = 'queue',
+  idempotency?: WebSendIdempotency,
 ): Promise<
   | {
       ok: true;
@@ -1136,6 +1370,11 @@ async function handleAgentConversationMessage(
     timestamp,
     id: messageId,
   };
+  idempotency?.onStored({
+    messageId,
+    timestamp,
+    ingestSequence: agentMessageCursor.sequence,
+  });
   updateAgentContextInfo(agentId, { last_active_at: timestamp });
 
   // Auto-title: show a quick placeholder derived from the first user message.
@@ -1168,6 +1407,7 @@ async function handleAgentConversationMessage(
       timestamp,
       is_from_me: false,
       attachments: attachmentsStr,
+      client_message_id: idempotency?.clientMessageId,
       delivery_mode: activeRunId ? effectiveFollowUpBehavior : null,
       delivery_status: deliveryStatus,
       delivery_run_id: activeRunId,
@@ -1848,6 +2088,12 @@ function setupWebSocket(server: any): WebSocketServer {
           const msg: WsMessageOut = { type: 'ws_error', error, chatJid };
           ws.send(JSON.stringify(msg));
         };
+
+        if (msg.type === 'ping') {
+          const pong: WsMessageOut = { type: 'pong' };
+          ws.send(JSON.stringify(pong));
+          return;
+        }
 
         if (msg.type === 'send_message') {
           const wsValidation = MessageCreateSchema.safeParse({

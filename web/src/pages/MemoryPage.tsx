@@ -3,6 +3,7 @@ import {
   useBeforeUnload,
   useBlocker,
   useLocation,
+  useNavigate,
   useSearchParams,
   type BlockerFunction,
 } from 'react-router-dom';
@@ -62,6 +63,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  PhoneBarButton,
+  PhonePageHeader,
+} from '@/components/layout/PhonePageHeader';
+import { useIsPhone } from '@/components/layout/phone';
 import {
   KIND_META,
   WORKSPACE_MEMORY_KINDS,
@@ -221,12 +227,19 @@ function MemoryListItem({
   );
 }
 
+/** History state of the step from the memory list to one item. */
+const FROM_MEMORY_LIST = { memoryList: true };
+
 export function MemoryPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigationGuardRef = useRef(createUnsavedNavigationGuard());
   const setAllowedSearchParams = useCallback(
-    (next: URLSearchParams, options: { replace?: boolean } = {}) => {
+    (
+      next: URLSearchParams,
+      options: { replace?: boolean; state?: unknown } = {},
+    ) => {
       const serialized = next.toString();
       const token = navigationGuardRef.current.allowNext({
         pathname: location.pathname,
@@ -242,6 +255,7 @@ export function MemoryPage() {
   const requestedItem = searchParams.get('item');
   const legacyFolder = searchParams.get('folder');
   const isMobile = useMediaQuery('(max-width: 1023px)');
+  const isPhone = useIsPhone();
 
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedWorkspaceJid, setSelectedWorkspaceJid] = useState('');
@@ -285,7 +299,9 @@ export function MemoryPage() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<RevisionConflict | null>(null);
-  const [showDetail, setShowDetail] = useState(false);
+  // Below the desktop width the list and one item are two screens; the
+  // item's `?item=` is a history step, so back returns to the list.
+  const showDetail = isMobile && !!requestedItem;
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createDraft, setCreateDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -436,7 +452,6 @@ export function MemoryPage() {
       setVersionNextCursor(null);
       setLoadingMoreVersions(false);
       setDetailLoading(false);
-      setShowDetail(false);
       setCreateOpen(false);
       setCreating(false);
       setForgetOpen(false);
@@ -679,7 +694,6 @@ export function MemoryPage() {
   const clearSelection = useCallback(() => {
     syncSelectedItem(null);
     setVersions([]);
-    setShowDetail(false);
   }, [syncSelectedItem]);
 
   const loadDetail = useCallback(
@@ -747,7 +761,6 @@ export function MemoryPage() {
         setStoreRevision(
           Math.max(itemData.storeRevision, versionData.storeRevision),
         );
-        if (isMobile) setShowDetail(true);
       } catch (error) {
         if (
           !isCurrentWorkspace(workspaceJid, workspaceEpoch) ||
@@ -767,13 +780,7 @@ export function MemoryPage() {
         }
       }
     },
-    [
-      dirty,
-      isCurrentWorkspace,
-      isMobile,
-      selectedWorkspaceJid,
-      syncSelectedItem,
-    ],
+    [dirty, isCurrentWorkspace, selectedWorkspaceJid, syncSelectedItem],
   );
 
   const loadMoreVersions = useCallback(async () => {
@@ -840,11 +847,14 @@ export function MemoryPage() {
       return;
     }
     openedItemRef.current = requestedItem;
-    const next = new URLSearchParams(searchParams);
-    next.delete('item');
-    setAllowedSearchParams(next, { replace: true });
+    if (!isMobile) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('item');
+      setAllowedSearchParams(next, { replace: true });
+    }
     void loadDetail(requestedItem, { discardDraft: true, followStatus: true });
   }, [
+    isMobile,
     loadDetail,
     requestedItem,
     requestedWorkspace,
@@ -852,6 +862,59 @@ export function MemoryPage() {
     selectedWorkspaceJid,
     setAllowedSearchParams,
   ]);
+
+  // Back from an item to the list leaves nothing selected, and forward
+  // opens the item again.
+  const itemParamRef = useRef(requestedItem);
+  useEffect(() => {
+    const previous = itemParamRef.current;
+    itemParamRef.current = requestedItem;
+    if (!isMobile || requestedItem || !previous) return;
+    openedItemRef.current = null;
+    clearSelection();
+  }, [clearSelection, isMobile, requestedItem]);
+
+  const openedFromList =
+    (location.state as typeof FROM_MEMORY_LIST | null)?.memoryList === true;
+  /** Shows an item: on the list screen a step forward, else in place. */
+  const openItem = (itemId: string, options?: { discardDraft?: boolean }) => {
+    if (isMobile && requestedItem !== itemId) {
+      openedItemRef.current = itemId;
+      const next = new URLSearchParams(searchParams);
+      next.set('item', itemId);
+      setAllowedSearchParams(
+        next,
+        requestedItem
+          ? { replace: true, state: location.state }
+          : { state: FROM_MEMORY_LIST },
+      );
+    }
+    void loadDetail(itemId, options);
+  };
+  /** Below the desktop width: from an item back to the list. */
+  const closeDetailView = async (options?: { confirmed?: boolean }) => {
+    if (!requestedItem) return;
+    if (openedFromList) {
+      // The unsaved-changes blocker asks before this lands.
+      navigate(-1);
+      return;
+    }
+    if (
+      !options?.confirmed &&
+      dirty &&
+      !(await confirmDialog({
+        title: '放弃未保存的修改？',
+        message: '返回列表会丢失当前记忆的未保存修改。',
+        confirmText: '放弃修改',
+        variant: 'danger',
+      }))
+    ) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('item');
+    setAllowedSearchParams(next, { replace: true });
+  };
 
   const changeStatusView = async (next: StatusView) => {
     if (next === statusView) return;
@@ -925,6 +988,7 @@ export function MemoryPage() {
       } else {
         toast.success('已拒绝这条待确认记忆');
         clearSelection();
+        void closeDetailView({ confirmed: true });
       }
       await refreshMemoryView();
       if (answer === 'confirm' && isCurrent()) {
@@ -966,6 +1030,14 @@ export function MemoryPage() {
       return;
     }
     activateWorkspace(workspaceJid);
+    if (requestedItem && isMobile) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('folder');
+      next.delete('item');
+      next.set('workspace', workspaceJid);
+      setAllowedSearchParams(next, { replace: true });
+      return;
+    }
     updateWorkspaceParam(workspaceJid);
   };
 
@@ -1016,7 +1088,7 @@ export function MemoryPage() {
       ) {
         return;
       }
-      await loadDetail(result.item.id, { discardDraft: true });
+      openItem(result.item.id, { discardDraft: true });
     } catch (error) {
       if (
         !isCurrentWorkspace(workspaceJid, workspaceEpoch) ||
@@ -1131,6 +1203,7 @@ export function MemoryPage() {
       setForgetOpen(false);
       toast.success('已忘记这条工作区记忆');
       clearSelection();
+      void closeDetailView({ confirmed: true });
       await refreshMemoryView();
     } catch (error) {
       if (
@@ -1178,67 +1251,179 @@ export function MemoryPage() {
     })),
   ];
 
-  return (
-    <PageContainer size="wide" className="space-y-5" data-memory-v2="true">
-      <div>
-        <PageHeader
-          title="记忆"
-          subtitle="沉淀当前工作区跨 Session 可复用的事实、决策、经验和待跟进事项。"
-          className="flex-col gap-3 sm:flex-row"
-          actions={
-            <>
-              <Label htmlFor="memory-workspace" className="sr-only">
-                工作区
-              </Label>
-              <Select
-                value={selectedWorkspaceJid}
-                onValueChange={handleWorkspaceChange}
-                disabled={workspaceLoading || workspaces.length === 0}
-              >
-                <SelectTrigger id="memory-workspace" className="w-48 sm:w-56">
-                  <SelectValue placeholder="选择工作区" />
-                </SelectTrigger>
-                <SelectContent position="popper" align="end">
-                  {workspaces.map((workspace) => (
-                    <SelectItem key={workspace.jid} value={workspace.jid}>
-                      {workspace.name}
-                      {workspace.is_home ? ' · Home' : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                onClick={openCreate}
-                disabled={!selectedWorkspaceJid || !canModify}
-              >
-                <Plus />
-                新建记忆
-              </Button>
-            </>
-          }
+  const workspaceSelect = (triggerClassName: string) => (
+    <Select
+      value={selectedWorkspaceJid}
+      onValueChange={handleWorkspaceChange}
+      disabled={workspaceLoading || workspaces.length === 0}
+    >
+      <SelectTrigger id="memory-workspace" className={triggerClassName}>
+        <SelectValue placeholder="选择工作区" />
+      </SelectTrigger>
+      <SelectContent position="popper" align="end">
+        {workspaces.map((workspace) => (
+          <SelectItem key={workspace.jid} value={workspace.jid}>
+            {workspace.name}
+            {workspace.is_home ? ' · Home' : ''}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
+  const canEditShown = canModify && !!shownItem;
+  // A phone's top bar: 新建 on the list; on an item 保存, the rest behind ⋯.
+  const phoneHeader = !isPhone ? null : showDetail ? (
+    <PhonePageHeader
+      title={shownItem?.title || '记忆详情'}
+      onBack={() => void closeDetailView()}
+      action={
+        canEditShown && (
+          <Button
+            size="sm"
+            onClick={() => void handleSave()}
+            disabled={!dirty || !draft.content.trim() || saving}
+            className="mr-1"
+          >
+            {saving ? <Loader2 className="animate-spin" /> : <Save />}
+            {shownItem.status === 'proposed' ? '保存并确认' : '保存'}
+          </Button>
+        )
+      }
+      menu={
+        canEditShown
+          ? {
+              title: shownItem.title || '记忆',
+              groups:
+                shownItem.status === 'proposed'
+                  ? [
+                      [
+                        {
+                          label: '确认',
+                          icon: Check,
+                          onSelect: () => void handleAnswer('confirm'),
+                          disabled: answering !== null || dirty || saving,
+                        },
+                      ],
+                      [
+                        {
+                          label: '拒绝',
+                          icon: X,
+                          destructive: true,
+                          onSelect: () => void handleAnswer('reject'),
+                          disabled: answering !== null,
+                        },
+                      ],
+                    ]
+                  : [
+                      [
+                        {
+                          label: '忘记',
+                          icon: Trash2,
+                          destructive: true,
+                          onSelect: () => setForgetOpen(true),
+                        },
+                      ],
+                    ],
+            }
+          : undefined
+      }
+    />
+  ) : (
+    <PhonePageHeader
+      title="记忆"
+      action={
+        <PhoneBarButton
+          label="新建记忆"
+          icon={<Plus className="size-5" />}
+          onClick={openCreate}
+          disabled={!selectedWorkspaceJid || !canModify}
         />
-        {selectedWorkspace && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-muted-foreground">
-            <span className="font-medium text-foreground">
-              {selectedWorkspace.name}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span>{selectedWorkspace.agent_profile?.name || '主智能体'}</span>
-            <span aria-hidden="true">·</span>
-            <span>{canModify ? '可编辑' : '只读'}</span>
-            {storeRevision !== null && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="tabular-nums">
-                  Store revision {storeRevision}
-                </span>
-              </>
+      }
+      menu={{
+        title: '记忆',
+        groups: [
+          [
+            {
+              label: '刷新',
+              icon: RefreshCw,
+              onSelect: () => void refreshMemoryView(),
+              disabled: listLoading || searching,
+            },
+          ],
+        ],
+      }}
+    />
+  );
+
+  return (
+    <PageContainer
+      size="wide"
+      className="space-y-5 phone:space-y-3 phone:pt-1"
+      data-memory-v2="true"
+    >
+      {phoneHeader}
+      {/* A phone names the page in its top bar; the list starts right
+          under the workspace picker. */}
+      {isPhone ? (
+        !showDetail && (
+          <div className="space-y-1">
+            <Label htmlFor="memory-workspace" className="sr-only">
+              工作区
+            </Label>
+            {workspaceSelect('w-full')}
+            {selectedWorkspace && !canModify && (
+              <p className="px-1 text-caption text-muted-foreground">
+                只读：你可以查看该工作区，但不能修改它。
+              </p>
             )}
           </div>
-        )}
-      </div>
+        )
+      ) : (
+        <div>
+          <PageHeader
+            title="记忆"
+            subtitle="沉淀当前工作区跨 Session 可复用的事实、决策、经验和待跟进事项。"
+            className="flex-col gap-3 sm:flex-row"
+            actions={
+              <>
+                <Label htmlFor="memory-workspace" className="sr-only">
+                  工作区
+                </Label>
+                {workspaceSelect('w-48 sm:w-56')}
+                <Button
+                  onClick={openCreate}
+                  disabled={!selectedWorkspaceJid || !canModify}
+                >
+                  <Plus />
+                  新建记忆
+                </Button>
+              </>
+            }
+          />
+          {selectedWorkspace && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {selectedWorkspace.name}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>{selectedWorkspace.agent_profile?.name || '主智能体'}</span>
+              <span aria-hidden="true">·</span>
+              <span>{canModify ? '可编辑' : '只读'}</span>
+              {storeRevision !== null && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums">
+                    Store revision {storeRevision}
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
-      <div className="flex items-start gap-3 rounded-xl bg-surface-raised px-4 py-3 ring-1 ring-surface-border">
+      <div className="flex items-start gap-3 rounded-xl bg-surface-raised px-4 py-3 ring-1 ring-surface-border phone:hidden">
         <MessageSquareText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0">
           <div className="text-label text-foreground">
@@ -1272,7 +1457,12 @@ export function MemoryPage() {
 
       {selectedWorkspaceJid && (
         <>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div
+            className={cn(
+              'flex flex-col gap-2 sm:flex-row sm:items-center',
+              isPhone && showDetail && 'hidden',
+            )}
+          >
             <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -1296,7 +1486,7 @@ export function MemoryPage() {
               />
               <Button
                 variant="outline"
-                className="shrink-0"
+                className="shrink-0 phone:hidden"
                 onClick={() => void refreshMemoryView()}
                 disabled={listLoading || searching}
               >
@@ -1383,14 +1573,14 @@ export function MemoryPage() {
                     )}
                   </div>
                 ) : (
-                  <ListGroup className="max-h-[620px] overflow-y-auto">
+                  <ListGroup className="max-h-[620px] overflow-y-auto phone:max-h-none phone:overflow-visible">
                     {visibleItems.map((item) => (
                       <MemoryListItem
                         key={item.id}
                         item={item}
                         active={item.id === selectedId}
                         snippet={itemSnippet(item.id)}
-                        onSelect={(next) => void loadDetail(next.id)}
+                        onSelect={(next) => openItem(next.id)}
                       />
                     ))}
                   </ListGroup>
@@ -1417,19 +1607,22 @@ export function MemoryPage() {
                 aria-label="记忆详情"
                 className="min-w-0 overflow-hidden rounded-xl bg-surface-raised ring-1 ring-surface-border"
               >
-                {(isMobile || shownItem) && (
+                {((isMobile && !isPhone) || shownItem) && (
                   <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-surface-border px-3 py-2">
-                    {isMobile && (
+                    {isMobile && !isPhone && (
                       <IconButton
                         label="返回记忆列表"
                         icon={<ArrowLeft />}
-                        onClick={() => setShowDetail(false)}
+                        onClick={() => void closeDetailView()}
                       />
                     )}
                     {shownItem && (
                       <>
                         <MemoryKindBadge kind={shownItem.kind} />
-                        <Badge variant="outline" className="tabular-nums">
+                        <Badge
+                          variant="outline"
+                          className="tabular-nums phone:hidden"
+                        >
                           Revision {shownItem.revision}
                         </Badge>
                         {shownItem.status === 'proposed' && (
@@ -1443,7 +1636,7 @@ export function MemoryPage() {
                             有未保存修改
                           </span>
                         )}
-                        {canModify && (
+                        {canModify && !isPhone && (
                           <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
                             {shownItem.status === 'proposed' ? (
                               <>

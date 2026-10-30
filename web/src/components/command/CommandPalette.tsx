@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  CommandDialog,
   CommandEmpty,
   CommandGroup,
   CommandInput,
@@ -10,6 +9,13 @@ import {
   CommandShortcut,
 } from '@/components/ui/command';
 import { Command } from '@/components/ui/command';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { useIsPhone } from '../layout/phone';
 import { defaultFilter } from 'cmdk';
 import { Kbd } from '@/components/ui/kbd';
 import { Shortcut } from '@/components/common/Shortcut';
@@ -42,6 +48,8 @@ export function CommandPalette({
 }) {
   const navigate = useNavigate();
   const location = useLocation();
+  // A phone has no sidebar to toggle and no keyboard to hint at.
+  const isPhone = useIsPhone();
   const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const billingEnabled = useBillingStore((s) => s.billingEnabled);
@@ -79,7 +87,7 @@ export function CommandPalette({
 
   const commandGroups = useMemo(() => {
     const isAdmin = user?.role === 'admin';
-    return buildCommandGroups({
+    const built = buildCommandGroups({
       navItems: filterNavItems(billingEnabled),
       settingsSections: getSettingsSections({
         canManageSystemConfig: hasPermission('manage_system_config'),
@@ -95,7 +103,17 @@ export function CommandPalette({
       colorScheme,
       currentSession,
     });
+    if (!isPhone) return built;
+    return built
+      .map((group) => ({
+        ...group,
+        items: group.items.filter(
+          (item) => item.action.type !== 'toggleSidebar',
+        ),
+      }))
+      .filter((group) => group.items.length > 0);
   }, [
+    isPhone,
     agents,
     currentSession,
     billingEnabled,
@@ -190,59 +208,72 @@ export function CommandPalette({
   };
 
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange}>
-      {/* shownGroups matches on labels and keywords only, never on ids. */}
-      <Command loop shouldFilter={false}>
-        <CommandInput
-          value={search}
-          onValueChange={setSearch}
-          placeholder="搜索页面、工作区、会话或操作…"
-          trailing={<Kbd>Esc</Kbd>}
-        />
-        <CommandList>
-          <CommandEmpty>没有找到匹配的结果</CommandEmpty>
-          {shownGroups.map((group) => (
-            <CommandGroup key={group.heading} heading={group.heading}>
-              {group.items.map((item) => (
-                <CommandItem
-                  key={item.id}
-                  value={item.id}
-                  keywords={[item.label, ...item.keywords]}
-                  onSelect={() => run(item.action)}
-                >
-                  <item.icon />
-                  <span className="min-w-0 truncate">{item.label}</span>
-                  {item.hint && (
-                    <span className="min-w-0 truncate text-caption text-faint-foreground">
-                      {item.hint}
-                    </span>
-                  )}
-                  {item.shortcut && (
-                    <CommandShortcut>
-                      <Shortcut keys={item.shortcut} />
-                    </CommandShortcut>
-                  )}
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          ))}
-        </CommandList>
-        <div className="flex h-9 shrink-0 items-center gap-4 border-t border-surface-border px-4 text-caption text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <Kbd>↑</Kbd>
-            <Kbd>↓</Kbd>
-            选择
-          </span>
-          <span className="flex items-center gap-1.5">
-            <Kbd>↵</Kbd>
-            打开
-          </span>
-          <span className="ml-auto flex items-center gap-1.5">
-            <Shortcut keys="mod+k" />
-            打开/关闭
-          </span>
-        </div>
-      </Command>
-    </CommandDialog>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {/* On a phone a bottom sheet nearly the height of the visible
+          viewport, its search focused like a single-field prompt. */}
+      <DialogContent
+        showCloseButton={false}
+        autoFocusOnPhone
+        className="top-[18%] translate-y-0 gap-0 overflow-hidden rounded-xl p-0 sm:max-w-xl phone:h-[calc(var(--vvh,100dvh)-3rem)] phone:grid-rows-[minmax(0,1fr)]"
+      >
+        <DialogTitle className="sr-only">命令面板</DialogTitle>
+        <DialogDescription className="sr-only">
+          搜索页面、工作区、会话或操作
+        </DialogDescription>
+        {/* shownGroups matches on labels and keywords only, never on ids. */}
+        <Command loop shouldFilter={false}>
+          <CommandInput
+            value={search}
+            onValueChange={setSearch}
+            placeholder="搜索页面、工作区、会话或操作…"
+            enterKeyHint="go"
+            trailing={isPhone ? undefined : <Kbd>Esc</Kbd>}
+          />
+          <CommandList className="phone:max-h-none phone:flex-1">
+            <CommandEmpty>没有找到匹配的结果</CommandEmpty>
+            {shownGroups.map((group) => (
+              <CommandGroup key={group.heading} heading={group.heading}>
+                {group.items.map((item) => (
+                  <CommandItem
+                    key={item.id}
+                    value={item.id}
+                    keywords={[item.label, ...item.keywords]}
+                    onSelect={() => run(item.action)}
+                  >
+                    <item.icon />
+                    <span className="min-w-0 truncate">{item.label}</span>
+                    {item.hint && (
+                      <span className="min-w-0 truncate text-caption text-faint-foreground">
+                        {item.hint}
+                      </span>
+                    )}
+                    {item.shortcut && !isPhone && (
+                      <CommandShortcut>
+                        <Shortcut keys={item.shortcut} />
+                      </CommandShortcut>
+                    )}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            ))}
+          </CommandList>
+          <div className="flex h-9 shrink-0 items-center gap-4 border-t phone:hidden border-surface-border px-4 text-caption text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <Kbd>↑</Kbd>
+              <Kbd>↓</Kbd>
+              选择
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Kbd>↵</Kbd>
+              打开
+            </span>
+            <span className="ml-auto flex items-center gap-1.5">
+              <Shortcut keys="mod+k" />
+              打开/关闭
+            </span>
+          </div>
+        </Command>
+      </DialogContent>
+    </Dialog>
   );
 }

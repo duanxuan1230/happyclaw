@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import {
   FileUp,
   FolderUp,
@@ -26,6 +26,7 @@ import { IconButton } from '../../common/IconButton';
 import { Shortcut } from '../../common/Shortcut';
 import { SendButton, type SendButtonGlyph } from './cindy/SendButton';
 import { ActionSheet, type SheetAction } from './ActionSheet';
+import { useDockOverlay } from './composerDock';
 
 /**
  * Composer toolbar pill (cindy's dropdown tier): bare at rest, an outline and
@@ -49,8 +50,9 @@ interface ComposerToolbarProps {
   /** A phone: + opens a bottom sheet instead of a dropdown. */
   phone?: boolean;
   /**
-   * The resting phone pill: only + and the primary action show, laid out
-   * by the card around the editor (the toolbar box itself dissolves).
+   * The resting phone pill: +, the model's compact chip and the primary
+   * action, laid out by the card around the editor (the toolbar box itself
+   * dissolves).
    */
   collapsed?: boolean;
   /**
@@ -143,17 +145,18 @@ export function ComposerToolbar({
   const plusGroups = [attachActions, sessionActions].filter(
     (group) => group.length > 0,
   );
-  const [plusSheetOpen, setPlusSheetOpen] = useState(false);
+  const [plusSheetOpen, setPlusSheetOpen] = useDockOverlay();
   // The model (and effort): right before send on a desktop, right after +
   // on a phone. The padding keeps the triggers' focus rings inside the
-  // clip. Collapsed it stays mounted, only hidden, and keeps its state.
+  // clip. In the resting pill the picker shows its compact chip (its own
+  // padded touch target reaches past the clip, so none here).
   const modelSlot = modelSelector && (
     <div
       data-composer-model-slot
       className={cn(
-        '-m-0.5 flex min-w-0 items-center gap-1 overflow-hidden p-0.5',
+        'flex min-w-0 items-center gap-1',
+        collapsed ? 'shrink-0' : '-m-0.5 overflow-hidden p-0.5',
         !phone && 'justify-end',
-        collapsed && 'hidden',
       )}
     >
       {modelSelector}

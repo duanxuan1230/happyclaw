@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Loader2,
   MoreHorizontal,
+  Pause,
   Pencil,
   Play,
   Trash2,
@@ -11,14 +12,12 @@ import {
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Switch } from '@/components/ui/switch';
 import { IconButton } from '@/components/common/IconButton';
+import {
+  ResponsiveMenu,
+  type MenuAction,
+} from '@/components/common/ResponsiveMenu';
 import {
   AUTOMATION_SESSION_MODE_LABELS,
   AUTOMATION_STATUS_LABELS,
@@ -41,6 +40,8 @@ import {
   setAutomationEnabled,
 } from './automation-actions';
 import { AutomationRunGroup } from './AutomationRunCard';
+import { PhonePageHeader, PhoneBarButton } from '../layout/PhonePageHeader';
+import { useIsPhone } from '../layout/phone';
 
 /** A session JID as the user knows it: its name, or the main conversation. */
 export function useSessionLabel(): (sessionJid: string) => string {
@@ -80,6 +81,7 @@ export function AutomationDetail({
   onBack?: () => void;
 }) {
   const navigate = useNavigate();
+  const isPhone = useIsPhone();
   const runs = useAutomationsStore((s) => s.runs[automation.id]);
   const busy = useAutomationsStore((s) => !!s.runBusy[automation.id]);
   const loadDetail = useAutomationsStore((s) => s.loadDetail);
@@ -128,11 +130,49 @@ export function AutomationDetail({
     sessionDestination(automation, sessionLabel),
   ].join(' · ');
   const enabled = automation.status === 'active';
+  const runNow = () => void runAutomationNow(automation.id);
+  const deleteAction: MenuAction = {
+    label: '删除自动化',
+    icon: Trash2,
+    destructive: true,
+    onSelect: async () => {
+      if (await deleteAutomationWithConfirm(automation)) onBack?.();
+    },
+  };
+  // A phone's top bar keeps 立即运行 and puts the rest behind ⋯.
+  const menuGroups: MenuAction[][] = [
+    [
+      {
+        label: '编辑',
+        icon: Pencil,
+        onSelect: () => openEditForm(automation.id),
+      },
+      {
+        label: enabled ? '暂停' : '启用',
+        icon: enabled ? Pause : Play,
+        onSelect: () => void setAutomationEnabled(automation.id, !enabled),
+      },
+    ],
+    [deleteAction],
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-start gap-2 border-b border-surface-border px-5 py-4 phone:px-4">
-        {onBack && (
+      <PhonePageHeader
+        title={automation.name}
+        onBack={onBack}
+        action={
+          <PhoneBarButton
+            label="立即运行"
+            icon={busy ? <Loader2 className="animate-spin" /> : <Play />}
+            disabled={busy}
+            onClick={runNow}
+          />
+        }
+        menu={{ title: automation.name, groups: menuGroups }}
+      />
+      <header className="flex shrink-0 items-start gap-2 border-b border-surface-border px-5 py-4 phone:px-4 phone:pt-0 phone:pb-3">
+        {onBack && !isPhone && (
           <IconButton
             label="返回自动化列表"
             icon={<ArrowLeft />}
@@ -143,7 +183,8 @@ export function AutomationDetail({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <h1 className="truncate text-title text-foreground">
+            {/* A phone shows the name in its top bar. */}
+            <h1 className="truncate text-title text-foreground phone:sr-only">
               {automation.name}
             </h1>
             {automation.status !== 'active' && (
@@ -154,53 +195,46 @@ export function AutomationDetail({
           </div>
           <p className="mt-0.5 text-caption text-muted-foreground">{meta}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            onClick={() => void runAutomationNow(automation.id)}
-          >
-            {busy ? <Loader2 className="animate-spin" /> : <Play />}
-            立即运行
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => openEditForm(automation.id)}
-          >
-            <Pencil />
-            编辑
-          </Button>
-          <Switch
-            aria-label={enabled ? '暂停自动化' : '启用自动化'}
-            checked={enabled}
-            onCheckedChange={(value) =>
-              void setAutomationEnabled(automation.id, value)
-            }
-            className="mx-1.5"
-          />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <IconButton
-                label="更多操作"
-                icon={<MoreHorizontal />}
-                hideTooltip
-              />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-40">
-              <DropdownMenuItem
-                variant="destructive"
-                onClick={async () => {
-                  if (await deleteAutomationWithConfirm(automation)) onBack?.();
-                }}
-              >
-                <Trash2 />
-                删除自动化
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        {!isPhone && (
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={runNow}
+            >
+              {busy ? <Loader2 className="animate-spin" /> : <Play />}
+              立即运行
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => openEditForm(automation.id)}
+            >
+              <Pencil />
+              编辑
+            </Button>
+            <Switch
+              aria-label={enabled ? '暂停自动化' : '启用自动化'}
+              checked={enabled}
+              onCheckedChange={(value) =>
+                void setAutomationEnabled(automation.id, value)
+              }
+              className="mx-1.5"
+            />
+            <ResponsiveMenu
+              title="更多操作"
+              groups={[[deleteAction]]}
+              trigger={
+                <IconButton
+                  label="更多操作"
+                  icon={<MoreHorizontal />}
+                  hideTooltip
+                />
+              }
+            />
+          </div>
+        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 phone:px-4">

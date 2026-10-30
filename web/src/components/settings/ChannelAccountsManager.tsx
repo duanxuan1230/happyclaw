@@ -29,13 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { ResponsiveMenu } from '@/components/common/ResponsiveMenu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -444,8 +438,37 @@ function ChannelAccountRow({
             aria-label={`${account.enabled ? '停用' : '启用'}账号 ${account.name}`}
             className="mx-1.5"
           />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+          <ResponsiveMenu
+            title={`${account.name} 的操作`}
+            groups={[
+              [
+                {
+                  label: connectionLabel,
+                  icon: KeyRound,
+                  onSelect: onConnection,
+                },
+                ...(supportsChannelConnectionTest(account.provider) &&
+                account.has_credentials
+                  ? [
+                      {
+                        label: '测试连接',
+                        icon: TestTube2,
+                        onSelect: () => void onTest(account),
+                      },
+                    ]
+                  : []),
+                { label: '默认规则', icon: Settings2, onSelect: onSettings },
+              ],
+              [
+                {
+                  label: '删除账号',
+                  icon: Trash2,
+                  destructive: true,
+                  onSelect: () => void onDelete(account),
+                },
+              ],
+            ]}
+            trigger={
               <IconButton
                 label={`更多操作 ${account.name}`}
                 disabled={busy}
@@ -457,34 +480,8 @@ function ChannelAccountRow({
                   )
                 }
               />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-44">
-              <DropdownMenuItem onSelect={onConnection}>
-                <KeyRound />
-                {connectionLabel}
-              </DropdownMenuItem>
-              {supportsChannelConnectionTest(account.provider) &&
-                account.has_credentials && (
-                  <DropdownMenuItem onSelect={() => void onTest(account)}>
-                    <TestTube2 />
-                    测试连接
-                  </DropdownMenuItem>
-                )}
-              <DropdownMenuItem onSelect={onSettings}>
-                <Settings2 />
-                默认规则
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                variant="destructive"
-                onSelect={() => void onDelete(account)}
-                aria-label={`删除账号 ${account.name}`}
-              >
-                <Trash2 />
-                删除账号
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+            }
+          />
         </>
       }
     />
@@ -633,7 +630,6 @@ function CreateChannelAccountDialog({
                       ? `可留空，默认为“${spacedLabel(feishuBrandName(brand), '机器人')}”`
                       : `例如：${spacedLabel('客服', definition.label)} Bot`
                   }
-                  autoFocus
                 />
               </div>
             </div>

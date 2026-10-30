@@ -126,7 +126,26 @@ export function PluginsPage() {
 
   return (
     <div className="space-y-4">
-      <CapabilitySectionActions>
+      <CapabilitySectionActions
+        phoneMenu={[
+          ...(isAdmin
+            ? [
+                {
+                  label: '扫描宿主机 Catalog',
+                  icon: FolderSync,
+                  onSelect: () => void handleScan(),
+                  disabled: scanning,
+                },
+              ]
+            : []),
+          {
+            label: '刷新',
+            icon: RefreshCw,
+            onSelect: () => void loadPlugins(),
+            disabled: loading,
+          },
+        ]}
+      >
         {isAdmin && (
           <Button
             variant="outline"

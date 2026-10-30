@@ -1103,11 +1103,116 @@ describe('a reply on a phone', () => {
     expect(bubble?.className).toContain('phone:bg-surface-raised');
     expect(bubble?.className).toContain('phone:rounded-xl');
     expect(bubble?.className).toContain('phone:p-3');
+    // Beside the bubble, off a phone: one menu.
     const menus = container.querySelectorAll('[aria-label="消息菜单"]');
-    expect(menus).toHaveLength(2);
-    // Beside the bubble elsewhere; below it, right-aligned, on a phone.
-    expect(menus[0].closest('.phone\\:hidden')).not.toBeNull();
-    expect(menus[1].closest('.phone\\:inline-flex')).not.toBeNull();
+    expect(menus).toHaveLength(1);
+    expect(menus[0].closest('.absolute')).not.toBeNull();
+  });
+
+  describe('on a phone', () => {
+    beforeEach(() => {
+      vi.spyOn(window, 'matchMedia').mockImplementation(
+        (query: string) =>
+          ({
+            matches: query.includes('pointer: coarse'),
+            media: query,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+          }) as unknown as MediaQueryList,
+      );
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    const userMessage = (content: string) =>
+      reply({
+        id: 'u1',
+        is_from_me: false,
+        sender: 'user-1',
+        source_kind: null,
+        content,
+      });
+
+    it('puts 「⋯」 below the bubble, once, and sets the text at the reply size', async () => {
+      await mount(userMessage('帮我看看'));
+      const menus = container.querySelectorAll('[aria-label="消息菜单"]');
+      expect(menus).toHaveLength(1);
+      expect(menus[0].closest('.absolute')).toBeNull();
+      expect(container.querySelector('p')?.className).toContain(
+        'phone:text-reply',
+      );
+    });
+
+    it('opens the message menu on a long press of the bubble', async () => {
+      vi.useFakeTimers();
+      try {
+        await mount(userMessage('帮我看看'));
+        const bubble = container.querySelector('p')!.parentElement!;
+        act(() => {
+          bubble.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              bubbles: true,
+              pointerType: 'touch',
+              isPrimary: true,
+              clientX: 10,
+              clientY: 10,
+            }),
+          );
+        });
+        expect(document.body.textContent).not.toContain('选择文本');
+        act(() => {
+          vi.advanceTimersByTime(600);
+        });
+        expect(document.body.textContent).toContain('复制文本');
+        // A held finger is the menu, not the system selection: the menu
+        // offers the selection instead.
+        expect(document.body.textContent).toContain('选择文本');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('folds a long message to ten lines, with 展开', async () => {
+      const lineHeight = vi
+        .spyOn(window, 'getComputedStyle')
+        .mockImplementation(
+          () => ({ lineHeight: '26px' }) as unknown as CSSStyleDeclaration,
+        );
+      const height = vi
+        .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+        .mockImplementation(function (this: HTMLElement) {
+          return this.tagName === 'P'
+            ? (this.textContent ?? '').split('\n').length * 26
+            : 0;
+        });
+      try {
+        await mount(
+          userMessage(
+            Array.from({ length: 20 }, (_, i) => `第 ${i} 行`).join('\n'),
+          ),
+        );
+        const text = container.querySelector('p')!;
+        expect(text.className).toContain('line-clamp-10');
+        const toggle = [...container.querySelectorAll('button')].find(
+          (button) => button.textContent === '展开',
+        );
+        expect(toggle).toBeDefined();
+        act(() => toggle!.click());
+        expect(container.querySelector('p')!.className).not.toContain(
+          'line-clamp-10',
+        );
+      } finally {
+        lineHeight.mockRestore();
+        height.mockRestore();
+      }
+    });
+
+    it('leaves a short message whole', async () => {
+      await mount(userMessage('一行'));
+      expect(container.querySelector('p')!.className).not.toContain(
+        'line-clamp',
+      );
+      expect(container.textContent).not.toContain('展开');
+    });
   });
 });
 

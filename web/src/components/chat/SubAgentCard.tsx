@@ -75,7 +75,8 @@ export function SubAgentBody({
           live={isRunning}
           groupJid={groupJid}
           variant={inline ? 'row' : 'block'}
-          className="mt-0 mb-0 max-h-32"
+          maxHeightClass="max-h-32"
+          className="mt-0 mb-0"
         />
       )}
       {task.textTail && (

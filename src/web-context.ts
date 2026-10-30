@@ -209,6 +209,8 @@ export interface WebDeps {
     messageId: string,
     expectedRunId: string,
   ) => Promise<FollowUpActionResult> | FollowUpActionResult;
+  /** Start the next durable follow-up batch of an idle lane (no-op if busy). */
+  dispatchQueuedFollowUps?: (chatJid: string) => void;
   cancelFollowUp?: (chatJid: string, messageId: string) => FollowUpActionResult;
   editFollowUp?: (
     chatJid: string,

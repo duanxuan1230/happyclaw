@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  useMemo,
   useId,
   useImperativeHandle,
   memo,
@@ -69,6 +70,10 @@ import {
   composerDocFor,
 } from './composer/composerDocument';
 import { AttachmentTray } from './composer/AttachmentTray';
+import {
+  ComposerDockContext,
+  type ComposerDockApi,
+} from './composer/composerDock';
 import { ComposerPalette, paletteOptionId } from './composer/ComposerPalette';
 import { ComposerToolbar } from './composer/ComposerToolbar';
 import {
@@ -827,10 +832,32 @@ export const MessageInput = memo(function MessageInput({
   const dockColumnRef = useRef<HTMLDivElement>(null);
 
   // Text entry inside the dock opens the pill; it closes again when focus
-  // leaves for the page. A sheet, menu or popover the dock opened (its
-  // trigger is expanded) is not leaving.
+  // leaves for the page. A sheet or menu a dock control opened (the model
+  // sheet, + sheet) keeps it open on its own: its open state is reported
+  // here as it opens, before focus moves into it, so nothing depends on
+  // when a trigger's aria-expanded flips.
   const [textFocused, setTextFocused] = useState(false);
+  const [overlayOpen, setOverlayOpenState] = useState(false);
+  const openOverlaysRef = useRef(new Set<string>());
+  const setOverlayOpen = useCallback((id: string, open: boolean) => {
+    const overlays = openOverlaysRef.current;
+    if (open) overlays.add(id);
+    else overlays.delete(id);
+    setOverlayOpenState(overlays.size > 0);
+    // While an overlay was up, focus leaving the dock was not counted (see
+    // noteFocusOut). With the last one closing, count it now: focus that is
+    // not back in the dock leaves the card free to fold into the pill.
+    if (
+      !open &&
+      overlays.size === 0 &&
+      !rootRef.current?.contains(document.activeElement)
+    ) {
+      setTextFocused(false);
+    }
+  }, []);
   const noteFocusIn = (event: React.FocusEvent<HTMLDivElement>) => {
+    // As below: a field inside an overlay the dock opened is not its text.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     const target = event.target as HTMLElement;
     if (target.isContentEditable || target.matches('input, textarea')) {
       setTextFocused(true);
@@ -842,7 +869,7 @@ export const MessageInput = memo(function MessageInput({
     if (!event.currentTarget.contains(event.target as Node)) return;
     const next = event.relatedTarget as Node | null;
     if (next && event.currentTarget.contains(next)) return;
-    if (event.currentTarget.querySelector('[aria-expanded="true"]')) return;
+    if (openOverlaysRef.current.size > 0) return;
     setTextFocused(false);
   };
 
@@ -903,6 +930,16 @@ export const MessageInput = memo(function MessageInput({
   // the editor instead of dropping focus; the caret stays where it was.
   const focusFromBlankArea = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0 || editor.isDestroyed) return;
+    // A press on one of the dock's own buttons keeps the editor's focus. iOS
+    // never focuses a tapped button: the editor would blur (relatedTarget
+    // null) and fold the card into the pill before the click arrives, which
+    // then lands on whatever moved under the finger. (A portal the dock
+    // opened bubbles here through React; its buttons are not the dock's.)
+    const button = (event.target as Element).closest?.('button');
+    if (dock && button && event.currentTarget.contains(button)) {
+      event.preventDefault();
+      return;
+    }
     if (
       !isComposerBlankPointerTarget(
         event.target,
@@ -944,16 +981,21 @@ export const MessageInput = memo(function MessageInput({
   const dock = phoneDock && !centered;
   // The resting pill opens into the card when the text gets focus (in the
   // same tap, so iOS raises its keyboard) and stays open while anything is
-  // in it or being worked on.
+  // in it or being worked on, a sheet it opened included.
   const pill =
     dock &&
     !textFocused &&
+    !overlayOpen &&
     !hasPayload &&
     queuedFollowUps.length === 0 &&
     !palette.open &&
     !editingFollowUpId &&
     !sendError;
   const dockCard = dock && !pill;
+  const dockApi = useMemo<ComposerDockApi>(
+    () => ({ compact: pill, setOverlayOpen }),
+    [pill, setOverlayOpen],
+  );
 
   return (
     <div
@@ -1098,54 +1140,56 @@ export const MessageInput = memo(function MessageInput({
                   className={cn(disabled && 'cursor-not-allowed opacity-50')}
                 />
               </div>
-              <ComposerToolbar
-                canAttach={!!groupJid}
-                uploading={attachments.uploading}
-                onPickImages={() => imageInputRef.current?.click()}
-                onPickFiles={() => fileInputRef.current?.click()}
-                onPickFolder={() => folderInputRef.current?.click()}
-                onResetSession={onResetSession}
-                onToggleTerminal={onToggleTerminal}
-                foldActions={foldToolbarActions}
-                phone={phoneDock}
-                collapsed={pill}
-                contextUsage={
-                  !centered && !isPhoneWidth ? contextUsage : undefined
-                }
-                modelSelector={modelSelector}
-                // A draft turns the primary action into queue/send; keep
-                // stop reachable next to it.
-                showSideStop={canStop && hasPayload && !sending}
-                stopping={stopping}
-                stopDisabled={disabled || stopping}
-                onStop={() => void handleStop()}
-                send={{
-                  glyph:
-                    sending || (showStop && stopping)
-                      ? 'busy'
-                      : showStop
-                        ? 'stop'
-                        : isRunning && followUpMode === 'queue'
-                          ? 'queue'
-                          : 'send',
-                  disabled: showStop
-                    ? disabled || stopping
-                    : !canSend || disabled,
-                  label: sendLabel,
-                  onClick: () =>
-                    showStop ? void handleStop() : void handleSend(),
-                  escapeStops: showStop,
-                  alternate:
-                    isRunning && !showStop
-                      ? {
-                          label: followUpLabel(
-                            alternateFollowUpMode(followUpMode),
-                          ),
-                          shortcut: SHORTCUTS.steer,
-                        }
-                      : undefined,
-                }}
-              />
+              <ComposerDockContext.Provider value={dockApi}>
+                <ComposerToolbar
+                  canAttach={!!groupJid}
+                  uploading={attachments.uploading}
+                  onPickImages={() => imageInputRef.current?.click()}
+                  onPickFiles={() => fileInputRef.current?.click()}
+                  onPickFolder={() => folderInputRef.current?.click()}
+                  onResetSession={onResetSession}
+                  onToggleTerminal={onToggleTerminal}
+                  foldActions={foldToolbarActions}
+                  phone={phoneDock}
+                  collapsed={pill}
+                  contextUsage={
+                    !centered && !isPhoneWidth ? contextUsage : undefined
+                  }
+                  modelSelector={modelSelector}
+                  // A draft turns the primary action into queue/send; keep
+                  // stop reachable next to it.
+                  showSideStop={canStop && hasPayload && !sending}
+                  stopping={stopping}
+                  stopDisabled={disabled || stopping}
+                  onStop={() => void handleStop()}
+                  send={{
+                    glyph:
+                      sending || (showStop && stopping)
+                        ? 'busy'
+                        : showStop
+                          ? 'stop'
+                          : isRunning && followUpMode === 'queue'
+                            ? 'queue'
+                            : 'send',
+                    disabled: showStop
+                      ? disabled || stopping
+                      : !canSend || disabled,
+                    label: sendLabel,
+                    onClick: () =>
+                      showStop ? void handleStop() : void handleSend(),
+                    escapeStops: showStop,
+                    alternate:
+                      isRunning && !showStop
+                        ? {
+                            label: followUpLabel(
+                              alternateFollowUpMode(followUpMode),
+                            ),
+                            shortcut: SHORTCUTS.steer,
+                          }
+                        : undefined,
+                  }}
+                />
+              </ComposerDockContext.Provider>
             </div>
           </div>
         </div>

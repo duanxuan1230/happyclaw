@@ -2,13 +2,15 @@ import { useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { UnifiedSidebar } from './UnifiedSidebar';
 import { BottomTabBar } from './BottomTabBar';
-import { NavDrawer, NavDrawerButton } from './NavDrawer';
+import { NavDrawer } from './NavDrawer';
+import { PhoneTopBar } from './PhonePageHeader';
 import { useIsPhone } from './phone';
 import { ConnectionBanner } from '../common/ConnectionBanner';
 import { wsManager } from '../../api/ws';
 import { useTheme } from '../../hooks/useTheme';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useRouteRestore } from '../../hooks/useRouteRestore';
+import { useVisualViewportVars } from '../../hooks/useVisualViewport';
 import { useBillingStore } from '../../stores/billing';
 import { useGroupsStore } from '../../stores/groups';
 import { useChatStore } from '../../stores/chat';
@@ -24,6 +26,7 @@ import { useGlobalStreamSubscriptions } from '../../hooks/useStreamSubscriptions
 import { useUsageLimitWaitSubscription } from '../../stores/usage-limit-waits';
 import { useAutomationSubscription } from '../../stores/automations';
 import { AutomationFormHost } from '../automations/AutomationFormHost';
+import { CreateWorkspaceHost } from './CreateWorkspaceHost';
 
 export function AppLayout() {
   const location = useLocation();
@@ -32,11 +35,13 @@ export function AppLayout() {
   const isPhone = useIsPhone();
   const isChatRoute = location.pathname.startsWith('/chat');
   const hideMobileTabBar = /^\/chat\/.+/.test(location.pathname);
-  // The phone home and Settings put the drawer's hamburger in their own bar.
+  // The phone home and Settings put the drawer's hamburger in their own bar;
+  // other pages name themselves in it through PhonePageHeader.
   const showPhoneTopBar =
     isPhone && !isChatRoute && !location.pathname.startsWith('/settings');
   useTheme(); // 应用并同步持久化的主题偏好
   useRouteRestore(); // PWA 重启时恢复上次访问的路由（默认关闭，设置中启用）
+  useVisualViewportVars(); // 全局唯一的 --vvh / --keyboard-inset 来源
 
   // ⌘B / Ctrl+B toggles the desktop sidebar between full width and icon rail.
   const toggleSidebar = useShellStore((s) => s.toggleSidebar);
@@ -205,17 +210,10 @@ export function AppLayout() {
           {isDesktop && <UnifiedSidebar />}
 
           {/* Desktop: pages render on an inset canvas floating in the shell. */}
-          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden [--app-canvas-h:100dvh] lg:my-2 lg:mr-2 lg:rounded-xl lg:bg-background lg:shadow-canvas lg:ring-1 lg:ring-surface-border lg:[--app-canvas-h:calc(100dvh-1rem)]">
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden [--app-canvas-h:100dvh] phone:pr-[env(safe-area-inset-right,0px)] phone:pl-[env(safe-area-inset-left,0px)] lg:my-2 lg:mr-2 lg:rounded-xl lg:bg-background lg:shadow-canvas lg:ring-1 lg:ring-surface-border lg:[--app-canvas-h:calc(100dvh-1rem)]">
             <ConnectionBanner />
             {/* The page names itself below; the bar only holds the menu. */}
-            {showPhoneTopBar && (
-              <div
-                data-testid="phone-top-bar"
-                className="flex h-13 shrink-0 items-center px-2"
-              >
-                <NavDrawerButton />
-              </div>
-            )}
+            {showPhoneTopBar && <PhoneTopBar />}
             <main
               data-app-scroll-root="true"
               className={`flex-1 min-h-0 lg:overflow-auto lg:pb-0 ${
@@ -233,6 +231,7 @@ export function AppLayout() {
           {isPhone ? <NavDrawer /> : !hideMobileTabBar && <BottomTabBar />}
           <CommandPaletteHost />
           <AutomationFormHost />
+          <CreateWorkspaceHost />
         </div>
       </TooltipProvider>
     </MotionProvider>

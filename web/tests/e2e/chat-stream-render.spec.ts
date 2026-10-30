@@ -255,8 +255,9 @@ test.describe('reasoning', () => {
     expect((await state()).top).toBeLessThan(8);
   });
 
-  test('scrolls in its own area without handing the scroll on to the chat', async ({
+  test('scrolls in its own area with a mouse; folds on a phone, all of it a tap away', async ({
     page,
+    isMobile,
   }) => {
     await open(page, 'scenario=live');
     await page.evaluate(() => {
@@ -269,8 +270,25 @@ test.describe('reasoning', () => {
     });
     const body = page.locator('[data-hc-thinking-body]');
     await expect(body).toBeVisible();
-    await expect(body).toHaveCSS('overscroll-behavior-y', 'contain');
-    await expect(body).toHaveCSS('overflow-y', 'auto');
+    if (!isMobile) {
+      await expect(body).toHaveCSS('overscroll-behavior-y', 'contain');
+      await expect(body).toHaveCSS('overflow-y', 'auto');
+      await expect(page.getByRole('button', { name: '查看全部' })).toHaveCount(
+        0,
+      );
+      return;
+    }
+    // No box in a box on a phone: a finger on it scrolls the chat.
+    await expect(body).toHaveCSS('overflow-y', 'hidden');
+    await expect(body).toHaveCSS('overscroll-behavior-y', 'auto');
+    await expect(body).toHaveAttribute('data-hc-clamped', 'cut');
+    const viewAll = page.getByRole('button', { name: '查看全部' });
+    expect((await viewAll.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await viewAll.tap();
+    const sheet = page.getByRole('dialog', { name: '思考' });
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toContainText('第 0 段。');
+    await expect(sheet).toContainText('第 29 段。');
   });
 });
 

@@ -142,6 +142,25 @@ test('a late-loading image keeps a reader pinned to the bottom', async ({
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
 });
 
+test('a pinned reader stays at the bottom when the composer grows later', async ({
+  page,
+}) => {
+  await openHarness(page, { n: '40' });
+  await settledAtBottom(page);
+  // As when the lazily loaded composer replaces its smaller placeholder:
+  // only the content's bottom padding changes.
+  await page.evaluate(() => {
+    const host = document.querySelector<HTMLElement>(
+      '[data-composer-dock-host]',
+    )!;
+    const now = parseFloat(
+      getComputedStyle(host).getPropertyValue('--composer-dock-height') || '0',
+    );
+    host.style.setProperty('--composer-dock-height', `${now + 120}px`);
+  });
+  await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
+});
+
 async function settledAtBottom(page: Page) {
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
   // Let the first page finish its bottom-pinning window before acting.
@@ -836,10 +855,12 @@ test('the jump-to-bottom button counts replies that arrived while reading histor
   await scrollTranscriptTo(page, top - 3000);
   await page.waitForTimeout(300);
   await expect(bottomButton(page)).toHaveAccessibleName('回到底部');
-  // One 36px round button; a phone has no jump to the top.
+  // One round button, 36px (44 to a phone's finger); a phone has no jump to
+  // the top.
+  const size = hasTouch ? 44 : 36;
   const box = (await bottomButton(page).boundingBox())!;
-  expect(box.width).toBeCloseTo(36, 0);
-  expect(box.height).toBeCloseTo(36, 0);
+  expect(box.width).toBeCloseTo(size, 0);
+  expect(box.height).toBeCloseTo(size, 0);
   await expect(page.getByRole('button', { name: '回到顶部' })).toHaveCount(
     hasTouch ? 0 : 1,
   );

@@ -56,6 +56,10 @@ import { VendorTile } from '../brand/VendorTile';
 import { api } from '../../api/client';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useAuthStore } from '../../stores/auth';
+import { showToast } from '../../utils/toast';
+import { useIsPhone } from '../layout/phone';
+import { useComposerDock, useDockOverlay } from './composer/composerDock';
+import { ConversationContextUsageLine } from './composer/ContextUsageRing';
 import {
   effortLabel,
   modelBindingErrorMessage,
@@ -370,16 +374,21 @@ function effortShown(context: EffortContext): {
   return { level, spoken };
 }
 
-/** The `phone:` variant: below the desktop layout and driven by touch. */
-const PHONE_QUERY = '(max-width: 1023px) and (pointer: coarse)';
-
 /**
  * A phone's single control for model and effort, after cindy's model pill:
  * a filled 34px pill, 12px medium text. The model name truncates first; the
- * level after it stays whole.
+ * level after it stays whole. In the resting composer pill it shrinks to a
+ * 34px chip of the vendor mark alone, its touch target padded to 44px.
  */
 const PHONE_PILL_CLASS =
-  'inline-flex h-[34px] max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-surface-border bg-muted pr-2.5 pl-1.5 text-caption font-medium text-foreground transition-colors duration-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none active:bg-surface-hover disabled:cursor-default data-[state=open]:bg-surface-hover';
+  'relative inline-flex h-[34px] max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-surface-border bg-muted text-caption font-medium text-foreground transition-colors duration-100 before:absolute before:-inset-[5px] focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none active:bg-surface-hover aria-disabled:cursor-default data-[state=open]:bg-surface-hover';
+
+function phonePillClass(compact: boolean): string {
+  return cn(
+    PHONE_PILL_CLASS,
+    compact ? 'w-[34px] justify-center' : 'pr-2.5 pl-1.5',
+  );
+}
 
 /**
  * The composer's model and effort controls: plain text at rest, a filled
@@ -443,13 +452,18 @@ export function ModelSelector({
   );
   // A phone gets one pill for model and effort and picks the effort in the
   // sheet; a narrow window keeps the desktop controls but the sheet too.
-  const phone = useMediaQuery(PHONE_QUERY);
+  const phone = useIsPhone();
   const narrow = useMediaQuery('(max-width: 639px)');
   const inSheet = phone || narrow;
+  const compact = (useComposerDock()?.compact ?? false) && phone;
   const [selection, setSelection] = useState<SessionModelSelection | null>(
     null,
   );
-  const [open, setOpen] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [open, setOpen] = useDockOverlay();
+  // The sheet's detent: half on open, full while searching (cindy's picker
+  // makes room for the keyboard when its field gets focus).
+  const [snap, setSnap] = useState<'half' | 'full'>('half');
   const [saving, setSaving] = useState(false);
   const modelTooltip = useQuietTooltip();
   const lastRefreshAt = useRef(0);
@@ -462,9 +476,12 @@ export function ModelSelector({
   const load = useCallback(async () => {
     try {
       setSelection(await api.get<SessionModelSelection>(`${basePath}${query}`));
+      setLoadFailed(false);
     } catch {
-      // Older server or no access: the picker simply stays hidden.
+      // Older server or no access: a desktop simply hides the picker; a
+      // phone keeps its chip, which says so when tapped.
       setSelection(null);
+      setLoadFailed(true);
     }
   }, [basePath, query]);
 
@@ -496,7 +513,18 @@ export function ModelSelector({
   };
 
   const handleOpenChange = (next: boolean) => {
+    // A phone's pill is never really disabled (a tap that does nothing reads
+    // as broken): it says why instead of opening.
+    if (next && phone && !canChange) {
+      showToast('无法切换模型', '你没有修改此工作区配置的权限');
+      return;
+    }
+    if (next && phone && saving) {
+      showToast('正在切换模型', '请稍候再试');
+      return;
+    }
     modelTooltip.onMenuOpenChange(next);
+    if (next) setSnap('half');
     setOpen(next);
     if (next) refreshCatalog();
   };
@@ -529,7 +557,27 @@ export function ModelSelector({
     }
   };
 
-  if (!selection || selection.options.length === 0) return null;
+  if (!selection || selection.options.length === 0) {
+    if (!phone || (!selection && !loadFailed)) return null;
+    return (
+      <UnavailablePill
+        compact={compact}
+        onTap={() => {
+          if (selection) {
+            showToast(
+              '还没有可用的模型',
+              canManageModels
+                ? '在 设置 → 模型 中添加模型配置'
+                : '请联系管理员添加模型配置',
+            );
+          } else {
+            showToast('无法读取模型配置', '已重新加载，请稍后再试');
+            void load();
+          }
+        }}
+      />
+    );
+  }
 
   const pinnedModel = selection.selectedModelConfigId
     ? (selection.selectedModel ?? null)
@@ -630,6 +678,8 @@ export function ModelSelector({
       pinnedModel={pinnedModel}
       selectedKey={selectedKey}
       disabled={disabled}
+      inSheet={inSheet}
+      touch={phone}
       effort={
         phone
           ? effortContext && {
@@ -639,10 +689,18 @@ export function ModelSelector({
             }
           : undefined
       }
+      // A phone keeps the sheet open on the new model, its levels under it,
+      // so changing both takes one visit.
       onPick={(row) => {
-        handleOpenChange(false);
+        if (!phone) handleOpenChange(false);
         pickRow(row);
       }}
+      onSearchFocus={phone ? () => setSnap('full') : undefined}
+      footer={
+        phone && (
+          <ConversationContextUsageLine jid={groupJid} agentId={agentId} />
+        )
+      }
       onManage={
         canManageModels
           ? () => {
@@ -683,26 +741,36 @@ export function ModelSelector({
       <Root open={open} onOpenChange={handleOpenChange}>
         {phone ? (
           <Trigger asChild>
+            {/* One element at rest and in the card, so the sheet's focus
+                return and open state survive the pill opening into it. */}
             <button
               type="button"
-              disabled={disabled}
+              // Never disabled outright: a tap says why (handleOpenChange).
+              aria-disabled={disabled || undefined}
               aria-label={`模型：${fullLabel}${
                 shown ? `，推理等级：${shown.spoken}` : ''
               }`}
-              data-model-pill=""
-              className={PHONE_PILL_CLASS}
+              data-model-pill={compact ? 'compact' : ''}
+              className={phonePillClass(compact)}
             >
               {mark}
-              <span className="min-w-0 truncate">{triggerName}</span>
-              {shown?.level && (
-                <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
-                  <span className="text-muted-foreground" aria-hidden="true">
-                    ·
-                  </span>
-                  {effortLabel(shown.level)}
-                </span>
+              {!compact && (
+                <>
+                  <span className="min-w-0 truncate">{triggerName}</span>
+                  {shown?.level && (
+                    <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+                      <span
+                        className="text-muted-foreground"
+                        aria-hidden="true"
+                      >
+                        ·
+                      </span>
+                      {effortLabel(shown.level)}
+                    </span>
+                  )}
+                  {!disabled && chevron}
+                </>
               )}
-              {chevron}
             </button>
           </Trigger>
         ) : (
@@ -734,6 +802,8 @@ export function ModelSelector({
           <SheetContent
             side="bottom"
             detents
+            snap={snap}
+            onSnapChange={setSnap}
             className="gap-0 p-0"
             // Focus the sheet, not the search field: a phone keyboard would
             // cover the list.
@@ -770,6 +840,35 @@ export function ModelSelector({
         />
       )}
     </>
+  );
+}
+
+/**
+ * A phone's model chip while there is nothing to pick from (the selection
+ * could not be read, or no configuration exists): it stays where the model
+ * sits and says why when tapped.
+ */
+function UnavailablePill({
+  compact,
+  onTap,
+}: {
+  compact: boolean;
+  onTap: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-disabled
+      aria-label="模型：不可用"
+      data-model-pill={compact ? 'compact' : ''}
+      onClick={onTap}
+      className={cn(phonePillClass(compact), 'text-muted-foreground')}
+    >
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-surface-selected">
+        <Sparkles className="size-3" aria-hidden="true" />
+      </span>
+      {!compact && <span className="truncate">模型</span>}
+    </button>
   );
 }
 
@@ -861,6 +960,14 @@ interface ModelPanelProps {
   pinnedModel: string | null;
   selectedKey: string;
   disabled: boolean;
+  /** In a bottom sheet: the list fills it instead of a fixed height. */
+  inSheet: boolean;
+  /** A phone: connections are filtered by name chips (no tooltips there). */
+  touch: boolean;
+  /** Below the hint, e.g. a phone's context usage. */
+  footer?: ReactNode;
+  /** The search field got focus. */
+  onSearchFocus?: () => void;
   /**
    * A phone picks the effort here, under the model in use; null when that
    * model takes none. Undefined leaves the effort to the control beside the
@@ -886,6 +993,10 @@ function ModelPanel({
   pinnedModel,
   selectedKey,
   disabled,
+  inSheet,
+  touch,
+  footer,
+  onSearchFocus,
   effort,
   onPick,
   onManage,
@@ -900,6 +1011,28 @@ function ModelPanel({
   const [query, setQuery] = useState('');
   const [rail, setRail] = useState<string>('all');
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Opens on the model in use (cindy's picker scrolls to it), centred when
+  // the list is longer than its box. Only the list scrolls, not the page.
+  // A frame later: a sheet sets its height in its own layout effect, which
+  // runs after this panel's.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const list = listRef.current;
+      const row = list?.querySelector<HTMLElement>(
+        '[data-model-row][aria-checked="true"]',
+      );
+      if (!list || !row) return;
+      const top =
+        row.getBoundingClientRect().top -
+        list.getBoundingClientRect().top +
+        list.scrollTop;
+      list.scrollTop = top - (list.clientHeight - row.offsetHeight) / 2;
+    });
+    return () => cancelAnimationFrame(frame);
+    // Only on open: picking a row must not move the list under the finger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const needle = query.trim().toLowerCase();
   // A search looks through every connection, whatever the rail shows.
@@ -956,16 +1089,52 @@ function ModelPanel({
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="搜索模型"
+          onFocus={onSearchFocus}
           aria-label="搜索模型"
-          className="h-10 w-full bg-transparent pr-3 pl-9 text-body text-foreground outline-none placeholder:text-muted-foreground"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="search"
+          className="h-10 w-full bg-transparent pr-3 pl-9 text-body text-foreground outline-none placeholder:text-muted-foreground phone:h-11 phone:text-base"
         />
       </div>
 
-      <div className="flex h-[min(26rem,60dvh)] min-h-0 flex-1">
+      {touch && (
+        // Names, not marks: a touch screen shows no tooltips.
         <div
           role="group"
           aria-label="模型配置"
-          className="flex w-12 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-surface-border py-2"
+          className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-surface-border px-3 py-2 [scrollbar-width:none]"
+        >
+          <RailChip
+            label="全部"
+            active={rail === 'all' && !needle}
+            onClick={() => showRail('all')}
+          />
+          {selection.options.map((option) => (
+            <RailChip
+              key={option.id}
+              label={option.name}
+              active={rail === option.id && !needle}
+              onClick={() => showRail(option.id)}
+            />
+          ))}
+        </div>
+      )}
+
+      <div
+        className={cn(
+          'flex min-h-0 flex-1',
+          !inSheet && 'h-[min(26rem,60dvh)]',
+        )}
+      >
+        <div
+          role="group"
+          aria-label="模型配置"
+          className={cn(
+            'flex w-12 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-surface-border py-2',
+            touch && 'hidden',
+          )}
         >
           <RailButton
             label="全部"
@@ -996,7 +1165,7 @@ function ModelPanel({
           ref={listRef}
           role="radiogroup"
           aria-label="本会话使用的模型"
-          className="min-w-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain p-1.5"
+          className="relative min-w-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain p-1.5"
         >
           {showDefault && (
             <RowButton
@@ -1066,6 +1235,7 @@ function ModelPanel({
             管理模型配置
           </button>
         )}
+        {footer}
       </div>
     </div>
   );
@@ -1146,6 +1316,33 @@ function RailButton({
           : 'text-muted-foreground',
       )}
     />
+  );
+}
+
+function RailChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        // 36px, its touch target padded to 44px within the row.
+        'relative h-9 max-w-[12rem] shrink-0 cursor-pointer truncate rounded-full border px-3 before:absolute before:-inset-y-1 before:inset-x-0 text-caption font-medium transition-colors duration-100 outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+        active
+          ? 'border-surface-border bg-surface-selected text-foreground'
+          : 'border-transparent bg-muted text-muted-foreground active:bg-surface-hover',
+      )}
+    >
+      {label}
+    </button>
   );
 }
 

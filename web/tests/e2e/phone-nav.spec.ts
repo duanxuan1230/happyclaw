@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
+import { touchscreen } from './touchscreen';
+
 const HARNESS_PATH = '/tests/e2e/app-shell-harness.html';
 
 // The harness mocks the stores the shell reads. Requests the chat view or a
@@ -128,7 +130,10 @@ test.describe('phone', () => {
       .getByRole('button', { name: 'alpha 会话 1', exact: true })
       .click();
     await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s1');
-    await expect(page.locator('[data-hc-phone-home]')).toHaveCount(0);
+    // The home stays mounted under the chat, hidden and inert.
+    const home = page.locator('[data-hc-phone-home]');
+    await expect(home).toBeHidden();
+    await expect(home).toHaveAttribute('inert', '');
 
     // The chat's back used to open the session list (?sessions=1); on a
     // phone that level is the home list with the workspace open.
@@ -164,7 +169,7 @@ test.describe('phone', () => {
     // Other chat deep links still open the chat.
     await openShell(page, '/chat/beta?agent=beta-s2');
     await expect(routeProbe(page)).toHaveText('/chat/beta?agent=beta-s2');
-    await expect(page.locator('[data-hc-phone-home]')).toHaveCount(0);
+    await expect(page.locator('[data-hc-phone-home]')).toBeHidden();
   });
 
   test('the new-conversation button starts one in the home workspace', async ({
@@ -272,6 +277,7 @@ test.describe('phone', () => {
     await expect(routeProbe(page)).toHaveText('/settings?tab=profile');
     await expect(drawer).toHaveCount(0);
 
+    await page.getByRole('button', { name: '返回' }).click();
     await page.getByRole('button', { name: '打开菜单' }).click();
     await page
       .getByTestId('nav-drawer')
@@ -294,11 +300,16 @@ test.describe('phone', () => {
       '页面 /automations',
     );
 
-    await openShell(page, '/settings?tab=profile');
+    // Settings owns its bar: the section list keeps the hamburger, a section
+    // swaps it for back, and back returns to the list.
+    await openShell(page, '/settings');
     await expect(page.getByTestId('phone-top-bar')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '打开菜单' })).toHaveCount(1);
-    await page.getByRole('button', { name: '设置分区' }).click();
-    await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible();
+    await page.getByRole('button', { name: '个人资料' }).click();
+    await expect(routeProbe(page)).toHaveText('/settings?tab=profile');
+    await expect(page.getByRole('button', { name: '打开菜单' })).toHaveCount(0);
+    await page.getByRole('button', { name: '返回' }).click();
+    await expect(routeProbe(page)).toHaveText('/settings');
   });
 
   test('a settings save bar sits on the bottom edge without a tab bar', async ({
@@ -320,20 +331,28 @@ test.describe('phone', () => {
     await openShell(page, '/chat');
     const beta = workspaceItem(page, 'beta');
 
+    // On a phone the menus are bottom action sheets.
+    const sheet = (name: string) => page.getByRole('dialog', { name });
     await beta.getByRole('button', { name: 'Beta 工作区的更多操作' }).click();
-    await page.getByRole('menuitem', { name: '新建会话' }).click();
+    await sheet('Beta 工作区的更多操作')
+      .getByRole('button', { name: '新建会话' })
+      .click();
     await expect(routeProbe(page)).toHaveText('/chat/beta?agent=beta-new');
     await page.getByRole('button', { name: '返回', exact: true }).click();
     await expect(routeProbe(page)).toHaveText('/chat');
 
     await beta.getByRole('button', { name: 'beta 会话 1的更多操作' }).click();
-    await page.getByRole('menuitem', { name: '重命名' }).click();
+    await sheet('beta 会话 1的更多操作')
+      .getByRole('button', { name: '重命名' })
+      .click();
     const dialog = page.getByRole('dialog', { name: '重命名对话' });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: '取消' }).click();
 
     await beta.getByRole('button', { name: 'beta 会话 1的更多操作' }).click();
-    await page.getByRole('menuitem', { name: '删除' }).click();
+    await sheet('beta 会话 1的更多操作')
+      .getByRole('button', { name: '删除' })
+      .click();
     await page
       .getByRole('alertdialog')
       .getByRole('button', { name: '删除' })
@@ -341,9 +360,206 @@ test.describe('phone', () => {
     await expect(beta.getByText('beta 会话 1', { exact: true })).toHaveCount(0);
 
     await beta.getByRole('button', { name: 'beta 会话 2的更多操作' }).click();
-    await page.getByRole('menuitem', { name: '会话绑定' }).click();
+    await sheet('beta 会话 2的更多操作')
+      .getByRole('button', { name: '会话绑定' })
+      .click();
+    // The list opens the binding dialog itself: no chat view behind it.
     await expect(page.getByRole('dialog', { name: /绑定/ })).toBeVisible();
     await expect(routeProbe(page)).toHaveText('/chat');
+    await expect(page.locator('[data-hc-chat-view]')).toHaveCount(0);
+  });
+
+  test('holding a session row opens its menu; its ⋯ has a 44px target', async ({
+    page,
+  }) => {
+    await openShell(page, '/chat');
+    const beta = workspaceItem(page, 'beta');
+    const more = beta.getByRole('button', { name: 'beta 会话 1的更多操作' });
+    const target = await more.evaluate((element) => {
+      const hit = getComputedStyle(element, '::before');
+      const box = element.getBoundingClientRect();
+      return {
+        width: box.width - 2 * parseFloat(hit.left),
+        height: box.height - 2 * parseFloat(hit.top),
+      };
+    });
+    expect(target).toEqual({ width: 44, height: 44 });
+
+    const title = beta.getByRole('button', {
+      name: 'beta 会话 1',
+      exact: true,
+    });
+    const box = (await title.boundingBox())!;
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x: box.x + 20, y: box.y + box.height / 2 }]);
+    await page.waitForTimeout(650);
+    await fingers.up();
+    const sheet = page.getByRole('dialog', { name: 'beta 会话 1的更多操作' });
+    await expect(sheet).toBeVisible();
+    // The release did not also open the conversation.
+    await expect(routeProbe(page)).toHaveText('/chat');
+    await expect(sheet.getByRole('button', { name: '重命名' })).toBeVisible();
+    // A row's sheet closes on back, like every phone sheet.
+    await page.goBack();
+    await expect(sheet).toHaveCount(0);
+    await expect(routeProbe(page)).toHaveText('/chat');
+  });
+
+  test('back from a chat steps back instead of stacking the list again', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?router=hash#/chat`);
+    const home = page.locator('[data-hc-phone-home]');
+    // Show more under alpha and scroll down to a session there; the list
+    // should be found as it was left.
+    const alpha = workspaceItem(page, 'alpha');
+    await alpha.getByRole('button', { name: '显示更多（2）' }).click();
+    const length = await page.evaluate(() => history.length);
+
+    await page
+      .getByRole('button', { name: 'alpha 会话 6', exact: true })
+      .click();
+    await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s6');
+    expect(await page.evaluate(() => history.length)).toBe(length + 1);
+    const scrollTop = await home.evaluate((element) => element.scrollTop);
+    expect(scrollTop).toBeGreaterThan(0);
+
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await expect(routeProbe(page)).toHaveText('/chat');
+    // Back, not a new entry.
+    expect(await page.evaluate(() => history.length)).toBe(length + 1);
+    await expect(home).toBeVisible();
+    expect(await home.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+    await expect(
+      alpha.getByText('alpha 会话 7', { exact: true }),
+    ).toBeVisible();
+
+    // Forward reopens it, back leaves it again.
+    await page.goForward();
+    await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s6');
+    await page.goBack();
+    await expect(routeProbe(page)).toHaveText('/chat');
+    expect(await home.evaluate((element) => element.scrollTop)).toBe(scrollTop);
+  });
+
+  test('back from a chat opened directly replaces it with the list', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?router=hash#/chat/bill2?agent=bill2-s1`);
+    await expect(routeProbe(page)).toHaveText('/chat/bill2?agent=bill2-s1');
+    const length = await page.evaluate(() => history.length);
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await expect(routeProbe(page)).toHaveText('/chat');
+    expect(await page.evaluate(() => history.length)).toBe(length);
+    // The workspace it came from is in view.
+    await expect(workspaceItem(page, 'bill2')).toBeInViewport();
+  });
+
+  test('a swipe from the left edge goes back with the list under the finger', async ({
+    page,
+    browserName,
+  }) => {
+    const fingers = await touchscreen(page);
+    const swipe = async () => {
+      await fingers.down([{ x: 5, y: 400 }]);
+      for (const x of [20, 60, 120, 200, 280]) {
+        await fingers.move([{ x, y: 400 }]);
+      }
+    };
+    await page.goto(`${HARNESS_PATH}?router=hash#/chat`);
+    await page
+      .getByRole('button', { name: 'alpha 会话 1', exact: true })
+      .click();
+    await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s1');
+    if (browserName === 'webkit') {
+      // Safari in a tab swipes back through the history itself, so with an
+      // entry to go back to the page leaves the edge alone; its own swipe
+      // covers a chat opened directly.
+      await swipe();
+      await fingers.up();
+      // Past the swipe-out (250ms) a back would have landed.
+      await page.waitForTimeout(500);
+      await expect(routeProbe(page)).toHaveText('/chat/alpha?agent=alpha-s1');
+      // A fresh document: the chat is the app's first entry.
+      await page.goto('about:blank');
+      await page.goto(`${HARNESS_PATH}?router=hash#/chat/alpha?agent=alpha-s1`);
+      await expect(page.locator('[data-hc-chat-view]')).toBeVisible();
+    }
+    const home = page.locator('[data-hc-phone-home]');
+    await swipe();
+    // Mid-swipe the home shows beneath the chat.
+    await expect(home).toBeVisible();
+    await fingers.up();
+    await expect(routeProbe(page)).toHaveText('/chat');
+    await expect(page.locator('[data-hc-chat-view]')).toHaveCount(0);
+  });
+
+  test('the drawer closes on back and on a swipe to the left', async ({
+    page,
+  }) => {
+    await openShell(page, '/chat');
+    const drawer = page.getByTestId('nav-drawer');
+    await page.getByRole('button', { name: '打开菜单' }).click();
+    await expect(drawer).toBeVisible();
+    await page.goBack();
+    await expect(drawer).toHaveCount(0);
+    await expect(routeProbe(page)).toHaveText('/chat');
+
+    await page.getByRole('button', { name: '打开菜单' }).click();
+    await expect(drawer).toBeVisible();
+    const fingers = await touchscreen(page);
+    await fingers.down([{ x: 250, y: 500 }]);
+    for (const x of [240, 220, 180, 140]) await fingers.move([{ x, y: 500 }]);
+    await fingers.up();
+    await expect(drawer).toHaveCount(0);
+    await expect(routeProbe(page)).toHaveText('/chat');
+  });
+
+  test('the palette fills the screen, creates workspaces and drops desktop-only bits', async ({
+    page,
+  }) => {
+    await openShell(page, '/automations');
+    await page.getByRole('button', { name: '打开菜单' }).click();
+    await page
+      .getByTestId('nav-drawer')
+      .getByRole('button', { name: '搜索' })
+      .click();
+    const palette = page.getByRole('dialog', { name: '命令面板' });
+    await expect(palette).toBeVisible();
+    const viewport = page.viewportSize()!;
+    const box = (await palette.boundingBox())!;
+    expect(Math.round(box.height)).toBe(viewport.height - 48);
+    await expect(palette.locator('kbd:visible')).toHaveCount(0);
+    await palette.getByRole('combobox').fill('侧边栏');
+    await expect(palette.getByText('没有找到匹配的结果')).toBeVisible();
+
+    await palette.getByRole('combobox').fill('新建工作区');
+    await palette.getByRole('option', { name: /新建工作区/ }).click();
+    await expect(
+      page.getByRole('dialog', { name: /新建工作区/ }),
+    ).toBeVisible();
+  });
+
+  test('connection problems show as a strip under the header that never takes taps', async ({
+    page,
+  }) => {
+    await openShell(page, '/chat/alpha?agent=alpha-s1');
+    const strip = page.locator('[data-connection-notice]');
+    await page.evaluate(() => (window as any).__shellWs.emit('disconnected'));
+    // A quick reconnect says nothing.
+    await page.waitForTimeout(1000);
+    await expect(strip).toHaveCount(0);
+    await expect(strip).toHaveText('连接中断，正在重连…', { timeout: 4000 });
+    const box = (await strip.boundingBox())!;
+    expect(box.y).toBe(56);
+    // Back stays tappable through it.
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await expect(routeProbe(page)).toHaveText('/chat');
+    await expect(page.locator('[data-sonner-toast]')).toHaveCount(0);
+
+    await page.evaluate(() => (window as any).__shellWs.emit('connected'));
+    await expect(strip).toHaveText('已恢复连接');
+    await expect(strip).toHaveCount(0, { timeout: 4000 });
   });
 });
 

@@ -138,6 +138,7 @@ export function ModelPicker({
       {candidates.length > FILTER_THRESHOLD && (
         <Input
           type="search"
+          enterKeyHint="search"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
           placeholder={`在 ${candidates.length} 个模型中筛选`}
@@ -364,6 +365,7 @@ export function ManualModelInput({
     <div className="min-w-0 flex-1 space-y-1">
       <div className="flex gap-2">
         <Input
+          variant="code"
           value={value}
           onChange={(event) => {
             setValue(event.target.value);

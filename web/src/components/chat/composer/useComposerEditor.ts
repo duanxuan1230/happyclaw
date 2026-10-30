@@ -45,6 +45,7 @@ import {
 } from './cindy/pastePipeline';
 import {
   PastedTextChipNode,
+  pastedTextChipClickExpands,
   pastedTextChipLabel,
   replacePastedTextChipWithPlainText,
   type PastedTextChipAttrs,
@@ -182,8 +183,9 @@ export function useComposerEditor({
         'data-composer-editor': '',
         class:
           // cindy: 15px text on a 22px line (16px on phones, which zoom
-          // into smaller inputs), growing up to about eight lines.
-          'max-h-[min(186px,40dvh)] min-h-[22px] w-full overflow-y-auto text-base leading-[22px] break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
+          // into smaller inputs), growing up to about eight lines, or 40%
+          // of what the keyboard leaves visible.
+          'max-h-[min(186px,calc(var(--vvh,100dvh)*0.4))] min-h-[22px] w-full overflow-y-auto text-base leading-[22px] break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
       }),
       clipboardTextSerializer: (slice) =>
         serializeEditorSlice(editorRef.current, slice),
@@ -204,9 +206,13 @@ export function useComposerEditor({
         }
         return handlersRef.current.onKeyDown(view, event);
       },
-      handleClickOn: (_view, _pos, node, nodePos, _event, direct) =>
+      handleClickOn: (_view, _pos, node, nodePos, event, direct) =>
         direct &&
         node.type.name === 'pastedTextChip' &&
+        pastedTextChipClickExpands(
+          event.target,
+          window.matchMedia?.('(pointer: coarse)').matches ?? false,
+        ) &&
         expandPastedText(nodePos, node),
       handlePaste: (view, event) => handlePaste(view, event),
       handleDOMEvents: {

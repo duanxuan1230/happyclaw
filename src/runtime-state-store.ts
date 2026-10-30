@@ -70,7 +70,19 @@ export function initRuntimeStateStore(db: SqliteDatabase | null): void {
       provider_id TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS web_message_dedup (
+      user_id TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      client_message_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, chat_jid, client_message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_web_message_dedup_created
+      ON web_message_dedup(created_at);
   `);
+  pruneWebMessageDedup();
 }
 
 // ─── Usage-limit waits ─────────────────────────────────────
@@ -361,4 +373,81 @@ export function getUsageCacheRates(filters: UsageQueryFilters): {
       'LEFT JOIN usage_event_connections c ON c.event_id = r.event_id',
     ),
   };
+}
+
+// ─── Web message idempotency ───────────────────────────────
+
+/**
+ * How long a Web send stays answerable by its `clientMessageId`. A client
+ * resends after a timeout within seconds or minutes; a day also covers a
+ * phone that went offline mid-send and came back later.
+ */
+export const WEB_MESSAGE_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface WebMessageDedupRecord {
+  fingerprint: string;
+  response: Record<string, unknown>;
+}
+
+/** The stored answer to an earlier accepted send, unless it has expired. */
+export function getWebMessageDedup(
+  userId: string,
+  chatJid: string,
+  clientMessageId: string,
+  now = Date.now(),
+): WebMessageDedupRecord | null {
+  const row = stmt(
+    `SELECT fingerprint, response_json, created_at FROM web_message_dedup
+     WHERE user_id = ? AND chat_jid = ? AND client_message_id = ?`,
+  ).get(userId, chatJid, clientMessageId) as
+    | { fingerprint: string; response_json: string; created_at: string }
+    | undefined;
+  if (!row) return null;
+  if (Date.parse(row.created_at) <= now - WEB_MESSAGE_DEDUP_TTL_MS) return null;
+  try {
+    return {
+      fingerprint: row.fingerprint,
+      response: JSON.parse(row.response_json) as Record<string, unknown>,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Expired rows are pruned at startup and at most this often on writes. */
+const WEB_MESSAGE_DEDUP_PRUNE_INTERVAL_MS = 60_000;
+let lastWebMessageDedupPruneAt = Number.NEGATIVE_INFINITY;
+
+/** Remember an accepted send; expired rows are pruned on the way. */
+export function recordWebMessageDedup(input: {
+  userId: string;
+  chatJid: string;
+  clientMessageId: string;
+  fingerprint: string;
+  response: Record<string, unknown>;
+  now?: number;
+}): void {
+  const now = input.now ?? Date.now();
+  if (now - lastWebMessageDedupPruneAt >= WEB_MESSAGE_DEDUP_PRUNE_INTERVAL_MS) {
+    pruneWebMessageDedup(now);
+  }
+  stmt(
+    `INSERT OR REPLACE INTO web_message_dedup
+       (user_id, chat_jid, client_message_id, fingerprint, response_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.userId,
+    input.chatJid,
+    input.clientMessageId,
+    input.fingerprint,
+    JSON.stringify(input.response),
+    new Date(now).toISOString(),
+  );
+}
+
+export function pruneWebMessageDedup(now = Date.now()): number {
+  lastWebMessageDedupPruneAt = now;
+  return stmt('DELETE FROM web_message_dedup WHERE created_at <= ?').run(
+    new Date(now - WEB_MESSAGE_DEDUP_TTL_MS).toISOString(),
+  ).changes;
 }

@@ -280,6 +280,7 @@ export function HostDirectoryMountEditor({
                         })
                       }
                       placeholder="project-data"
+                      variant="code"
                       className="min-w-0 rounded-l-none font-mono pointer-coarse:h-10"
                       aria-invalid={!!containerError}
                       aria-describedby={

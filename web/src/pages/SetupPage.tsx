@@ -45,7 +45,7 @@ export function SetupPage() {
   }
 
   return (
-    <div className="h-dvh overflow-y-auto bg-background">
+    <div className="safe-area-top h-dvh overflow-y-auto bg-background">
       <div className="mx-auto flex min-h-full w-full max-w-md flex-col justify-center gap-6 px-4 py-10">
         <header className="text-center">
           <img

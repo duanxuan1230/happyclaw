@@ -3,8 +3,9 @@
  * (commit 7be4c57d7b, Apache-2.0; see THIRD_PARTY_NOTICES.md).
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6. Keeps trigger detection, filtering and ranking; cindy's
- * command tiers, Pi `skill:` aliases and agent resources are dropped, and
- * the slash trigger also opens after whitespace on a later line.
+ * command tiers, Pi `skill:` aliases and agent resources are dropped, the
+ * slash trigger also opens after whitespace on a later line, and an empty
+ * `@` lists hidden (dot) entries after the visible ones of their kind.
  */
 
 export type ComposerTrigger =
@@ -93,7 +94,10 @@ function detectAtTrigger(text: string): ComposerTrigger {
 }
 
 function scoreAtResource(item: ComposerAtResourceItem, query: string): number {
-  if (!query) return item.type === 'dir' ? 2 : 1;
+  if (!query) {
+    // Directories first; within each kind, dot entries last.
+    return (item.type === 'dir' ? 3 : 1) + (item.name.startsWith('.') ? 0 : 1);
+  }
   const name = item.name.toLowerCase();
   const relPath = item.relPath.toLowerCase();
   if (name.startsWith(query)) return 1000 - name.length;

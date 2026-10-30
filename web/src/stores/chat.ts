@@ -1,5 +1,7 @@
 import { create } from 'zustand';
-import { api, computeUploadTimeoutMs } from '../api/client';
+import { api, computeUploadTimeoutMs, type ApiError } from '../api/client';
+import { randomUuid } from '../utils/random-uuid';
+import { sessionJidOf } from '../lib/session-jid';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import {
@@ -355,10 +357,146 @@ type MessageCreateResponse =
       ingestSequence?: number;
       disposition: 'started' | 'queued' | 'steered';
       runId?: string;
+      /**
+       * A resend answered from the first attempt. Its run and queue state
+       * are those of back then; the current ones come over the WebSocket.
+       */
+      deduplicated?: true;
     }
   | { success: false };
 const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
   d.success === true && d.cleared === true;
+
+type SendAttachment = { data: string; mimeType: string };
+
+/**
+ * Each conversation's last unconfirmed send. Resending the same message
+ * reuses its idempotency key, so the server answers from the first attempt.
+ * The key is kept until the server accepts the send (HTTP 200), announces
+ * its message with the key, a history fetch returns the message (the
+ * announcement can be lost while the socket is down), or a send with another
+ * target, text, images or mode takes its place.
+ */
+const unconfirmedSends = new Map<
+  string,
+  {
+    content: string;
+    attachments: SendAttachment[];
+    mode: FollowUpMode;
+    id: string;
+    /** When the first attempt started, by this device's clock. */
+    startedAt: number;
+    /** When an HTTP fetch showed it stored (the WS echo was missed). */
+    seenAt?: number;
+  }
+>();
+// Server timestamps are compared with this device's clock.
+const SEND_CLOCK_SKEW_MS = 5_000;
+/**
+ * A send seen stored over HTTP keeps its key this long: the failure toast
+ * promised that resending the kept input will not duplicate it. After that,
+ * the same text is a new message.
+ */
+const SEEN_SEND_GRACE_MS = 60_000;
+
+function clientMessageIdFor(
+  target: string,
+  content: string,
+  attachments: SendAttachment[] = [],
+  mode: FollowUpMode,
+): string {
+  let previous = unconfirmedSends.get(target);
+  if (
+    previous?.seenAt !== undefined &&
+    Date.now() - previous.seenAt > SEEN_SEND_GRACE_MS
+  ) {
+    unconfirmedSends.delete(target);
+    previous = undefined;
+  }
+  if (
+    previous &&
+    previous.mode === mode &&
+    previous.content === content &&
+    previous.attachments.length === attachments.length &&
+    previous.attachments.every(
+      (att, i) =>
+        att.data === attachments[i].data &&
+        att.mimeType === attachments[i].mimeType,
+    )
+  ) {
+    return previous.id;
+  }
+  const id = randomUuid();
+  unconfirmedSends.set(target, {
+    content,
+    attachments,
+    mode,
+    id,
+    startedAt: Date.now(),
+  });
+  return id;
+}
+
+/** The message sent under `clientMessageId` was stored: never reuse it. */
+function forgetConfirmedSend(clientMessageId: string): void {
+  for (const [target, send] of unconfirmedSends) {
+    if (send.id === clientMessageId) unconfirmedSends.delete(target);
+  }
+}
+
+/** `messages` came over HTTP: an unconfirmed send among them was stored. */
+function forgetSendsSeenIn(target: string, messages: Message[]): void {
+  const send = unconfirmedSends.get(target);
+  if (!send) return;
+  const me = useAuthStore.getState().user?.id;
+  // The server stores the text trimmed.
+  const content = send.content.trim();
+  const earliest = send.startedAt - SEND_CLOCK_SKEW_MS;
+  if (
+    messages.some(
+      (m) =>
+        !m.is_from_me &&
+        (!me || m.sender === me) &&
+        m.content === content &&
+        Date.parse(m.timestamp) >= earliest,
+    )
+  ) {
+    send.seenAt ??= Date.now();
+  }
+}
+
+/** No answer, or a proxy's: the send may have been stored anyway. */
+function sendMayHaveLanded(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  return (
+    status === 0 ||
+    (typeof status === 'number' && [408, 502, 503, 504].includes(status))
+  );
+}
+
+const UNCONFIRMED_SEND_HINT = '网络较慢，消息可能已发送；重发不会重复';
+
+/** The server stored the message, then failed to process it. */
+function storedDespiteError(err: unknown): boolean {
+  return (err as ApiError | null)?.body?.stored === true;
+}
+
+/**
+ * A stored send is settled, and a 409 means the id is spent on other
+ * content: either way the next send to this target needs a fresh id.
+ */
+function settleFailedSend(target: string, err: unknown): void {
+  if (
+    storedDespiteError(err) ||
+    (err as { status?: unknown } | null)?.status === 409
+  ) {
+    unconfirmedSends.delete(target);
+  }
+}
+
+const showStoredButFailed = () =>
+  showToast('消息已发送', '但处理可能失败，请稍后查看回复');
+const showAlreadySent = () => showToast('这条消息已经发送过');
 
 export interface StreamingState {
   turnId?: string;
@@ -3467,6 +3605,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 : { limit: '50' },
           )}`,
         );
+        forgetSendsSeenIn(jid, data.messages);
         // Messages come in DESC order from API, reverse to chronological for display
         const sorted = [...data.messages].reverse();
         set((s) => {
@@ -3528,6 +3667,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[] }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(jid, data.messages);
 
       // Re-check clearing lock after async fetch — clearHistory may have started mid-request
       if (get().clearing[jid]) return;
@@ -3656,7 +3796,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         content: string;
         attachments?: Array<{ type: 'image'; data: string; mimeType: string }>;
         followUpBehavior: FollowUpMode;
-      } = { chatJid: jid, content, followUpBehavior };
+        clientMessageId: string;
+      } = {
+        chatJid: jid,
+        content,
+        followUpBehavior,
+        clientMessageId: clientMessageIdFor(
+          jid,
+          content,
+          attachments,
+          followUpBehavior,
+        ),
+      };
       if (attachments && attachments.length > 0) {
         body.attachments = attachments.map((att) => ({
           type: 'image',
@@ -3669,6 +3820,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body,
         attachmentTimeoutMs(body.attachments),
       );
+      unconfirmedSends.delete(jid);
       if (!data.success) {
         // Server returned non-success payload — surface as a send failure so caller can retain input.
         const msg = '服务器返回失败，请重试';
@@ -3679,6 +3831,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // /clear was intercepted server-side: skip local user message merge.
       // The context_reset divider arrives via WS new_message and triggers state cleanup.
       if (isClearedResponse(data)) return true;
+      if (data.deduplicated) {
+        showAlreadySent();
+        // The first attempt's message: show it if its announcement was
+        // missed, and take its queue state from the server.
+        if (!get().messages[jid]?.some((m) => m.id === data.messageId)) {
+          const authState = useAuthStore.getState();
+          const replayed: Message = {
+            id: data.messageId,
+            chat_jid: jid,
+            sender: authState.user?.id || 'web-user',
+            sender_name:
+              authState.user?.display_name || authState.user?.username || 'Web',
+            content,
+            timestamp: data.timestamp,
+            ingest_sequence: data.ingestSequence,
+            is_from_me: false,
+            attachments: body.attachments
+              ? JSON.stringify(body.attachments)
+              : undefined,
+          };
+          set((s) => ({
+            messages: {
+              ...s.messages,
+              [jid]: mergeMessagesChronologically(s.messages[jid] || [], [
+                replayed,
+              ]),
+            },
+          }));
+        }
+        void get().loadFollowUps(jid);
+        return true;
+      }
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(jid, data.runId);
       }
@@ -3747,9 +3931,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       // 弱网/断网/后端 500 等场景：记录错误并给用户可见的 toast，
       // 返回 false 让调用方（MessageInput）保留输入不清空。
+      settleFailedSend(jid, err);
+      if (storedDespiteError(err)) {
+        showStoredButFailed();
+        return true;
+      }
       const message = extractErrorMessage(err);
       set({ error: message });
-      showToast('发送失败', '消息未发送，输入已保留，请检查网络后重试');
+      showToast(
+        '发送失败',
+        sendMayHaveLanded(err)
+          ? `${UNCONFIRMED_SEND_HINT}，输入已保留`
+          : '消息未发送，输入已保留，请检查网络后重试',
+      );
       return false;
     }
   },
@@ -5074,7 +5268,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         event.taskSummary,
       );
 
-      // Toast + 浏览器通知（仅限后台任务）
+      set((s) => {
+        const current = s.streaming[chatJid];
+        if (!current || current.interrupted) return s;
+        const prev = resolveStreamingPrev(current, event);
+        const next = { ...prev };
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
+        return {
+          streaming: { ...s.streaming, [chatJid]: next },
+        };
+      });
+
+      // Toast + 浏览器通知（仅限后台任务）。放在 set() 之后，状态更新不依赖
+      // 通知能否发出（notifyIfHidden 自己也会吞掉 Android 的构造异常）。
       // stream-processor 为前台 Task 合成的 task_notification 不带 isBackground 标记，
       // 仅 SDK 原生的后台完成事件携带 isBackground: true。
       if (
@@ -5093,23 +5305,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         notifyIfHidden(`HappyClaw: ${desc} ${status}`, event.taskSummary);
       }
-
-      set((s) => {
-        const current = s.streaming[chatJid];
-        if (!current || current.interrupted) return s;
-        const prev = resolveStreamingPrev(current, event);
-        const next = { ...prev };
-        applyStreamEvent(
-          event,
-          prev,
-          next,
-          MAX_STREAMING_TEXT,
-          runStartedAtMs(s.activeRuns, runtimeJid),
-        );
-        return {
-          streaming: { ...s.streaming, [chatJid]: next },
-        };
-      });
 
       // 不落入主对话 streaming
       return;
@@ -5248,6 +5443,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 通过 WebSocket new_message 事件立即添加消息（避免轮询延迟导致消息"丢失"）
   handleWsNewMessage: (chatJid, wsMsg, agentId?) => {
     if (!wsMsg || !wsMsg.id) return;
+    if (typeof wsMsg.client_message_id === 'string') {
+      forgetConfirmedSend(wsMsg.client_message_id);
+    }
     // Skip while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[chatJid]) return;
 
@@ -6041,6 +6239,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(sessionJidOf(jid, agentId), data.messages);
       const sorted = [...data.messages].reverse();
       let snapshotMessages = sorted;
       set((s) => {
@@ -6118,6 +6317,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments && attachments.length > 0
         ? attachments.map((att) => ({ type: 'image' as const, ...att }))
         : undefined;
+    const runtimeJid = sessionJidOf(jid, agentId);
     try {
       // Conversation sends use the acknowledged HTTP path, just like the
       // main chat. WebSocket remains the push channel for the stored message
@@ -6131,18 +6331,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
           content,
           attachments: normalizedAttachments,
           followUpBehavior,
+          clientMessageId: clientMessageIdFor(
+            runtimeJid,
+            content,
+            attachments,
+            followUpBehavior,
+          ),
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
+      unconfirmedSends.delete(runtimeJid);
       // /clear and /fresh were handled by the server: no message was stored
       // and no reply is coming, so the session must not wait for one.
       if (isClearedResponse(data)) return true;
       if (!data.success) throw new Error('服务器返回失败');
+      // A resend answered from the first attempt: that run may be long over.
+      if (data.deduplicated) {
+        showAlreadySent();
+        // Its announcement was missed: read the session again. Its run and
+        // waiting state are not this old answer's to set.
+        if (
+          !get().agentMessages[agentId]?.some((m) => m.id === data.messageId)
+        ) {
+          void get().refreshAgentMessages(jid, agentId);
+        }
+        return true;
+      }
       if (data.disposition === 'started' && data.runId) {
-        get().handleRunStarted(`${jid}#agent:${agentId}`, data.runId);
+        get().handleRunStarted(runtimeJid, data.runId);
       }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : '服务器未确认消息';
+      settleFailedSend(runtimeJid, err);
+      if (storedDespiteError(err)) {
+        showStoredButFailed();
+        return true;
+      }
+      const detail = sendMayHaveLanded(err)
+        ? UNCONFIRMED_SEND_HINT
+        : err instanceof Error
+          ? err.message
+          : '服务器未确认消息';
       showToast('发送失败', `${detail}，输入已保留，请稍后重试`);
       return false;
     }
@@ -6171,6 +6399,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[] }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(sessionJidOf(jid, agentId), data.messages);
 
       if (data.messages.length > 0) {
         let snapshotMessages: Message[] | null = null;

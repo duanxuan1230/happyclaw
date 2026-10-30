@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type TouchEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ChevronsUpDown, Menu, Search, SquarePen } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth';
@@ -40,6 +40,71 @@ export function NavDrawerButton() {
   );
 }
 
+/** How far left (px) a released drag must have gone to close the drawer. */
+const SWIPE_CLOSE_DISTANCE = 72;
+
+/**
+ * Drag the drawer left to close it (cindy's drawers follow the finger and
+ * close past a threshold). The panel moves with the finger; a short or
+ * vertical drag snaps back, and a vertical one scrolls the drawer.
+ */
+function useSwipeToClose(onClose: () => void) {
+  const drag = useRef<{
+    x: number;
+    y: number;
+    dx: number;
+    horizontal: boolean | null;
+  } | null>(null);
+  const reset = (element: HTMLElement) => {
+    element.style.transform = '';
+    element.style.transition = '';
+  };
+  return {
+    onTouchStart(event: TouchEvent<HTMLElement>) {
+      const touch = event.touches[0];
+      drag.current = {
+        x: touch.clientX,
+        y: touch.clientY,
+        dx: 0,
+        horizontal: null,
+      };
+    },
+    onTouchMove(event: TouchEvent<HTMLElement>) {
+      const state = drag.current;
+      if (!state) return;
+      const touch = event.touches[0];
+      const dx = touch.clientX - state.x;
+      const dy = touch.clientY - state.y;
+      if (state.horizontal === null) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        state.horizontal = Math.abs(dx) > Math.abs(dy) * 1.2;
+      }
+      if (!state.horizontal) return;
+      state.dx = Math.min(0, dx);
+      event.currentTarget.style.transition = 'none';
+      event.currentTarget.style.transform = `translateX(${state.dx}px)`;
+    },
+    onTouchEnd(event: TouchEvent<HTMLElement>) {
+      const state = drag.current;
+      drag.current = null;
+      if (!state?.horizontal) return;
+      const element = event.currentTarget;
+      if (state.dx <= -SWIPE_CLOSE_DISTANCE) {
+        // The exit animation slides on from where the finger left it.
+        onClose();
+        return;
+      }
+      element.style.transition = 'transform 200ms cubic-bezier(0.4, 0, 0.2, 1)';
+      element.style.transform = '';
+      window.setTimeout(() => reset(element), 200);
+    },
+    onTouchCancel(event: TouchEvent<HTMLElement>) {
+      drag.current = null;
+      reset(event.currentTarget);
+    },
+  };
+}
+
 const drawerRowClass =
   'flex min-h-12 w-full cursor-pointer items-center gap-3 rounded-xl px-3 text-left text-base font-medium text-foreground outline-none transition-colors active:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:opacity-60 data-[active=true]:bg-surface-selected [&_svg]:size-5 [&_svg]:shrink-0 [&_svg]:text-muted-foreground';
 
@@ -65,6 +130,7 @@ export function NavDrawer() {
   const userInitial = (user?.display_name ||
     user?.username ||
     '?')[0].toUpperCase();
+  const swipe = useSwipeToClose(() => setOpen(false));
 
   // Any navigation, from here or elsewhere, leaves the drawer closed.
   useEffect(() => {
@@ -78,13 +144,18 @@ export function NavDrawer() {
           side="left"
           showCloseButton={false}
           data-testid="nav-drawer"
+          {...swipe}
           className="gap-0 overflow-y-auto overscroll-contain rounded-r-xl border-r-0 bg-surface-raised pt-[calc(env(safe-area-inset-top,0px)+1rem)] pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] pl-[env(safe-area-inset-left,0px)] data-[side=left]:w-[min(320px,82vw)] data-[side=left]:sm:max-w-none motion-reduce:animate-none"
         >
           <SheetTitle className="sr-only">导航</SheetTitle>
           <SheetDescription className="sr-only">
             搜索、新对话和应用页面
           </SheetDescription>
-          <DropdownMenu>
+          {/* Not modal: the drawer already blocks the page. A modal menu
+              closing with the drawer (a choice that navigates) can leave
+              Radix's body `pointer-events: none` behind, a dead page, when
+              the drawer finishes unmounting first. */}
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"

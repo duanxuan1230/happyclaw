@@ -230,7 +230,7 @@ export default function PlanFormDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex max-h-[90vh] flex-col gap-0 p-0 sm:max-w-2xl"
+        className="flex max-h-[90dvh] flex-col gap-0 p-0 sm:max-w-2xl"
         aria-describedby={undefined}
       >
         <DialogHeader className="border-b border-surface-border px-4 py-3.5 pr-12">
@@ -242,6 +242,7 @@ export default function PlanFormDialog({
           <Section title="基本信息">
             <Field id="plan-form-id" label="套餐 ID">
               <Input
+                variant="code"
                 id="plan-form-id"
                 value={form.id}
                 onChange={(e) => set('id', e.target.value)}

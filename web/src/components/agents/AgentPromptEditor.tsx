@@ -232,7 +232,7 @@ export function AgentPromptEditor({
       </SettingsGroup>
 
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="max-h-[85vh] sm:max-w-3xl">
+        <DialogContent className="max-h-[85dvh] sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>四段自定义提示词预览</DialogTitle>
             <DialogDescription>
@@ -241,7 +241,7 @@ export function AgentPromptEditor({
                 : '以下内容会替换 Claude Code 默认提示词。预览不包含 HappyClaw 强制注入的安全、运行时和渠道规则。'}
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto rounded-lg bg-muted/50 p-4 font-mono text-caption leading-6 whitespace-pre-wrap text-foreground">
+          <pre className="max-h-[60dvh] overflow-auto rounded-lg bg-muted/50 p-4 font-mono text-caption leading-6 whitespace-pre-wrap text-foreground">
             {composed || '尚未填写任何提示词。'}
           </pre>
         </DialogContent>

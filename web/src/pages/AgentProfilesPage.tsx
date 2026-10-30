@@ -3,6 +3,7 @@ import {
   useBeforeUnload,
   useBlocker,
   useLocation,
+  useNavigate,
   useSearchParams,
   type BlockerFunction,
 } from 'react-router-dom';
@@ -73,6 +74,12 @@ import {
   ImportAgentDialog,
 } from '../components/agents/ImportAgentDialog';
 import { EmojiAvatar } from '../components/common/EmojiAvatar';
+import { ListGroup, ListRow } from '../components/common/ListRow';
+import {
+  PhonePageHeader,
+  PhoneBarButton,
+} from '../components/layout/PhonePageHeader';
+import { useIsPhone } from '../components/layout/phone';
 import { EmojiPicker } from '../components/common/EmojiPicker';
 import { ColorPicker } from '../components/common/ColorPicker';
 import { ErrorBoundary } from '../components/common/ErrorBoundary';
@@ -176,14 +183,19 @@ function strippedHostNotice(stripped: AgentHostGrant[]): string | null {
   return `只有管理员能使用${parts.join('和')}，新智能体已去掉这些设置`;
 }
 
+/** History state of a phone's step from the Agent list to one Agent. */
+const FROM_AGENT_LIST = { agentList: true };
+
 export function AgentProfilesPage() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const isPhone = useIsPhone();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigationGuardRef = useRef(createUnsavedNavigationGuard());
   const setAllowedSearchParams = useCallback(
     (
       next: URLSearchParams | Record<string, string>,
-      options: { replace?: boolean } = {},
+      options: { replace?: boolean; state?: unknown } = {},
     ) => {
       const normalized =
         next instanceof URLSearchParams ? next : new URLSearchParams(next);
@@ -295,6 +307,11 @@ export function AgentProfilesPage() {
       }
       return;
     }
+    if (isPhone && !requestedProfileId) {
+      // A phone lists the Agents until one is opened (`?agent=`).
+      if (selectedId) setSelectedId(null);
+      return;
+    }
     if (
       selectedId &&
       customProfiles.some((profile) => profile.id === selectedId)
@@ -315,7 +332,13 @@ export function AgentProfilesPage() {
     if (requestedProfileId) {
       setAllowedSearchParams({ agent: fallbackId }, { replace: true });
     }
-  }, [customProfiles, requestedProfileId, selectedId, setAllowedSearchParams]);
+  }, [
+    customProfiles,
+    isPhone,
+    requestedProfileId,
+    selectedId,
+    setAllowedSearchParams,
+  ]);
 
   const selected = useMemo(
     () => customProfiles.find((profile) => profile.id === selectedId) ?? null,
@@ -510,7 +533,26 @@ export function AgentProfilesPage() {
 
   const selectProfile = (profileId: string) => {
     setSelectedId(profileId);
-    setAllowedSearchParams({ agent: profileId }, { replace: true });
+    // A phone's list → detail is a step the system back returns from.
+    setAllowedSearchParams(
+      { agent: profileId },
+      isPhone && !requestedProfileId
+        ? { state: FROM_AGENT_LIST }
+        : { replace: true },
+    );
+  };
+
+  const openedFromList =
+    (location.state as typeof FROM_AGENT_LIST | null)?.agentList === true;
+  /** Phone: from one Agent back to the list, popping the step it pushed. */
+  const leaveDetail = () => {
+    if (openedFromList) navigate(-1);
+    else setAllowedSearchParams({}, { replace: true });
+  };
+  const backToList = () => {
+    // Popping asks through the unsaved-changes blocker instead.
+    if (!openedFromList && !confirmDiscardUnsavedChanges()) return;
+    leaveDetail();
   };
 
   const handleSelectProfile = (profileId: string) => {
@@ -710,6 +752,11 @@ export function AgentProfilesPage() {
   };
 
   const selectAfterDelete = (deletedId: string) => {
+    if (isPhone) {
+      setSelectedId(null);
+      leaveDetail();
+      return;
+    }
     const fallback = customProfiles.find((profile) => profile.id !== deletedId);
     setSelectedId(fallback?.id ?? null);
     setAllowedSearchParams(fallback ? { agent: fallback.id } : {}, {
@@ -774,6 +821,9 @@ export function AgentProfilesPage() {
     }
   };
 
+  const saveDisabled =
+    !dirty || saving || runtimeCleanupRepairing || !name.trim() || !!formError;
+
   const editorAvatar = resolveAgentAvatar(
     { url: avatarUrl, emoji: avatarEmoji, color: avatarColor },
     mainAppearance,
@@ -782,9 +832,108 @@ export function AgentProfilesPage() {
     governance?.workspaces,
   );
 
+  const phoneList = isPhone && !requestedProfileId && (
+    <PageContainer className="space-y-3 pt-1">
+      <PhonePageHeader
+        title="智能体"
+        action={
+          <PhoneBarButton
+            label="新建智能体"
+            icon={<Plus className="size-5" />}
+            onClick={handleOpenCreate}
+          />
+        }
+        menu={{
+          title: '智能体',
+          groups: [
+            [
+              { label: '导入智能体', icon: FileUp, onSelect: handleOpenImport },
+              {
+                label: '刷新列表',
+                icon: RefreshCw,
+                onSelect: handleRefreshProfiles,
+                disabled: loading,
+              },
+            ],
+          ],
+        }}
+      />
+      {customProfiles.length > 0 && (
+        <SearchInput
+          value={listQuery}
+          onChange={setListQuery}
+          placeholder="搜索智能体"
+          debounce={0}
+        />
+      )}
+      {loading && customProfiles.length === 0 ? (
+        <div className="flex justify-center py-10">
+          <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        </div>
+      ) : profilesError ? (
+        <div className="space-y-2 py-6 text-center">
+          <div className="text-caption text-error">{profilesError}</div>
+          <Button variant="outline" size="sm" onClick={handleRefreshProfiles}>
+            重试
+          </Button>
+        </div>
+      ) : customProfiles.length === 0 ? (
+        <EmptyState
+          icon={Bot}
+          title="还没有自定义智能体"
+          description="创建一个专门处理特定任务的智能体，或导入其他实例导出的智能体。"
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button onClick={handleOpenCreate}>
+                <Plus />
+                新建智能体
+              </Button>
+              <Button variant="outline" onClick={handleOpenImport}>
+                <FileUp />
+                导入
+              </Button>
+            </div>
+          }
+        />
+      ) : visibleProfiles.length === 0 ? (
+        <p className="py-6 text-center text-caption text-muted-foreground">
+          没有匹配的智能体
+        </p>
+      ) : (
+        <ListGroup aria-label="自定义智能体列表">
+          {visibleProfiles.map((profile) => (
+            <ListRow
+              key={profile.id}
+              media={
+                <EmojiAvatar
+                  {...resolveAgentAvatar(
+                    {
+                      url: profile.avatar_url,
+                      emoji: profile.avatar_emoji,
+                      color: profile.avatar_color,
+                    },
+                    mainAppearance,
+                  )}
+                  fallbackChar={profile.name || 'A'}
+                />
+              }
+              title={profile.name}
+              description={
+                profile.identity_prompt.replace(/\s+/g, ' ').trim() ||
+                '尚未设置身份描述'
+              }
+              onClick={() => handleSelectProfile(profile.id)}
+            />
+          ))}
+        </ListGroup>
+      )}
+    </PageContainer>
+  );
+
   return (
     <div className="min-h-full bg-background lg:flex">
-      <aside className="border-b border-surface-border lg:sticky lg:top-0 lg:flex lg:h-(--app-canvas-h) lg:w-64 lg:flex-none lg:flex-col lg:border-r lg:border-b-0">
+      {phoneList}
+      <aside className="border-b border-surface-border phone:hidden lg:sticky lg:top-0 lg:flex lg:h-(--app-canvas-h) lg:w-64 lg:flex-none lg:flex-col lg:border-r lg:border-b-0">
         <div className="flex h-12 shrink-0 items-center gap-1 pr-2 pl-4 lg:border-b lg:border-surface-border">
           <h2 className="min-w-0 flex-1 truncate text-title-sm text-foreground">
             智能体
@@ -882,7 +1031,63 @@ export function AgentProfilesPage() {
         </nav>
       </aside>
 
-      <main className="min-w-0 flex-1">
+      <main className={cn('min-w-0 flex-1', phoneList && 'hidden')}>
+        {isPhone && selected && capabilities && currentRuntimePolicy && (
+          <PhonePageHeader
+            title={
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate">{name.trim() || selected.name}</span>
+                {dirty && (
+                  <Badge variant="outline" dot="warning">
+                    未保存
+                  </Badge>
+                )}
+              </span>
+            }
+            onBack={backToList}
+            action={
+              <Button
+                size="sm"
+                onClick={() => void handleSave()}
+                disabled={saveDisabled}
+                className="mr-1"
+              >
+                {saving ? <Loader2 className="animate-spin" /> : <Save />}
+                保存
+              </Button>
+            }
+            menu={{
+              title: name.trim() || selected.name,
+              groups: [
+                [
+                  {
+                    label: '复制智能体',
+                    icon: Copy,
+                    onSelect: () => void handleDuplicate(),
+                    disabled: duplicating,
+                  },
+                  {
+                    label: '导出智能体',
+                    icon: Download,
+                    onSelect: () => void handleExport(),
+                  },
+                ],
+                [
+                  {
+                    label: '删除智能体',
+                    icon: Trash2,
+                    destructive: true,
+                    onSelect: () => void handleDelete(),
+                    disabled: deleting,
+                  },
+                ],
+              ],
+            }}
+          />
+        )}
+        {isPhone && !selected && requestedProfileId && (
+          <PhonePageHeader title="智能体" onBack={backToList} />
+        )}
         {!selected ? (
           <PageContainer className="max-w-4xl">
             <EmptyState
@@ -918,7 +1123,7 @@ export function AgentProfilesPage() {
           </PageContainer>
         ) : !capabilities || !currentRuntimePolicy ? null : (
           <>
-            <header className="sticky top-0 z-10 h-12 border-b border-surface-border bg-background">
+            <header className="sticky top-0 z-10 h-12 border-b border-surface-border bg-background phone:hidden">
               <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2.5 px-4 sm:px-6 lg:px-8">
                 <EmojiAvatar
                   {...editorAvatar}
@@ -976,13 +1181,7 @@ export function AgentProfilesPage() {
                   <Button
                     size="sm"
                     onClick={() => void handleSave()}
-                    disabled={
-                      !dirty ||
-                      saving ||
-                      runtimeCleanupRepairing ||
-                      !name.trim() ||
-                      !!formError
-                    }
+                    disabled={saveDisabled}
                     title={formError ?? undefined}
                     className="ml-1 pointer-coarse:min-h-10"
                   >

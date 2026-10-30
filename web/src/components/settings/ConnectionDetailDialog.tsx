@@ -580,6 +580,7 @@ function ConnectionSettings({
               }
             >
               <Input
+                variant="code"
                 id="connection-base-url"
                 type="url"
                 inputMode="url"
@@ -608,6 +609,7 @@ function ConnectionSettings({
             }
           >
             <Input
+              variant="code"
               id="connection-secret"
               type="password"
               value={secret}

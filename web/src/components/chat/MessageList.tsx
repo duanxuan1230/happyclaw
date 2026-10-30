@@ -23,6 +23,8 @@ import {
 } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useFollowGlide } from '../../hooks/useFollowGlide';
+import { measureVisualViewport } from '../../hooks/useVisualViewport';
+import { useIsPhone } from '../layout/phone';
 import { resolveSystemMessage } from '../../lib/system-message-registry';
 import {
   getPresentedMessageContent,
@@ -132,9 +134,9 @@ async function copyErrorText(text: string) {
   }
 }
 
-/** The floating jump buttons: 36px, round and translucent over the chat. */
+/** The floating jump buttons: 36px (44 on a phone), round and translucent over the chat. */
 const JUMP_BUTTON_CLASS =
-  'relative flex size-9 cursor-pointer items-center justify-center rounded-full bg-surface-raised/80 text-muted-foreground shadow-menu ring-1 ring-surface-border backdrop-blur-sm transition-colors hover:text-foreground';
+  'relative flex size-9 phone:size-11 cursor-pointer items-center justify-center rounded-full bg-surface-raised/80 text-muted-foreground shadow-menu ring-1 ring-surface-border backdrop-blur-sm transition-colors hover:text-foreground';
 
 // Memoized: ChatView re-renders for dialogs, panels and run status; the
 // transcript and composer only need to when their own props change.
@@ -1013,6 +1015,78 @@ export const MessageList = memo(function MessageList({
     [followGlide],
   );
 
+  const isPhone = useIsPhone();
+  const isPhoneRef = useRef(isPhone);
+  isPhoneRef.current = isPhone;
+  /**
+   * The bottom of what the reader sees moved up by `px` (a keyboard came up
+   * over it): the lines that were there stay in sight, the top gives way.
+   * Not for a reader at the bottom, who follows the end anyway.
+   */
+  const keepReadingAbove = useCallback((px: number) => {
+    const parent = parentRef.current;
+    if (!parent || scrollStateRef.current.autoScroll) return;
+    parent.scrollTop += px;
+  }, []);
+  // iOS does not resize the page for the keyboard: it covers it, and the dock
+  // and the list's bottom room grow by --keyboard-inset. Read here without a
+  // React render; a frame later, once that room is laid out.
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!isPhone || !viewport) return;
+    const readInset = () =>
+      measureVisualViewport(window.innerHeight, viewport).keyboardInset;
+    let inset = readInset();
+    let frame = 0;
+    const update = () => {
+      const next = readInset();
+      const grew = next - inset;
+      inset = next;
+      if (grew <= 0) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => keepReadingAbove(grew));
+    };
+    viewport.addEventListener('resize', update);
+    viewport.addEventListener('scroll', update);
+    return () => {
+      viewport.removeEventListener('resize', update);
+      viewport.removeEventListener('scroll', update);
+      cancelAnimationFrame(frame);
+    };
+  }, [isPhone, keepReadingAbove]);
+  // Scrolling the conversation by hand puts the keyboard away (cindy's
+  // keyboardDismissMode): the reader is reading, not typing. A tap does not.
+  useEffect(() => {
+    const parent = parentRef.current;
+    if (!isPhone || !parent) return;
+    let startY: number | null = null;
+    const onTouchStart = (event: TouchEvent) => {
+      startY = event.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY;
+      if (startY === null || y === undefined || Math.abs(y - startY) < 10) {
+        return;
+      }
+      startY = null;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        (active.isContentEditable ||
+          active.tagName === 'TEXTAREA' ||
+          active.tagName === 'INPUT')
+      ) {
+        active.blur();
+      }
+    };
+    parent.addEventListener('touchstart', onTouchStart, { passive: true });
+    parent.addEventListener('touchmove', onTouchMove, { passive: true });
+    return () => {
+      parent.removeEventListener('touchstart', onTouchStart);
+      parent.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [isPhone]);
+
   // Keep a reader who is pinned to the bottom there while rows below grow
   // after their first measurement (images, Mermaid, late code highlighting),
   // while a row shrinks under a correction, and while the viewport shrinks
@@ -1030,6 +1104,7 @@ export const MessageList = memo(function MessageList({
       // Only growth glides: a shrinking viewport (keyboard, a taller
       // composer) moves the content up with it at once.
       const grew = height > lastHeight && viewport >= lastViewport;
+      const shrunkBy = lastViewport - viewport;
       lastHeight = height;
       lastViewport = viewport;
       syncEdges();
@@ -1038,6 +1113,10 @@ export const MessageList = memo(function MessageList({
         !scrollStateRef.current.autoScroll &&
         Date.now() > settleUntilRef.current
       ) {
+        // A reader up in the history keeps what they were reading: an
+        // Android keyboard shrinks the list from below, over the lines
+        // nearest the composer.
+        if (isPhoneRef.current && shrunkBy > 0) keepReadingAbove(shrunkBy);
         return;
       }
       if (Date.now() < smoothScrollUntilRef.current) {
@@ -1050,10 +1129,13 @@ export const MessageList = memo(function MessageList({
       };
       followBottom(grew);
     });
-    observer.observe(content);
+    // Border box: the content's bottom padding is the composer's height
+    // (--composer-dock-height), which changes on its own, e.g. when the
+    // lazily loaded composer replaces its placeholder.
+    observer.observe(content, { box: 'border-box' });
     observer.observe(parent);
     return () => observer.disconnect();
-  }, [followBottom, scheduleSmoothCatchUp, syncEdges]);
+  }, [followBottom, keepReadingAbove, scheduleSmoothCatchUp, syncEdges]);
 
   // Place the swapped-in reply: a pinned reader lands on the bottom at once
   // (no animated catch-up); otherwise the row holds the block's place on

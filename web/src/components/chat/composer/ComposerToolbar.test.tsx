@@ -162,7 +162,7 @@ describe('on a phone', () => {
     ).toContain('shrink-0');
   });
 
-  test('the resting pill keeps only + and send, around the text', () => {
+  test('the resting pill keeps +, the model chip and send, around the text', () => {
     render({
       phone: true,
       collapsed: true,
@@ -181,11 +181,14 @@ describe('on a phone', () => {
         (button) => button.getAttribute('aria-label'),
       ),
     ).toEqual(['添加文件']);
-    // The model and the ring stay mounted, out of sight.
-    expect(
-      container!.querySelector('[data-composer-model-slot]')!.classList,
-    ).toContain('hidden');
-    expect(container!.querySelector('[data-testid="model"]')).not.toBeNull();
+    // The model stays in reach (its compact chip, right after +); the ring
+    // stays mounted, out of sight.
+    const slot = container!.querySelector('[data-composer-model-slot]')!;
+    expect(slot.classList).not.toContain('hidden');
+    expect(slot.previousElementSibling?.getAttribute('aria-label')).toBe(
+      '添加文件',
+    );
+    expect(slot.querySelector('[data-testid="model"]')).not.toBeNull();
     expect(
       container!.querySelector('[data-composer-context]')!.classList,
     ).toContain('hidden');

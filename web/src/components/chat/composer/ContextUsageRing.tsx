@@ -44,6 +44,15 @@ export function contextUsageFigures(
   };
 }
 
+/** Warning from 80%, error from 95%. */
+function usageTone(percent: number): string {
+  return percent >= 95
+    ? 'text-error'
+    : percent >= 80
+      ? 'text-warning'
+      : 'text-muted-foreground';
+}
+
 const SIZE = 16;
 const STROKE = 2;
 const RADIUS = (SIZE - STROKE) / 2;
@@ -61,12 +70,7 @@ export function ContextUsageRing({
   const figures = contextUsageFigures(usage);
   if (!figures) return null;
   const { percent, label } = figures;
-  const tone =
-    percent >= 95
-      ? 'text-error'
-      : percent >= 80
-        ? 'text-warning'
-        : 'text-muted-foreground';
+  const tone = usageTone(percent);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -129,18 +133,61 @@ export function ConversationContextUsage({
   jid: string;
   agentId: string | null;
 }) {
-  const usage = useChatStore(
-    (s) => s.contextUsage[contextUsageKey(jid, agentId)],
+  return <ContextUsageRing usage={useConversationContextUsage(jid, agentId)} />;
+}
+
+/**
+ * The same figures as one line of text, for a phone (its composer row has no
+ * room for the ring, and a touch screen shows no tooltip).
+ */
+export function ConversationContextUsageLine({
+  jid,
+  agentId,
+}: {
+  jid: string;
+  agentId: string | null;
+}) {
+  // Shown each time the model sheet opens: what the store already has
+  // (turn pushes keep it current) is not fetched again.
+  const figures = contextUsageFigures(
+    useConversationContextUsage(jid, agentId, { onlyIfMissing: true }),
   );
+  if (!figures) return null;
+  return (
+    <p
+      data-context-usage-line
+      className={cn(
+        'text-micro leading-4 tabular-nums',
+        usageTone(figures.percent),
+      )}
+    >
+      {figures.label}
+    </p>
+  );
+}
+
+/** One conversation's usage, loaded when shown and after a reconnect. */
+function useConversationContextUsage(
+  jid: string,
+  agentId: string | null,
+  { onlyIfMissing = false }: { onlyIfMissing?: boolean } = {},
+) {
+  const key = contextUsageKey(jid, agentId);
+  const usage = useChatStore((s) => s.contextUsage[key]);
   const load = useChatStore((s) => s.loadContextUsage);
   useEffect(() => {
-    void load(jid, agentId);
+    if (
+      !onlyIfMissing ||
+      useChatStore.getState().contextUsage[key] === undefined
+    ) {
+      void load(jid, agentId);
+    }
     const off = wsManager.on('connected', (data: { reconnect?: boolean }) => {
       if (data?.reconnect) void load(jid, agentId);
     });
     return () => {
       off();
     };
-  }, [jid, agentId, load]);
-  return <ContextUsageRing usage={usage} />;
+  }, [jid, agentId, key, load, onlyIfMissing]);
+  return usage;
 }

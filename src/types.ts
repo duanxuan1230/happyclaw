@@ -467,6 +467,11 @@ export interface NewMessage {
   delivery_run_id?: string | null;
   delivery_priority?: number | null;
   delivery_updated_at?: string | null;
+  /**
+   * The idempotency key a Web client sent this message with, so it can tell
+   * that a send it saw fail was stored. Announced only; never persisted.
+   */
+  client_message_id?: string;
 }
 
 export type FollowUpMode = 'queue' | 'steer';
@@ -1001,6 +1006,7 @@ export type WsMessageOut =
       usage: BillingAccessResult;
     }
   | { type: 'ws_error'; error: string; chatJid?: string }
+  | { type: 'pong' }
   | {
       type: 'stream_snapshot';
       chatJid: string;
@@ -1093,7 +1099,9 @@ export type WsMessageIn =
   | { type: 'terminal_start'; chatJid: string; cols: number; rows: number }
   | { type: 'terminal_input'; chatJid: string; data: string }
   | { type: 'terminal_resize'; chatJid: string; cols: number; rows: number }
-  | { type: 'terminal_stop'; chatJid: string };
+  | { type: 'terminal_stop'; chatJid: string }
+  /** A page checking that its socket still reaches the server. */
+  | { type: 'ping' };
 
 // --- Streaming event types (canonical source: shared/stream-event.ts) ---
 export type { StreamEventType } from './stream-event.types.js';

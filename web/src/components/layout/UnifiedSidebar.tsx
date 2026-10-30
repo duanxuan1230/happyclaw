@@ -55,7 +55,6 @@ import { SidebarResizeHandle } from './sidebar/SidebarResizeHandle';
 import type { GroupEntry } from '../../utils/group-utils';
 
 const BugReportDialog = lazyBugReportDialog.Component;
-const CreateContainerDialog = lazyCreateContainerDialog.Component;
 
 /**
  * Desktop app sidebar: brand/account menu, primary actions, page navigation
@@ -77,12 +76,10 @@ export function UnifiedSidebar() {
   const expandedWorkspaces = useShellStore((s) => s.expandedWorkspaces);
   const setWorkspaceExpanded = useShellStore((s) => s.setWorkspaceExpanded);
   const revealWorkspace = useShellStore((s) => s.revealWorkspace);
-  const createOpen = useShellStore((s) => s.createWorkspaceOpen);
-  const createAgentId = useShellStore((s) => s.createWorkspaceAgentId);
+  // The dialog itself lives in AppLayout, so phones and the palette reach it.
   const setCreateOpen = useShellStore((s) => s.setCreateWorkspaceOpen);
   const requestComposerFocus = useShellStore((s) => s.requestComposerFocus);
   const setPaletteOpen = useShellStore((s) => s.setPaletteOpen);
-  const createMounted = useOpenedOnce(createOpen);
   useEffect(
     () =>
       preloadWhenIdle(
@@ -390,18 +387,6 @@ export function UnifiedSidebar() {
         <BugReportDialog
           open={showBugReport}
           onClose={() => setShowBugReport(false)}
-        />
-      )}
-      {createMounted && (
-        <CreateContainerDialog
-          open={createOpen}
-          defaultAgentProfileId={createAgentId}
-          onClose={() => setCreateOpen(false)}
-          onCreated={(jid, folder) => {
-            selectGroup(jid);
-            revealWorkspace(jid);
-            navigate(`/chat/${folder}`);
-          }}
         />
       )}
       <RenameDialog

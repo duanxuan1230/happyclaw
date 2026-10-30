@@ -1,13 +1,37 @@
 import * as React from 'react';
 import { Dialog as SheetPrimitive } from 'radix-ui';
-import { useComposedRefs } from 'radix-ui/internal';
+import { useComposedRefs, useControllableState } from 'radix-ui/internal';
 
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { useBackDismiss } from '@/hooks/useBackDismiss';
 import { XIcon } from 'lucide-react';
 
-function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />;
+/**
+ * Controlled or not, the root knows whether it is open, so on a phone the
+ * system back gesture closes it first (useBackDismiss).
+ */
+function Sheet({
+  open: openProp,
+  defaultOpen = false,
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Root>) {
+  const [open, setOpen] = useControllableState({
+    prop: openProp,
+    defaultProp: defaultOpen,
+    onChange: onOpenChange,
+    caller: 'Sheet',
+  });
+  useBackDismiss(open, () => setOpen(false));
+  return (
+    <SheetPrimitive.Root
+      data-slot="sheet"
+      open={open}
+      onOpenChange={setOpen}
+      {...props}
+    />
+  );
 }
 
 function SheetTrigger({
@@ -50,15 +74,20 @@ const SHEET_CONTENT_CLASS =
 /**
  * Bottom sheet detents, after cindy's context sheet
  * (apps/mobile/src/session/contextSheetModel.ts): half shows about 56% of
- * the screen (at least 320px), full leaves 64px of the page above it.
+ * the screen (at least 320px), full leaves 64px of the page above it. A
+ * half lower than `minHalf` would be too short for the content, so on such
+ * a screen there is only full.
  */
-export function bottomSheetSnapHeights(screenHeight: number): {
+export function bottomSheetSnapHeights(
+  screenHeight: number,
+  minHalf = 0,
+): {
   half: number;
   full: number;
 } {
   const full = Math.max(320, Math.round(screenHeight - 64));
   const half = Math.min(Math.max(Math.round(screenHeight * 0.56), 320), full);
-  return { half, full };
+  return { half: half < minHalf ? full : half, full };
 }
 
 /** Released below this share of the half detent, the sheet closes. */
@@ -81,6 +110,7 @@ export function settleBottomSheet(
 }
 
 type Snap = 'half' | 'full';
+type Side = 'top' | 'right' | 'bottom' | 'left';
 
 interface DragState {
   pointerId: number;
@@ -92,10 +122,33 @@ interface DragState {
   velocity: number;
 }
 
-function SheetCloseButton() {
+/** Pointer handlers that drag a bottom sheet, shared by handle and header. */
+interface SheetDragHandlers {
+  onPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerCancel: (event: React.PointerEvent<HTMLElement>) => void;
+}
+
+const SheetDragContext = React.createContext<SheetDragHandlers | null>(null);
+
+/** Header taps on these stay taps; dragging starts anywhere else. */
+const NO_DRAG_TARGET =
+  'button, a, input, textarea, select, [contenteditable], [role="button"], [data-no-sheet-drag]';
+
+function SheetCloseButton({ side }: { side: Side }) {
   return (
     <SheetPrimitive.Close data-slot="sheet-close" asChild>
-      <Button variant="ghost" className="absolute top-3 right-3" size="icon-sm">
+      <Button
+        variant="ghost"
+        className={cn(
+          // A 44px target on phones, its icon where the 28px one was.
+          'absolute top-3 right-3 phone:top-1.5 phone:right-1.5 phone:size-11',
+          side !== 'bottom' &&
+            'top-[calc(env(safe-area-inset-top)+0.75rem)] phone:top-[calc(env(safe-area-inset-top)+0.375rem)]',
+        )}
+        size="icon-sm"
+      >
         <XIcon />
         <span className="sr-only">Close</span>
       </Button>
@@ -114,18 +167,30 @@ function BottomSheetContent({
   children,
   showCloseButton,
   detents,
+  snap: snapProp,
+  onSnapChange,
+  minHalf,
   ref,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   showCloseButton: boolean;
   detents: boolean;
+  snap?: Snap;
+  onSnapChange?: (snap: Snap) => void;
+  minHalf?: number;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   // A caller's ref (often present but undefined) must not replace ours.
   const setContentRef = useComposedRefs(ref, contentRef);
   const closeRef = React.useRef<HTMLButtonElement>(null);
   const dragRef = React.useRef<DragState | null>(null);
-  const [snap, setSnap] = React.useState<Snap | null>(detents ? 'half' : null);
+  const [detent, setSnap] = useControllableState<Snap>({
+    prop: snapProp,
+    defaultProp: 'half',
+    onChange: onSnapChange,
+    caller: 'SheetContent',
+  });
+  const snap = detents ? detent : null;
 
   // The snapped height is written here, not through React's style prop, so
   // a drag can move it frame by frame and hand it back on release. It
@@ -134,23 +199,23 @@ function BottomSheetContent({
     const element = contentRef.current;
     if (!element || !snap) return;
     const apply = () => {
-      element.style.height = `${bottomSheetSnapHeights(window.innerHeight)[snap]}px`;
+      element.style.height = `${bottomSheetSnapHeights(window.innerHeight, minHalf)[snap]}px`;
     };
     apply();
     window.addEventListener('resize', apply);
     return () => window.removeEventListener('resize', apply);
-  }, [snap]);
+  }, [snap, minHalf]);
 
   /** The snapped sheet's height for a drag now at `clientY`. */
   const dragHeight = (drag: DragState, clientY: number) =>
     Math.min(
       Math.max(drag.startHeight - (clientY - drag.startY), 0),
-      bottomSheetSnapHeights(window.innerHeight).full,
+      bottomSheetSnapHeights(window.innerHeight, minHalf).full,
     );
 
   const close = () => closeRef.current?.click();
 
-  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  const onPointerDown = (event: React.PointerEvent<HTMLElement>) => {
     const element = contentRef.current;
     if (!element || (event.pointerType === 'mouse' && event.button !== 0)) {
       return;
@@ -167,7 +232,7 @@ function BottomSheetContent({
     element.dataset.dragging = '';
   };
 
-  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const onPointerMove = (event: React.PointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     const element = contentRef.current;
     if (!drag || !element || drag.pointerId !== event.pointerId) return;
@@ -184,7 +249,7 @@ function BottomSheetContent({
     }
   };
 
-  const onPointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+  const onPointerEnd = (event: React.PointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     const element = contentRef.current;
     if (!drag || !element || drag.pointerId !== event.pointerId) return;
@@ -193,7 +258,7 @@ function BottomSheetContent({
     const offset = event.clientY - drag.startY;
     const flick = drag.velocity > DISMISS_VELOCITY && offset > 24;
     if (snap) {
-      const heights = bottomSheetSnapHeights(window.innerHeight);
+      const heights = bottomSheetSnapHeights(window.innerHeight, minHalf);
       const settled = flick
         ? 'dismiss'
         : settleBottomSheet(dragHeight(drag, event.clientY), heights);
@@ -213,6 +278,13 @@ function BottomSheetContent({
     element.style.transform = '';
   };
 
+  const dragHandlers: SheetDragHandlers = {
+    onPointerDown,
+    onPointerMove,
+    onPointerUp: onPointerEnd,
+    onPointerCancel: onPointerEnd,
+  };
+
   return (
     <SheetPrimitive.Content
       ref={setContentRef}
@@ -224,6 +296,10 @@ function BottomSheetContent({
         // Rounded top and safe-area bottom. Height and drag offset ease into
         // place unless a finger holds it or less motion is asked for.
         'data-[side=bottom]:rounded-t-[12px] data-[side=bottom]:pb-[env(safe-area-inset-bottom)] data-[side=bottom]:transition-[height,transform,translate,opacity] data-[dragging]:transition-none motion-reduce:transition-none motion-reduce:animate-none',
+        // Above the on-screen keyboard and within the visible viewport (the
+        // vars come from useVisualViewportVars; without them, the layout
+        // viewport). A caller's own max-h still wins.
+        'data-[side=bottom]:bottom-[var(--keyboard-inset,0px)] max-h-[calc(var(--vvh,100dvh)-4rem)]',
         className,
       )}
       {...props}
@@ -231,15 +307,14 @@ function BottomSheetContent({
       <div
         data-sheet-handle
         aria-hidden="true"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
+        {...dragHandlers}
         className="flex h-5 w-full shrink-0 cursor-grab touch-none items-end justify-center select-none active:cursor-grabbing"
       >
         <span className="h-1 w-9 rounded-full bg-muted-foreground/30" />
       </div>
-      {children}
+      <SheetDragContext.Provider value={dragHandlers}>
+        {children}
+      </SheetDragContext.Provider>
       {/* Closing by drag goes through Radix like any other close. */}
       <SheetPrimitive.Close
         ref={closeRef}
@@ -247,10 +322,18 @@ function BottomSheetContent({
         aria-hidden="true"
         className="sr-only"
       />
-      {showCloseButton && <SheetCloseButton />}
+      {showCloseButton && <SheetCloseButton side="bottom" />}
     </SheetPrimitive.Content>
   );
 }
+
+/** Side sheets run edge to edge, so they keep clear of notches and bars. */
+const SIDE_SAFE_AREA: Record<Exclude<Side, 'bottom'>, string> = {
+  left: 'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]',
+  right:
+    'pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)]',
+  top: 'pt-[env(safe-area-inset-top)]',
+};
 
 function SheetContent({
   className,
@@ -258,12 +341,24 @@ function SheetContent({
   side = 'right',
   showCloseButton = true,
   detents = false,
+  snap,
+  onSnapChange,
+  minHalf,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
-  side?: 'top' | 'right' | 'bottom' | 'left';
+  side?: Side;
   showCloseButton?: boolean;
   /** A bottom sheet that opens at half the screen and drags to full. */
   detents?: boolean;
+  /** The detent, when the caller controls it (with `detents`). */
+  snap?: Snap;
+  /** A drag settled on another detent (with `detents`). */
+  onSnapChange?: (snap: Snap) => void;
+  /**
+   * The least height (px) the half detent is any use at; a screen that
+   * leaves less opens it full (with `detents`).
+   */
+  minHalf?: number;
 }) {
   return (
     <SheetPortal>
@@ -273,6 +368,9 @@ function SheetContent({
           className={className}
           showCloseButton={showCloseButton}
           detents={detents}
+          snap={snap}
+          onSnapChange={onSnapChange}
+          minHalf={minHalf}
           {...props}
         >
           {children}
@@ -281,22 +379,82 @@ function SheetContent({
         <SheetPrimitive.Content
           data-slot="sheet-content"
           data-side={side}
-          className={cn(SHEET_CONTENT_CLASS, className)}
+          // The safe-area padding is unvariated so a caller's padding
+          // replaces it.
+          className={cn(SHEET_CONTENT_CLASS, SIDE_SAFE_AREA[side], className)}
           {...props}
         >
           {children}
-          {showCloseButton && <SheetCloseButton />}
+          {showCloseButton && <SheetCloseButton side={side} />}
         </SheetPrimitive.Content>
       )}
     </SheetPortal>
   );
 }
 
-function SheetHeader({ className, ...props }: React.ComponentProps<'div'>) {
+/**
+ * In a bottom sheet the whole header drags it, not only the handle (cindy's
+ * SheetSurface: grabber plus header); its buttons and fields still tap.
+ */
+function SheetHeader({
+  className,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  ...props
+}: React.ComponentProps<'div'>) {
+  const drag = React.useContext(SheetDragContext);
+  const draggingRef = React.useRef(false);
+  const onEnd =
+    (
+      own: React.PointerEventHandler<HTMLDivElement> | undefined,
+      end: 'onPointerUp' | 'onPointerCancel',
+    ) =>
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      own?.(event);
+      if (draggingRef.current) drag?.[end](event);
+      draggingRef.current = false;
+    };
   return (
     <div
       data-slot="sheet-header"
-      className={cn('flex flex-col gap-0.5 p-4', className)}
+      className={cn(
+        'flex flex-col gap-0.5 p-4',
+        drag && 'touch-none select-none',
+        className,
+      )}
+      onPointerDown={(event) => {
+        onPointerDown?.(event);
+        draggingRef.current =
+          !!drag &&
+          !event.defaultPrevented &&
+          !(event.target as Element).closest?.(NO_DRAG_TARGET);
+        if (draggingRef.current) drag?.onPointerDown(event);
+      }}
+      onPointerMove={(event) => {
+        onPointerMove?.(event);
+        if (draggingRef.current) drag?.onPointerMove(event);
+      }}
+      onPointerUp={onEnd(onPointerUp, 'onPointerUp')}
+      onPointerCancel={onEnd(onPointerCancel, 'onPointerCancel')}
+      {...props}
+    />
+  );
+}
+
+/**
+ * The scrolling part of a sheet: the handle and header above it stay put
+ * while it scrolls.
+ */
+function SheetBody({ className, ...props }: React.ComponentProps<'div'>) {
+  return (
+    <div
+      data-slot="sheet-body"
+      className={cn(
+        'min-h-0 flex-1 overflow-y-auto overscroll-contain',
+        className,
+      )}
       {...props}
     />
   );
@@ -344,6 +502,7 @@ export {
   SheetClose,
   SheetContent,
   SheetHeader,
+  SheetBody,
   SheetFooter,
   SheetTitle,
   SheetDescription,

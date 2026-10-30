@@ -13,6 +13,10 @@ import { useAutomationsStore } from '../stores/automations';
 import { AutomationList } from '../components/automations/AutomationList';
 import { AutomationDetail } from '../components/automations/AutomationDetail';
 import { automationHref } from '../components/automations/automation-actions';
+import {
+  PhonePageHeader,
+  PhoneBarButton,
+} from '../components/layout/PhonePageHeader';
 
 /**
  * 自动化: the list on the left and the selected automation's detail on the
@@ -43,8 +47,9 @@ export function AutomationsPage() {
   const select = (id: string) => navigate(automationHref(id));
   const create = () => openCreateForm();
 
+  // A phone names the page in its top bar, with 新建 as the one action.
   const header = (
-    <div className="flex items-center justify-between gap-2 px-4 pt-5 pb-3 lg:pt-6">
+    <div className="flex items-center justify-between gap-2 px-4 pt-5 pb-3 lg:pt-6 phone:hidden">
       <h1 className="text-title-lg text-foreground">自动化</h1>
       <Button size="sm" onClick={create}>
         <Plus />
@@ -94,10 +99,28 @@ export function AutomationsPage() {
             onBack={() => navigate('/automations')}
           />
         );
-      return loaded ? notFound : null;
+      return (
+        <>
+          <PhonePageHeader
+            title="自动化"
+            onBack={() => navigate('/automations')}
+          />
+          {loaded ? notFound : null}
+        </>
+      );
     }
     return (
       <div className="flex h-full min-h-0 flex-col">
+        <PhonePageHeader
+          title="自动化"
+          action={
+            <PhoneBarButton
+              label="新建自动化"
+              icon={<Plus className="size-5" />}
+              onClick={create}
+            />
+          }
+        />
         {header}
         {errorNotice || list}
       </div>

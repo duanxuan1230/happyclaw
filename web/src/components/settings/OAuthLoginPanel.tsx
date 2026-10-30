@@ -151,6 +151,7 @@ export function OAuthLoginPanel({
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
+              variant="code"
               type="text"
               value={code}
               onChange={(event) => setCode(event.target.value)}

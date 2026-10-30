@@ -108,6 +108,7 @@ export function ProviderConnectionFields({
                   )}
                 </Label>
                 <Input
+                  variant="code"
                   id={id}
                   type={field.secret ? 'password' : 'text'}
                   value={values[field.key] ?? ''}

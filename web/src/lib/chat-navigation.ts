@@ -23,3 +23,15 @@ export function openWorkspaceSession(
   useChatStore.getState().selectGroup(group.jid);
   navigate(chatHref(group.folder, sessionId));
 }
+
+/**
+ * Whether the current history entry has one of this app's before it. The
+ * router numbers its entries in `history.state.idx` (kept across reloads and
+ * by replace navigations), so 0 is the first page of this app in the tab.
+ * Back buttons step back when it does (cindy's goBackGuarded), so history
+ * never piles up list → chat → list, and replace their page otherwise.
+ */
+export function hasAppEntryBefore(): boolean {
+  const idx = (window.history.state as { idx?: unknown } | null)?.idx;
+  return typeof idx === 'number' && idx > 0;
+}
