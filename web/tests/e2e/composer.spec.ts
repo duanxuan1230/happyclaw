@@ -1093,7 +1093,11 @@ test.describe('touch composer', () => {
     expect(sendBox!.height).toBeGreaterThanOrEqual(40);
 
     await panel.getByRole('button', { name: /^更多操作：排队消息 2/ }).click();
-    await page.getByRole('menuitem', { name: '上移' }).click();
+    // On a phone the item menu is a sheet of buttons.
+    await page
+      .getByRole('dialog', { name: '排队消息操作' })
+      .getByRole('button', { name: '上移' })
+      .click();
     expect((await harnessState(page)).queueActions).toEqual([
       { id: 'q2', action: 'move_up' },
     ]);
@@ -1111,7 +1115,11 @@ test.describe('touch composer', () => {
     const panel = page.getByTestId('queued-follow-ups');
     await panel.getByRole('button', { name: /2 条已排队/ }).click();
     await panel.getByRole('button', { name: /^更多操作：排队消息 2/ }).click();
-    await page.getByRole('menuitem', { name: '编辑' }).click();
+    // On a phone the item menu is a sheet of buttons.
+    await page
+      .getByRole('dialog', { name: '排队消息操作' })
+      .getByRole('button', { name: '编辑' })
+      .click();
     const editor = page.getByRole('textbox', { name: '编辑排队消息' });
     await expect(editor).toBeFocused();
     // Its keyboard coming up must not fold the editor away.

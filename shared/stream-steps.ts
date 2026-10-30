@@ -116,6 +116,11 @@ export interface StepQuestion {
   multiSelect?: boolean;
   /** The option labels, in order. */
   options: string[];
+  /**
+   * What each option means, by the index of its label; absent when no option
+   * has one (and in steps stored before it was kept).
+   */
+  descriptions?: string[];
 }
 
 /** The tool whose call is a question for the reader. */
@@ -132,6 +137,7 @@ const MAX_STEP_QUESTIONS = 4;
 const MAX_QUESTION_OPTIONS = 10;
 const MAX_QUESTION_CHARS = 300;
 const MAX_OPTION_CHARS = 120;
+const MAX_OPTION_DESCRIPTION_CHARS = 200;
 
 function boundedText(value: unknown, max: number): string {
   if (typeof value !== 'string') return '';
@@ -143,7 +149,8 @@ function boundedText(value: unknown, max: number): string {
 /**
  * The questions in an AskUserQuestion input (`{questions: [...]}`, or the
  * older single `{question, options}`), bounded; undefined when it has none.
- * Options are `{label}` or `{value}` objects, or plain strings.
+ * Options are `{label, description?}` or `{value}` objects, or plain strings
+ * (a stored step's, with `descriptions` beside them).
  */
 export function readStepQuestions(input: unknown): StepQuestion[] | undefined {
   if (!input || typeof input !== 'object') return undefined;
@@ -160,21 +167,30 @@ export function readStepQuestions(input: unknown): StepQuestion[] | undefined {
     const question = boundedText(entry.question, MAX_QUESTION_CHARS);
     if (!question) continue;
     const options: string[] = [];
-    for (const option of Array.isArray(entry.options) ? entry.options : []) {
-      if (options.length >= MAX_QUESTION_OPTIONS) break;
+    const descriptions: string[] = [];
+    // A stored step keeps the descriptions beside the labels, by index.
+    const stored = Array.isArray(entry.descriptions) ? entry.descriptions : [];
+    const rawOptions = Array.isArray(entry.options) ? entry.options : [];
+    rawOptions.forEach((option, index) => {
+      if (options.length >= MAX_QUESTION_OPTIONS) return;
       const fields: Record<string, unknown> =
         option && typeof option === 'object'
           ? (option as Record<string, unknown>)
-          : { label: option };
+          : { label: option, description: stored[index] };
       const label =
         boundedText(fields.label, MAX_OPTION_CHARS) ||
         boundedText(fields.value, MAX_OPTION_CHARS);
-      if (label) options.push(label);
-    }
+      if (!label) return;
+      options.push(label);
+      descriptions.push(
+        boundedText(fields.description, MAX_OPTION_DESCRIPTION_CHARS),
+      );
+    });
     questions.push({
       question,
       ...(entry.multiSelect === true ? { multiSelect: true } : {}),
       options,
+      ...(descriptions.some(Boolean) ? { descriptions } : {}),
     });
   }
   return questions.length > 0 ? questions : undefined;

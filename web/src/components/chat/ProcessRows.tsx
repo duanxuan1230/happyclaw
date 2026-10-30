@@ -66,7 +66,10 @@ import { formatElapsedMs } from '../../utils/format-elapsed';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ModelWaitRow } from './ModelWaitRow';
 import { STATUS_LABELS, SubAgentBody, subAgentHasBody } from './SubAgentCard';
-import { ThinkingBody } from './ThinkingBlock';
+import { NO_SUMMARY_EXPLANATION, ThinkingBody } from './ThinkingBlock';
+import { InfoTip } from '../common/InfoTip';
+import { ClampedDetail } from './ClampedDetail';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { describeToolName } from './ToolActivityCard';
 import { FinalMarkdown } from './StreamingMarkdown';
 import { WorkflowRunCard } from './WorkflowRunCard';
@@ -76,6 +79,9 @@ import { isWorkflowTask, workflowRunOf } from './workflow-run';
 export const LATER_WAIT_DELAY_MS = 800;
 
 const EMPTY_TASKS: Record<string, StreamingTaskRuntimeState> = {};
+
+/** A finger, not a mouse: no hover, so no tooltip. */
+const COARSE_POINTER = '(pointer: coarse)';
 
 // ── one row ─────────────────────────────────────────────────────────────
 
@@ -126,6 +132,8 @@ interface RowFrameProps {
   status?: string;
   /** The tooltip of the whole row. */
   title?: string;
+  /** What a touch reader opens the row to read when its text is cut short. */
+  more?: string;
   /** Present when the row opens: it is then a button. */
   open?: boolean;
   onToggle?: () => void;
@@ -156,6 +164,7 @@ function RowFrame({
   running = false,
   status,
   title,
+  more,
   open = false,
   onToggle,
   endChevron = true,
@@ -163,7 +172,47 @@ function RowFrame({
   panelId,
   children,
 }: RowFrameProps) {
-  const expandable = onToggle !== undefined;
+  // Touch has no tooltip: a row cut short opens to say all of it.
+  const coarse = useMediaQuery(COARSE_POINTER);
+  const rowRef = useRef<HTMLButtonElement & HTMLDivElement>(null);
+  const [cut, setCut] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const morePanelId = useId();
+  const measureCut = coarse && more != null && !onToggle;
+  useLayoutEffect(() => {
+    const row = rowRef.current;
+    if (!measureCut || !row) return;
+    // The row turns from a div into a button once it is found cut short:
+    // the effect then measures the button, and the div it left is ignored.
+    const measure = () => {
+      if (!row.isConnected) return;
+      setCut(
+        [...row.querySelectorAll<HTMLElement>('.truncate')].some(
+          (span) => span.scrollWidth > span.clientWidth + 1,
+        ),
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [measureCut, cut, more]);
+  const showMore = measureCut && cut;
+  const rowOpen = showMore ? moreOpen : open;
+  const toggle = showMore ? () => setMoreOpen((value) => !value) : onToggle;
+  const rowPanelId = showMore ? morePanelId : panelId;
+  const panel = showMore ? (
+    <p
+      data-hc-row-more=""
+      className="text-caption break-words whitespace-pre-wrap text-muted-foreground"
+    >
+      {more}
+    </p>
+  ) : (
+    children
+  );
+  const expandable = toggle !== undefined;
   const content = (
     <>
       {icon}
@@ -214,7 +263,7 @@ function RowFrame({
           className={cn(
             ICON_CLASS,
             'text-faint-foreground transition-transform duration-150',
-            open && 'rotate-90',
+            rowOpen && 'rotate-90',
           )}
           aria-hidden="true"
         />
@@ -228,10 +277,11 @@ function RowFrame({
     <>
       {expandable ? (
         <button
+          ref={rowRef}
           type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-controls={open ? panelId : undefined}
+          onClick={toggle}
+          aria-expanded={rowOpen}
+          aria-controls={rowOpen ? rowPanelId : undefined}
           data-hc-row={rowId}
           title={title}
           className={cn(ROW_CLASS, ROW_BUTTON_CLASS)}
@@ -239,14 +289,14 @@ function RowFrame({
           {content}
         </button>
       ) : (
-        <div title={title} className={ROW_CLASS}>
+        <div ref={rowRef} title={title} className={ROW_CLASS}>
           {content}
         </div>
       )}
-      {open && children && (
+      {rowOpen && panel && (
         // Under the label: the row's padding, the icon and its gap add up to 26px.
-        <div id={panelId} className="mb-1 ml-6.5">
-          {children}
+        <div id={rowPanelId} className="mb-1 ml-6.5">
+          {panel}
         </div>
       )}
     </>
@@ -294,12 +344,12 @@ const ThinkingRow = memo(function ThinkingRow({
   groupJid,
   thinkingText,
   titleInHeader,
-  bodyClassName,
+  thinkingMaxHeight,
 }: RowProps & {
   thinkingText: boolean;
   /** The card's headline says what this row's title would: the row does not. */
   titleInHeader: boolean;
-  bodyClassName?: string;
+  thinkingMaxHeight?: string;
 }) {
   const panelId = useId();
   const running = step.status === 'running' && live;
@@ -325,12 +375,15 @@ const ThinkingRow = memo(function ThinkingRow({
       grow={!!title}
       detail={
         noSummary ? (
-          <span
-            title="这个模型只返回加密的推理，不提供可读的思考摘要（ChatGPT 订阅的 GPT-6 系列多数如此）。"
-            data-hc-no-summary=""
-          >
-            模型未返回思考内容
-          </span>
+          <InfoTip content={NO_SUMMARY_EXPLANATION}>
+            <button
+              type="button"
+              data-hc-no-summary=""
+              className="cursor-help rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              模型未返回思考内容
+            </button>
+          </InfoTip>
         ) : undefined
       }
       time={
@@ -354,7 +407,7 @@ const ThinkingRow = memo(function ThinkingRow({
         live={running}
         groupJid={groupJid}
         variant="row"
-        className={bodyClassName}
+        maxHeightClass={thinkingMaxHeight}
       />
     </RowFrame>
   );
@@ -424,6 +477,8 @@ const ToolStepRow = memo(function ToolStepRow({
   const longSummary =
     !!summary &&
     (summary.length > LONG_SUMMARY_CHARS || summary.includes('\n'));
+  // Touch has no tooltip for a command cut short: an open row says it whole.
+  const coarse = useMediaQuery(COARSE_POINTER);
   const expandable = !!output || longSummary;
   const icon = running
     ? Loader2
@@ -461,32 +516,38 @@ const ToolStepRow = memo(function ToolStepRow({
               : '，已完成'
       }
       title={summary ?? hint}
+      more={summary}
       open={open && expandable}
       onToggle={expandable ? () => onToggle(step.id, !open) : undefined}
       rowId={step.id}
       panelId={panelId}
     >
       <div className="space-y-1 text-caption break-words">
-        {summary && (longSummary || !!failure) && (
-          <p
+        {summary && (longSummary || !!failure || (coarse && !!output)) && (
+          <ClampedDetail
+            title={verb}
+            maxHeightClass="max-h-32"
             className={cn(
-              'max-h-32 overflow-y-auto overscroll-contain whitespace-pre-wrap text-muted-foreground',
+              'whitespace-pre-wrap text-muted-foreground',
               name === 'Bash' && 'font-mono',
             )}
           >
             {summary}
-          </p>
+          </ClampedDetail>
         )}
         {output && (
-          <pre
+          <ClampedDetail
+            pre
+            title={`${verb} · 输出`}
+            maxHeightClass="max-h-40"
             tabIndex={0}
             className={cn(
-              'max-h-40 overflow-y-auto overscroll-contain rounded-sm font-mono text-label break-words whitespace-pre-wrap focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
+              'rounded-sm font-mono text-label break-words whitespace-pre-wrap focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
               failed ? 'text-error' : 'text-muted-foreground',
             )}
           >
             {output}
-          </pre>
+          </ClampedDetail>
         )}
       </div>
     </RowFrame>
@@ -597,9 +658,13 @@ const TextRow = memo(function TextRow({
       rowId={step.id}
       panelId={panelId}
     >
-      <div className="max-h-48 overflow-y-auto overscroll-contain text-muted-foreground [&_[data-markdown-root]]:text-label [&_[data-markdown-root]]:text-muted-foreground">
+      <ClampedDetail
+        title={step.progress ? '进展' : '过程说明'}
+        maxHeightClass="max-h-48"
+        className="text-muted-foreground [&_[data-markdown-root]]:text-label [&_[data-markdown-root]]:text-muted-foreground"
+      >
         <FinalMarkdown content={text} variant="docs" groupJid={groupJid} />
-      </div>
+      </ClampedDetail>
     </RowFrame>
   );
 });
@@ -644,6 +709,7 @@ const TaskRow = memo(function TaskRow({
       facts={facts ? <FactsText text={facts} plain={failed} /> : undefined}
       // The facts are cut short in a narrow row: the whole of them is here.
       title={facts ?? undefined}
+      more={facts ?? undefined}
       time={
         running
           ? elapsedLabel(now, step.at)
@@ -737,8 +803,8 @@ export interface ProcessTimelineProps {
    * does not say it again.
    */
   titleInHeader?: boolean;
-  /** Extra classes for the open reasoning text of a row. */
-  bodyClassName?: string;
+  /** The height (`max-h-*`) of a row's open reasoning text. */
+  thinkingMaxHeight?: string;
   /** The reader opened or closed a row. */
   onInteract?: () => void;
   /** Under the list, on the same line down the left. */
@@ -761,7 +827,7 @@ export const ProcessTimeline = memo(function ProcessTimeline({
   live,
   maxRows = TIMELINE_ROWS,
   titleInHeader = false,
-  bodyClassName,
+  thinkingMaxHeight,
   onInteract,
   after,
 }: ProcessTimelineProps) {
@@ -866,7 +932,7 @@ export const ProcessTimeline = memo(function ProcessTimeline({
             {...common}
             thinkingText={thinkingText}
             titleInHeader={titleInHeader}
-            bodyClassName={bodyClassName}
+            thinkingMaxHeight={thinkingMaxHeight}
           />
         );
         break;

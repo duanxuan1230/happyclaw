@@ -836,10 +836,12 @@ test('the jump-to-bottom button counts replies that arrived while reading histor
   await scrollTranscriptTo(page, top - 3000);
   await page.waitForTimeout(300);
   await expect(bottomButton(page)).toHaveAccessibleName('回到底部');
-  // One 36px round button; a phone has no jump to the top.
+  // One round button, 36px (44 to a phone's finger); a phone has no jump to
+  // the top.
+  const size = hasTouch ? 44 : 36;
   const box = (await bottomButton(page).boundingBox())!;
-  expect(box.width).toBeCloseTo(36, 0);
-  expect(box.height).toBeCloseTo(36, 0);
+  expect(box.width).toBeCloseTo(size, 0);
+  expect(box.height).toBeCloseTo(size, 0);
   await expect(page.getByRole('button', { name: '回到顶部' })).toHaveCount(
     hasTouch ? 0 : 1,
   );

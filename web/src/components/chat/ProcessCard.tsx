@@ -40,6 +40,7 @@ import {
 import { formatRunElapsed } from '../../lib/run-phase';
 import { useSteadyValue } from '../../hooks/useSteadyValue';
 import { useAfterDelay, useTick } from '../../hooks/useTick';
+import { useIsPhone } from '../layout/phone';
 import { MemoryReceipts } from './MemoryReceipts';
 import { ModelWaitBody, modelWaitSeconds } from './ModelWaitRow';
 import {
@@ -271,6 +272,7 @@ function ProcessWindow({
   live: boolean;
   children: ReactNode;
 }) {
+  const isPhone = useIsPhone();
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -380,8 +382,12 @@ function ProcessWindow({
       data-scroll-fade={live && faded ? 'top' : undefined}
       data-hc-process-window=""
       className={cn(
-        'mt-0.5 ml-1.5 overflow-y-auto overscroll-contain',
-        live ? 'max-h-60 pointer-coarse:max-h-40' : 'max-h-[60vh]',
+        'mt-0.5 ml-1.5',
+        // A phone has no window in the conversation: the rows scroll with it
+        // and what is long in them folds (ClampedDetail).
+        !isPhone && 'overflow-y-auto overscroll-contain',
+        !isPhone &&
+          (live ? 'max-h-60 pointer-coarse:max-h-40' : 'max-h-[60vh]'),
       )}
     >
       <div ref={contentRef}>{children}</div>
@@ -571,7 +577,9 @@ export const ProcessCard = memo(function ProcessCard({
       maxRows={maxRows}
       titleInHeader={working}
       onInteract={keepOpen}
-      bodyClassName={working ? 'max-h-36 pointer-coarse:max-h-24' : undefined}
+      thinkingMaxHeight={
+        working ? 'max-h-36 pointer-coarse:max-h-24' : undefined
+      }
       after={
         waitVisible ? (
           <WaitNote since={waitingSince} hasRows={listed} />

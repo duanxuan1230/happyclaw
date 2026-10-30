@@ -1355,6 +1355,23 @@ if (scenario === 'markdown' || scenario === 'markdown-streaming') {
   });
 }
 
+// Any scenario: a spec can add a message of its own (a long user message).
+Object.assign(window, {
+  chatHarness: {
+    append(id: string, fromMe: boolean, content: string) {
+      useChatStore.setState((s) => ({
+        messages: {
+          ...s.messages,
+          [groupJid]: [
+            ...(s.messages[groupJid] ?? []),
+            msg(id, 0, fromMe, content),
+          ],
+        },
+      }));
+    },
+  },
+});
+
 createRoot(document.getElementById('root')!).render(
   <MotionProvider>
     <TooltipProvider>

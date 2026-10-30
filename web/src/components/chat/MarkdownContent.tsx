@@ -14,8 +14,13 @@ import ReactMarkdown, {
   type ExtraProps,
   type UrlTransform,
 } from 'react-markdown';
-import { Check, Copy } from 'lucide-react';
-import { PreviewDialog } from './PreviewDialog';
+import { Check, Copy, Download } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+import { useIsPhone } from '../layout/phone';
+import { DetailSheet } from './DetailSheet';
+import { downloadFromUrl } from '../../utils/download';
+import { ImageLightbox } from './ImageLightbox';
 import {
   resolveMarkdownImageSrc,
   resolveMarkdownLinkHref,
@@ -108,27 +113,20 @@ const markdownUrlTransform: UrlTransform = (url, key, node) =>
     ? url
     : defaultUrlTransform(url);
 
-function MarkdownImageLightbox({
-  src,
-  onClose,
-}: {
-  src: string;
-  onClose: () => void;
-}) {
-  return (
-    <PreviewDialog
-      title="图片预览"
-      onClose={onClose}
-      layer="nested"
-      className="left-1/2 top-1/2 max-h-[90dvh] max-w-[90vw] -translate-x-1/2 -translate-y-1/2"
-    >
-      <img
-        src={src}
-        alt="放大查看"
-        className="max-w-[90vw] max-h-[90vh] object-contain cursor-default"
-      />
-    </PreviewDialog>
-  );
+/**
+ * The images of the Markdown around `image`, in order, and where it is among
+ * them: one viewer pages through a reply's images, as the attachments do.
+ */
+function markdownGallery(image: HTMLImageElement): {
+  images: string[];
+  index: number;
+} {
+  const root = image.closest('[data-markdown-root]');
+  const all = root
+    ? [...root.querySelectorAll<HTMLImageElement>('img[data-hc-md-image]')]
+    : [image];
+  const index = Math.max(0, all.indexOf(image));
+  return { images: all.map((img) => img.currentSrc || img.src), index };
 }
 
 function MarkdownImage({
@@ -146,8 +144,13 @@ function MarkdownImage({
   height?: number | string;
   loading?: 'lazy' | 'eager';
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [gallery, setGallery] = useState<{
+    images: string[];
+    index: number;
+  } | null>(null);
   const [error, setError] = useState(false);
+  const open = (event: React.SyntheticEvent<HTMLImageElement>) =>
+    setGallery(markdownGallery(event.currentTarget));
 
   if (!src) return null;
   if (error) {
@@ -185,17 +188,22 @@ function MarkdownImage({
         aria-label={alt ? `放大图片：${alt}` : '放大图片'}
         className="my-3 h-auto max-w-full cursor-zoom-in rounded-lg border border-surface-border transition-colors hover:border-foreground/25"
         style={{ maxHeight: '400px', objectFit: 'contain' }}
-        onClick={() => setExpanded(true)}
+        data-hc-md-image=""
+        onClick={open}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            setExpanded(true);
+            open(event);
           }
         }}
         onError={() => setError(true)}
       />
-      {expanded && (
-        <MarkdownImageLightbox src={src} onClose={() => setExpanded(false)} />
+      {gallery && (
+        <ImageLightbox
+          images={gallery.images}
+          initialIndex={gallery.index}
+          onClose={() => setGallery(null)}
+        />
       )}
     </>
   );
@@ -391,6 +399,103 @@ function scrollToMarkdownAnchor(event: React.MouseEvent<HTMLAnchorElement>) {
   }
 }
 
+/** Workspace files a phone shows in the image viewer rather than a sheet. */
+const IMAGE_FILE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
+
+/**
+ * A link in Markdown. In-page links (footnotes) jump within the message, with
+ * a finger-sized hit area; links elsewhere open in a new tab. A workspace
+ * file on a phone opens inside the app instead: a new tab would leave the
+ * installed PWA for the browser. An image goes to the image viewer, anything
+ * else to a sheet that previews it, with a download for what cannot be shown.
+ */
+function MarkdownLink({
+  href,
+  groupJid,
+  children,
+  ...rest
+}: Omit<React.ComponentPropsWithoutRef<'a'>, 'className'> & {
+  groupJid?: string;
+}) {
+  const isPhone = useIsPhone();
+  const [preview, setPreview] = useState(false);
+  const inPage = href?.startsWith('#') ?? false;
+  const resolved =
+    href && !inPage ? resolveMarkdownLinkHref(href, groupJid) : href;
+  const workspaceFile = !!href && !inPage && resolved !== href;
+  const inApp = isPhone && workspaceFile;
+  const name =
+    href
+      ?.replace(/[?#].*$/, '')
+      .split('/')
+      .pop() || '文件';
+  return (
+    <>
+      <a
+        {...rest}
+        href={resolved}
+        {...(inPage
+          ? { onClick: scrollToMarkdownAnchor, 'data-hc-anchor': '' }
+          : inApp
+            ? {
+                onClick: (event: React.MouseEvent<HTMLAnchorElement>) => {
+                  event.preventDefault();
+                  setPreview(true);
+                },
+              }
+            : { target: '_blank', rel: 'noopener noreferrer' })}
+        className={cn(
+          'text-primary-text underline [overflow-wrap:anywhere] hover:text-primary-text',
+          // A footnote mark is a few pixels wide: the finger gets 44.
+          inPage &&
+            "pointer-coarse:relative pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:size-11 pointer-coarse:after:-translate-1/2 pointer-coarse:after:content-['']",
+        )}
+      >
+        {children}
+      </a>
+      {preview &&
+        resolved &&
+        (IMAGE_FILE.test(name) ? (
+          <ImageLightbox
+            images={[resolved]}
+            initialIndex={0}
+            onClose={() => setPreview(false)}
+          />
+        ) : (
+          <DetailSheet
+            title={name}
+            onClose={() => setPreview(false)}
+            className="h-[calc(var(--vvh,100dvh)-4rem)]"
+            bodyClassName="flex flex-col p-0"
+            action={
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  // iOS and an installed app ignore a link's `download`.
+                  void downloadFromUrl(
+                    new URL(resolved, window.location.href).href,
+                    name,
+                  ).catch(() => toast.error('下载失败'))
+                }
+              >
+                <Download aria-hidden="true" />
+                下载
+              </Button>
+            }
+          >
+            <iframe
+              title={name}
+              src={resolved}
+              data-hc-file-preview=""
+              className="min-h-0 w-full flex-1 border-t border-surface-border bg-background"
+            />
+          </DetailSheet>
+        ))}
+    </>
+  );
+}
+
 type MarkdownOptions = React.ComponentProps<typeof ReactMarkdown>;
 type MarkdownComponents = NonNullable<MarkdownOptions['components']>;
 
@@ -464,23 +569,11 @@ function markdownComponents(
       children,
       className: _className,
       ...rest
-    }: React.ComponentPropsWithoutRef<'a'> & ExtraProps) => {
-      const inPage = href?.startsWith('#') ?? false;
-      return (
-        <a
-          {...rest}
-          href={
-            href && !inPage ? resolveMarkdownLinkHref(href, groupJid) : href
-          }
-          {...(inPage
-            ? { onClick: scrollToMarkdownAnchor }
-            : { target: '_blank', rel: 'noopener noreferrer' })}
-          className="text-primary-text underline [overflow-wrap:anywhere] hover:text-primary-text"
-        >
-          {children}
-        </a>
-      );
-    },
+    }: React.ComponentPropsWithoutRef<'a'> & ExtraProps) => (
+      <MarkdownLink {...rest} href={href} groupJid={groupJid}>
+        {children}
+      </MarkdownLink>
+    ),
     table: ({ children }) => (
       <HorizontalScroll
         as="div"
@@ -616,13 +709,14 @@ function markdownComponents(
     details: ({ children, open }) => (
       <details
         open={open}
-        className="my-3 rounded-lg border border-surface-border px-3 py-2 [&>*:last-child]:mb-0 [&[open]>summary]:mb-2"
+        className="my-3 rounded-lg border border-surface-border px-3 py-2 pointer-coarse:pt-0 [&>*:last-child]:mb-0 [&[open]>summary]:mb-2"
       >
         {children}
       </details>
     ),
     summary: ({ children }) => (
-      <summary className="cursor-pointer font-medium select-none marker:text-muted-foreground">
+      // A finger-high row on touch: the border box's top padding moves into it.
+      <summary className="cursor-pointer font-medium select-none marker:text-muted-foreground pointer-coarse:py-2.5 pointer-coarse:leading-6">
         {children}
       </summary>
     ),

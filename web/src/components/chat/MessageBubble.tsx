@@ -38,6 +38,10 @@ import { ProcessCard, hasProcess } from './ProcessCard';
 import { LazyTurnTrace } from './LazyTurnTrace';
 import { MessageContextMenu } from './MessageContextMenu';
 import { ImageLightbox } from './ImageLightbox';
+import { CollapsibleUserText } from './CollapsibleUserText';
+import { InfoTip } from '../common/InfoTip';
+import { useIsPhone } from '../layout/phone';
+import { useLongPress } from '../../hooks/useLongPress';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useStreamLayout } from '../../hooks/useStreamLayout';
 import { extractThinkingTitle } from '../../lib/thinking-text';
@@ -293,6 +297,12 @@ export const MessageBubble = memo(
       index: number;
     } | null>(null);
     const [showShareDialog, setShowShareDialog] = useState(false);
+    // A phone opens the message's menu by a long press on it as well as by
+    // its 「⋯」; one menu, so both open the same sheet.
+    const isPhone = useIsPhone();
+    const [menuOpen, setMenuOpen] = useState(false);
+    const longPress = useLongPress(() => setMenuOpen(true));
+    const pressToOpenMenu = isPhone ? longPress : undefined;
     const currentUser = useAuthStore((s) => s.user);
     const { layout } = useStreamLayout();
     const appearance = useAuthStore((s) => s.appearance);
@@ -494,19 +504,18 @@ export const MessageBubble = memo(
       }
     };
     const incomplete = incompleteReplyNote(message);
+    // Touch has no hover: there a tap on the badge says what it means.
     const incompleteBadge = incomplete && (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            tabIndex={0}
-            aria-label={`${incomplete.label}：${incomplete.detail}`}
-            className="inline-flex h-5 shrink-0 items-center rounded-md px-1.5 text-micro font-medium text-muted-foreground ring-1 ring-surface-border outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            {incomplete.label}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{incomplete.detail}</TooltipContent>
-      </Tooltip>
+      <InfoTip content={incomplete.detail}>
+        <button
+          type="button"
+          aria-label={`${incomplete.label}：${incomplete.detail}`}
+          data-hc-incomplete=""
+          className="relative inline-flex h-5 shrink-0 cursor-help items-center rounded-md px-1.5 text-micro font-medium text-muted-foreground ring-1 ring-surface-border outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:after:absolute pointer-coarse:after:-inset-x-1 pointer-coarse:after:-inset-y-3 pointer-coarse:after:content-['']"
+        >
+          {incomplete.label}
+        </button>
+      </InfoTip>
     );
 
     // Context overflow system message
@@ -714,6 +723,8 @@ export const MessageBubble = memo(
                 chatJid={message.chat_jid}
                 messageId={message.id}
                 onShareImage={isAI ? () => setShowShareDialog(true) : undefined}
+                open={menuOpen}
+                onOpenChange={setMenuOpen}
               >
                 {menuButton}
               </MessageContextMenu>
@@ -757,7 +768,10 @@ export const MessageBubble = memo(
 
           {/* Content — strip first-child top margin for consistent spacing */}
           {!hasOnlyImages && (
-            <div className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0">
+            <div
+              className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0"
+              {...pressToOpenMenu}
+            >
               {isAI ? (
                 <FinalMarkdown
                   content={presentedContent}
@@ -770,9 +784,10 @@ export const MessageBubble = memo(
                   className="text-foreground"
                 />
               ) : (
-                <p className="text-body-lg break-words whitespace-pre-wrap text-foreground">
-                  {presentedContent}
-                </p>
+                <CollapsibleUserText
+                  text={presentedContent}
+                  className="text-foreground"
+                />
               )}
             </div>
           )}
@@ -797,6 +812,8 @@ export const MessageBubble = memo(
           chatJid={message.chat_jid}
           messageId={message.id}
           align="end"
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
         >
           {menuButton}
         </MessageContextMenu>
@@ -811,19 +828,22 @@ export const MessageBubble = memo(
             <div className="relative flex flex-col items-end">
               {renderImages(cn('justify-end', hasOnlyImages && 'mb-0'))}
               {!hasOnlyImages && (
-                <div className="rounded-[1.25rem] bg-muted px-4 py-2.5 text-foreground phone:rounded-xl phone:border phone:border-surface-border phone:bg-surface-raised phone:p-3">
+                <div
+                  className="rounded-[1.25rem] bg-muted px-4 py-2.5 text-foreground phone:rounded-xl phone:border phone:border-surface-border phone:bg-surface-raised phone:p-3"
+                  {...pressToOpenMenu}
+                >
                   {automationOrigin ? (
                     <AutomationPromptText content={presentedContent} />
                   ) : (
-                    <p className="text-body-lg break-words whitespace-pre-wrap">
-                      {presentedContent}
-                    </p>
+                    <CollapsibleUserText text={presentedContent} />
                   )}
                 </div>
               )}
-              <div className="absolute top-1/2 -left-8 -translate-y-1/2 transition-opacity pointer-coarse:-left-11 lg:opacity-0 lg:group-hover:opacity-100 lg:focus-within:opacity-100 lg:has-[[aria-expanded=true]]:opacity-100 phone:hidden">
-                {userMenu}
-              </div>
+              {!isPhone && (
+                <div className="absolute top-1/2 -left-8 -translate-y-1/2 transition-opacity pointer-coarse:-left-11 lg:opacity-0 lg:group-hover:opacity-100 lg:focus-within:opacity-100 lg:has-[[aria-expanded=true]]:opacity-100">
+                  {userMenu}
+                </div>
+              )}
             </div>
             {/* A phone has 「⋯」 below the bubble, with the time. */}
             <div className="mt-1 mr-1 flex items-center phone:mt-0 phone:mr-0">
@@ -835,7 +855,7 @@ export const MessageBubble = memo(
                   {shortTime}
                 </span>
               )}
-              <span className="hidden phone:inline-flex">{userMenu}</span>
+              {isPhone && <span className="inline-flex">{userMenu}</span>}
             </div>
           </div>
           {overlays}
@@ -906,7 +926,7 @@ export const MessageBubble = memo(
           {renderImages('mb-3')}
 
           {!hasOnlyImages && (
-            <div className={REPLY_BODY_CLASS}>
+            <div className={REPLY_BODY_CLASS} {...pressToOpenMenu}>
               <FinalMarkdown
                 content={presentedContent}
                 groupJid={markdownJid}
@@ -951,6 +971,8 @@ export const MessageBubble = memo(
               chatJid={message.chat_jid}
               messageId={message.id}
               onShareImage={() => setShowShareDialog(true)}
+              open={menuOpen}
+              onOpenChange={setMenuOpen}
             >
               {menuButton}
             </MessageContextMenu>
