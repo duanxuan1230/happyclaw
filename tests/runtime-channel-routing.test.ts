@@ -162,7 +162,6 @@ function makeOutputRuntime(lane: 'main' | 'session') {
     isProviderQuotaControlOutput: () => false,
     rotateProviderAfterAgentTurn: false,
     rotatingAgentTurnCompleted: false,
-    closeRunnerAfterRotatingProviderTurn: () => false,
     currentAgentChannelContext: undefined,
     getMessageChannelTurnContext: () => null,
     bindActiveChannelTurn: vi.fn(),

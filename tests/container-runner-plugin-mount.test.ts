@@ -178,8 +178,6 @@ describe('buildVolumeMounts — container proxy secret boundary', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
-      false,
       proxy,
     );
 

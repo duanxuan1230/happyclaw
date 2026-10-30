@@ -17,13 +17,6 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limit-wait-'));
 fs.mkdirSync(path.join(tmp, 'db'), { recursive: true });
 fs.mkdirSync(path.join(tmp, 'groups'), { recursive: true });
 
-const mocks = vi.hoisted(() => ({
-  enabledProviders: [
-    { id: 'provider-a', enabled: true, weight: 1, anthropicModel: 'opus' },
-    { id: 'provider-b', enabled: true, weight: 1, anthropicModel: 'opus' },
-  ],
-}));
-
 vi.mock('../src/config.js', async (importOriginal) => ({
   ...((await importOriginal()) as Record<string, unknown>),
   DATA_DIR: tmp,
@@ -39,7 +32,6 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => {
     await importOriginal<typeof import('../src/runtime-config.js')>();
   return {
     ...actual,
-    getEnabledProviders: () => mocks.enabledProviders,
     getSystemSettings: () => ({
       ...actual.getSystemSettings(),
       fallbackModel: '',
@@ -54,7 +46,6 @@ const { applyCodexGatewayVerdict, applyProviderFailureDisposition } =
   await import('../src/container-runner.js');
 const { CODEX_REAUTH_REQUIRED_USER_NOTICE } =
   await import('../src/provider-failure.js');
-const { providerPool } = await import('../src/provider-pool.js');
 type ContainerOutput = import('../src/container-runner.js').ContainerOutput;
 
 const HOUR = 60 * 60 * 1000;
@@ -72,14 +63,6 @@ let scopeKey = '';
 beforeEach(() => {
   lane += 1;
   scopeKey = `web:lane-${lane}`;
-  providerPool.refreshFromConfig(mocks.enabledProviders, {
-    strategy: 'round-robin',
-    unhealthyThreshold: 3,
-    recoveryIntervalMs: 300_000,
-  });
-  for (const provider of mocks.enabledProviders) {
-    providerPool.resetHealth(provider.id);
-  }
 });
 
 /** An account usage wall the runner reports, as rate_limit_event did. */
@@ -97,21 +80,8 @@ function wall(messageId: string, resetsAtMs?: number): ContainerOutput {
   } as ContainerOutput;
 }
 
-/** Quarantine like the runner's host does before the disposition. */
-function quarantine(profileId: string, untilMs?: number): void {
-  providerPool.reportFailure(
-    profileId,
-    true,
-    untilMs === undefined ? undefined : Math.floor(untilMs / 1000),
-  );
-}
-
-function decide(
-  output: ContainerOutput,
-  profileId: string,
-  allowFailover: boolean,
-): boolean {
-  return applyProviderFailureDisposition(output, profileId, allowFailover, {
+function decide(output: ContainerOutput, profileId: string): boolean {
+  return applyProviderFailureDisposition(output, profileId, {
     scopeKey,
     inputKey: output.inputTurnId,
   });
@@ -169,61 +139,28 @@ describe('resume time policy', () => {
   });
 });
 
-describe('a usage wall on every usable connection waits for the reset', () => {
-  test('an automatic pool waits for the earliest reset among its members', () => {
+describe('a usage wall on the connection waits for the reset', () => {
+  test('the connection waits for its own reset', () => {
     const now = Date.now();
-    quarantine('provider-a', now + 3 * HOUR);
-    quarantine('provider-b', now + HOUR);
-    const output = wall('m-pool', now + 3 * HOUR);
-
-    expect(decide(output, 'provider-a', true)).toBe(false);
-    expect(output.providerFailureTerminal).toBe(false);
-    expect(output.inputTurnCompleted).toBe(false);
-    expectResumeNear(output, now + HOUR);
-    expect(store.getUsageLimitWait(scopeKey)).toMatchObject({
-      inputKey: 'm-pool',
-      waitCount: 1,
-      state: 'waiting',
-    });
-  });
-
-  test('a connection the Agent is bound to waits for its own reset only', () => {
-    const now = Date.now();
-    quarantine('provider-a', now + 3 * HOUR);
-    quarantine('provider-b', now + HOUR);
     const output = wall('m-pinned', now + 3 * HOUR);
 
-    expect(decide(output, 'provider-a', false)).toBe(false);
+    expect(decide(output, 'provider-a')).toBe(false);
     expectResumeNear(output, now + 3 * HOUR);
   });
 
-  test('a weekly reset beyond the pool’s one-day clamp is still waited for', () => {
+  test('a weekly reset is still waited for', () => {
     const now = Date.now();
     const reset = now + 5 * 24 * HOUR;
-    quarantine('provider-a', reset);
     const output = wall('m-weekly', reset);
-    expect(decide(output, 'provider-a', false)).toBe(false);
+    expect(decide(output, 'provider-a')).toBe(false);
     expectResumeNear(output, reset);
   });
 
-  test('an automatic pool preserves multi-day resets beyond 24h across members', () => {
+  test('auth/reauth failures never enter a usage-limit wait', () => {
     const now = Date.now();
-    const resetA = now + 3 * 24 * HOUR;
-    const resetB = now + 5 * 24 * HOUR;
-    quarantine('provider-a', resetA);
-    quarantine('provider-b', resetB);
-    const output = wall('m-pool-multiday', resetB);
-    expect(decide(output, 'provider-b', true)).toBe(false);
-    expectResumeNear(output, resetA);
-  });
-
-  test('auth/reauth failures never enter a usage-limit wait even when another pool member has a reset', () => {
-    const now = Date.now();
-    quarantine('provider-a', now + 2 * HOUR);
-    quarantine('provider-b');
     // 401/auth failure on provider-b has no own reset timestamp
     const authFailure = wall('m-auth-401');
-    expect(decide(authFailure, 'provider-b', true)).toBe(true);
+    expect(decide(authFailure, 'provider-b')).toBe(true);
     expect(authFailure.providerUsageLimitResumeAt).toBeUndefined();
     expect(store.getUsageLimitWait(scopeKey)).toBeNull();
 
@@ -234,7 +171,7 @@ describe('a usage wall on every usable connection waits for the reset', () => {
       CODEX_REAUTH_REQUIRED_USER_NOTICE,
     );
     expect(codexReauth.providerRateLimitResetsAt).toBeUndefined();
-    expect(decide(codexReauth, 'provider-b', true)).toBe(true);
+    expect(decide(codexReauth, 'provider-b')).toBe(true);
     expect(codexReauth.providerUsageLimitResumeAt).toBeUndefined();
   });
 
@@ -295,23 +232,13 @@ describe('a usage wall on every usable connection waits for the reset', () => {
   });
 
   test('without a known reset, or beyond seven days, the input fails as before', () => {
-    quarantine('provider-a');
-    quarantine('provider-b');
     const unknown = wall('m-unknown');
-    expect(decide(unknown, 'provider-a', true)).toBe(true);
+    expect(decide(unknown, 'provider-a')).toBe(true);
     expect(unknown.providerUsageLimitResumeAt).toBeUndefined();
     expect(unknown.providerFailureTerminal).toBe(true);
 
     const farAway = wall('m-far', Date.now() + 8 * 24 * HOUR);
-    expect(decide(farAway, 'provider-a', false)).toBe(true);
-    expect(store.getUsageLimitWait(scopeKey)).toBeNull();
-  });
-
-  test('a healthy member left in the pool is failover, not a wait', () => {
-    quarantine('provider-a', Date.now() + HOUR);
-    const output = wall('m-failover', Date.now() + HOUR);
-    expect(decide(output, 'provider-a', true)).toBe(false);
-    expect(output.providerUsageLimitResumeAt).toBeUndefined();
+    expect(decide(farAway, 'provider-a')).toBe(true);
     expect(store.getUsageLimitWait(scopeKey)).toBeNull();
   });
 
@@ -320,7 +247,7 @@ describe('a usage wall on every usable connection waits for the reset', () => {
       ...wall('m-transient', Date.now() + HOUR),
       providerFailureClass: 'transient',
     } as ContainerOutput;
-    applyProviderFailureDisposition(transient, 'provider-a', true, {
+    applyProviderFailureDisposition(transient, 'provider-a', {
       scopeKey,
     });
     expect(transient.providerUsageLimitResumeAt).toBeUndefined();
@@ -329,33 +256,30 @@ describe('a usage wall on every usable connection waits for the reset', () => {
       providerFailureClass: 'config',
       providerRateLimitModel: 'opus',
     } as ContainerOutput;
-    expect(decide(config, 'provider-a', false)).toBe(true);
+    expect(decide(config, 'provider-a')).toBe(true);
     expect(config.providerUsageLimitResumeAt).toBeUndefined();
   });
 
   test('new input ends a wait but keeps counting; the fourth wall fails, a healthy turn resets', () => {
     const reset = () => Date.now() + HOUR;
     for (const [index, input] of ['m-1', 'm-2', 'm-3'].entries()) {
-      quarantine('provider-a', reset());
       const output = wall(input, reset());
-      expect(decide(output, 'provider-a', false)).toBe(false);
+      expect(decide(output, 'provider-a')).toBe(false);
       expect(store.getUsageLimitWait(scopeKey)?.waitCount).toBe(index + 1);
       // The user sends another message: the parked input runs at once with it.
       expect(wait.endUsageLimitWait(scopeKey, 'new_input')).toMatchObject({
         waitCount: index + 1,
       });
     }
-    quarantine('provider-a', reset());
     const fourth = wall('m-4', reset());
-    expect(decide(fourth, 'provider-a', false)).toBe(true);
+    expect(decide(fourth, 'provider-a')).toBe(true);
     expect(fourth.providerUsageLimitResumeAt).toBeUndefined();
     expect(fourth.providerFailureTerminal).toBe(true);
     expect(store.getUsageLimitWait(scopeKey)).toBeNull();
 
     // After a healthy turn a later wall starts a fresh count.
-    quarantine('provider-a', reset());
     const again = wall('m-5', reset());
-    expect(decide(again, 'provider-a', false)).toBe(false);
+    expect(decide(again, 'provider-a')).toBe(false);
     expect(store.getUsageLimitWait(scopeKey)?.waitCount).toBe(1);
     wait.resumeUsageLimitWait(scopeKey);
     wait.settleUsageLimitWaitAfterSuccess(scopeKey);

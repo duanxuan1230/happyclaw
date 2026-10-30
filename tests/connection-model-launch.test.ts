@@ -1,10 +1,10 @@
 /**
  * A conversation or an Agent picks a model within a model configuration. The
- * launch runs it (ANTHROPIC_MODEL and the environment that follows it), a
- * model's own effort comes with it, and one SDK session always runs on one
+ * launch runs it, its effort comes from the pick, the Agent or the model's
+ * default (none for a model without efforts), and one SDK session runs on one
  * model: a pick or an un-pick starts a new session once, nothing else does.
  *
- * Real configuration file and database in a temp DATA_DIR; the real pool
+ * Real configuration file and database in a temp DATA_DIR; the real launch
  * selection and environment builder run.
  */
 import fs from 'node:fs';
@@ -42,20 +42,11 @@ const db = await import('../src/db.js');
 const runner = await import('../src/container-runner.js');
 const { applyProviderSwitchToInput } =
   await import('../src/provider-switch-context.js');
-const { providerPool } = await import('../src/provider-pool.js');
 
 const FOLDER = 'model-launch';
 let glm: ReturnType<typeof runtimeConfig.createProvider>;
 let kimi: ReturnType<typeof runtimeConfig.createProvider>;
 let relay: ReturnType<typeof runtimeConfig.createProvider>;
-
-function balancing(strategy: 'failover' | 'round-robin') {
-  runtimeConfig.saveBalancingConfig({
-    strategy,
-    unhealthyThreshold: 1,
-    recoveryIntervalMs: 300_000,
-  });
-}
 
 beforeAll(() => {
   fs.mkdirSync(path.join(root, 'db'), { recursive: true });
@@ -69,11 +60,9 @@ beforeAll(() => {
     anthropicModel: 'glm-5',
     models: [
       { id: 'glm-5' },
-      { id: 'glm-5-air', effort: 'low' },
-      { id: 'glm-5[1m]' },
-      { id: 'glm-legacy', hidden: true },
+      { id: 'glm-5-air', efforts: ['low', 'medium'], defaultEffort: 'low' },
+      { id: 'glm-5-long', contextWindow: 1_000_000 },
     ],
-    enabled: true,
   });
   kimi = runtimeConfig.createProvider({
     name: 'Kimi',
@@ -81,8 +70,7 @@ beforeAll(() => {
     anthropicBaseUrl: 'https://kimi.example.test',
     anthropicAuthToken: 'kimi-token',
     anthropicModel: 'kimi-k3',
-    models: [{ id: 'kimi-k3', effort: 'high' }],
-    enabled: true,
+    models: [{ id: 'kimi-k3', efforts: ['low', 'high', 'max'] }],
   });
   // A pass-through relay names no model of its own.
   relay = runtimeConfig.createProvider({
@@ -92,7 +80,6 @@ beforeAll(() => {
     anthropicAuthToken: 'relay-token',
     anthropicModel: '',
     models: [{ id: 'relay-a' }],
-    enabled: false,
   });
 });
 
@@ -105,13 +92,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   db.deleteAllSessionsForFolder(FOLDER);
   db.setSessionModelSelection(FOLDER, null, null);
-  runtimeConfig.setDefaultModelConfig(null);
   runtimeConfig.saveSystemSettings({ fallbackModel: '' });
-  balancing('failover');
-  for (const provider of [glm, kimi, relay]) {
-    providerPool.resetHealth(provider.id);
-    providerPool.resetModelQuarantine(provider.id);
-  }
 });
 
 function pick(modelConfigId: string | null, model?: string, effort?: string) {
@@ -121,22 +102,41 @@ function pick(modelConfigId: string | null, model?: string, effort?: string) {
   });
 }
 
-function select(agent: { modelConfigId?: string; model?: string } = {}) {
-  const selection = runner.trySelectPoolProvider(
+type Agent = {
+  modelConfigId?: string;
+  model?: string;
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+};
+
+function select(agent: Agent = {}) {
+  return runner.trySelectPoolProvider(
     FOLDER,
     null,
     agent.modelConfigId,
-    null,
     agent.model,
+    agent.effort,
   )!;
-  providerPool.releaseSession(selection.profileId);
-  return selection;
+}
+
+function agentProfile(effort: string) {
+  return {
+    id: 'agent',
+    name: 'Agent',
+    version: 1,
+    isDefault: false,
+    identityHash: '',
+    identityPrompt: '',
+    includeClaudePreset: true,
+    runtimePolicy: db.normalizeAgentProfileRuntimePolicy({
+      reasoning: { effort },
+    }),
+  };
 }
 
 /** The runner environment a selection launches with. */
 function envOf(
   selection: ReturnType<typeof select>,
-  agentProfile?: Record<string, unknown>,
+  profile?: Record<string, unknown>,
 ): (key: string) => string | undefined {
   runner.buildVolumeMounts(
     {
@@ -150,10 +150,8 @@ function envOf(
     undefined,
     selection.resolved,
     undefined,
-    agentProfile as never,
+    profile as never,
     undefined,
-    selection.modelOverride,
-    true,
     { envLines: [], addHostGateway: false },
   );
   const envFile = fs.readFileSync(
@@ -169,7 +167,7 @@ let sdkSessions = 0;
  * One turn as the orchestration runs it: predict, select, clear the SDK
  * session when told to, and let the runner store the session it ran on.
  */
-function launch(agent: { modelConfigId?: string; model?: string } = {}) {
+function launch(agent: Agent = {}) {
   const predicted = runner.willClearSessionOnProviderSwitch(
     FOLDER,
     null,
@@ -202,36 +200,18 @@ function legacySession(providerId: string) {
 }
 
 describe('a conversation runs the model it picked within its configuration', () => {
-  test('the pick replaces the main model; the tiers and the compaction window follow it', () => {
-    pick(glm.id, 'glm-5[1m]');
+  test('the pick replaces the main model, always without [1m]', () => {
+    pick(glm.id, 'glm-5-long');
     const selection = select();
     expect(selection).toMatchObject({
       profileId: glm.id,
-      chosenModel: 'glm-5[1m]',
-      sessionModel: 'glm-5[1m]',
-      resolved: { config: { anthropicModel: 'glm-5[1m]' } },
+      chosenModel: 'glm-5-long',
+      sessionModel: 'glm-5-long',
+      resolved: { config: { anthropicModel: 'glm-5-long' } },
     });
-    const env = envOf(selection);
-    for (const key of [
-      'ANTHROPIC_MODEL',
-      'ANTHROPIC_DEFAULT_OPUS_MODEL',
-      'ANTHROPIC_DEFAULT_SONNET_MODEL',
-      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-      'CLAUDE_CODE_SUBAGENT_MODEL',
-    ]) {
-      expect(env(key)).toBe('glm-5[1m]');
-    }
-    expect(env('CLAUDE_CODE_AUTO_COMPACT_WINDOW')).toBe('1000000');
 
     pick(glm.id);
-    const own = envOf(select());
-    expect(own('ANTHROPIC_MODEL')).toBe('glm-5');
-    expect(own('CLAUDE_CODE_AUTO_COMPACT_WINDOW')).toBe('200000');
-  });
-
-  test('a hidden model runs when the conversation names it', () => {
-    pick(glm.id, 'glm-legacy');
-    expect(select().resolved.config.anthropicModel).toBe('glm-legacy');
+    expect(select().resolved.config.anthropicModel).toBe('glm-5');
   });
 
   test('a pick the configuration no longer offers runs its default and says why', () => {
@@ -247,11 +227,11 @@ describe('a conversation runs the model it picked within its configuration', () 
 
   test('a pass-through relay runs the picked model, and none without a pick', () => {
     pick(relay.id, 'relay-a');
-    expect(envOf(select())('ANTHROPIC_MODEL')).toBe('relay-a');
+    expect(select().resolved.config.anthropicModel).toBe('relay-a');
     pick(relay.id);
     const selection = select();
     expect(selection.sessionModel).toBe('');
-    expect(envOf(selection)('ANTHROPIC_MODEL')).toBeUndefined();
+    expect(selection.resolved.launchEffort).toBeUndefined();
   });
 });
 
@@ -278,11 +258,8 @@ describe('an Agent runs the model it is bound to', () => {
     ).toBe('kimi-k3');
   });
 
-  test('a model without the binding that offers it is ignored', () => {
-    runtimeConfig.setDefaultModelConfig(glm.id);
-    const selection = select({ model: 'glm-5-air' });
-    expect(selection.profileId).toBe(glm.id);
-    expect(selection.resolved.config.anthropicModel).toBe('glm-5');
+  test('a model without the binding that offers it runs nothing', () => {
+    expect(select({ model: 'glm-5-air' })).toBeNull();
   });
 
   test('a model the configuration dropped runs its default and says why', () => {
@@ -295,63 +272,66 @@ describe('an Agent runs the model it is bound to', () => {
   });
 });
 
-describe("a model's own effort", () => {
-  test('comes with the model the launch runs on', () => {
-    pick(glm.id, 'glm-5-air');
-    const selection = select();
-    expect(selection.resolved.customEnv.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
+describe('the launch effort', () => {
+  test("is the model's default without a pick, written to the environment", () => {
+    const selection = select({ modelConfigId: glm.id, model: 'glm-5-air' });
+    expect(selection.resolved.launchEffort).toBe('low');
     expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
   });
 
-  test("an Agent's explicit effort wins", () => {
-    pick(glm.id, 'glm-5-air');
-    const env = envOf(select(), {
-      id: 'agent',
-      name: 'Agent',
-      version: 1,
-      isDefault: false,
-      identityHash: '',
-      identityPrompt: '',
-      includeClaudePreset: true,
-      runtimePolicy: db.normalizeAgentProfileRuntimePolicy({
-        reasoning: { effort: 'high' },
-      }),
-    });
-    expect(env('CLAUDE_CODE_EFFORT_LEVEL')).toBeUndefined();
+  test("an Agent's explicit effort wins when the model takes it", () => {
+    const agent: Agent = {
+      modelConfigId: glm.id,
+      model: 'glm-5-air',
+      effort: 'medium',
+    };
+    const selection = select(agent);
+    expect(selection.resolved.launchEffort).toBe('medium');
+    expect(
+      envOf(selection, agentProfile('medium'))('CLAUDE_CODE_EFFORT_LEVEL'),
+    ).toBe('medium');
+    // Not taken: the model's default runs instead.
+    expect(select({ ...agent, effort: 'max' }).resolved.launchEffort).toBe(
+      'low',
+    );
   });
 
   test("a conversation's effort wins over the model's and the Agent's", () => {
     pick(kimi.id, 'kimi-k3', 'low');
-    const selection = select();
-    expect(selection.sessionEffort).toBe('low');
-    expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
-
-    // Over an Agent's own effort too, through the environment, which Claude
-    // Code ranks above the SDK effort the runner passes for the Agent. The
-    // Agent profile the runner sees, and hashes, stays as stored.
-    const runtimePolicy = db.normalizeAgentProfileRuntimePolicy({
-      reasoning: { effort: 'max' },
-    });
-    const stored = JSON.stringify(runtimePolicy);
-    const env = envOf(selection, {
-      id: 'agent',
-      name: 'Agent',
-      version: 1,
-      isDefault: false,
-      identityHash: '',
-      identityPrompt: '',
-      includeClaudePreset: true,
-      runtimePolicy,
-    });
-    expect(env('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
-    expect(JSON.stringify(runtimePolicy)).toBe(stored);
+    const selection = select({ effort: 'max' });
+    expect(selection.resolved.launchEffort).toBe('low');
+    // Claude Code ranks the environment above the SDK effort the runner
+    // passes for the Agent; the profile the runner sees stays as stored.
+    const profile = agentProfile('max');
+    const stored = JSON.stringify(profile.runtimePolicy);
+    expect(envOf(selection, profile)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
+    expect(JSON.stringify(profile.runtimePolicy)).toBe(stored);
   });
 
   test('an effort the model does not take is ignored', () => {
     pick(glm.id, 'glm-5-air', 'high');
-    const selection = select();
-    expect(selection).not.toHaveProperty('sessionEffort');
-    expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
+    expect(select().resolved.launchEffort).toBe('low');
+  });
+
+  test('a model that takes no effort gets none, whatever the connection env says', () => {
+    pick(glm.id, 'glm-5');
+    const selection = select({ effort: 'high' });
+    expect(selection.resolved.launchEffort).toBeUndefined();
+    expect(
+      envOf(
+        {
+          ...selection,
+          resolved: {
+            ...selection.resolved,
+            customEnv: {
+              ...selection.resolved.customEnv,
+              CLAUDE_CODE_EFFORT_LEVEL: 'max',
+            },
+          },
+        },
+        agentProfile('high'),
+      )('CLAUDE_CODE_EFFORT_LEVEL'),
+    ).toBeUndefined();
   });
 
   test('an effort-only change keeps the SDK session', () => {
@@ -364,61 +344,25 @@ describe("a model's own effort", () => {
     expect(launch()).toMatchObject({ predicted: false, reset: false });
     expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
   });
+});
 
-  test('a model without one keeps the configuration effort', () => {
-    pick(glm.id, 'glm-5[1m]');
-    const selection = select();
-    expect(selection.resolved.customEnv).not.toHaveProperty(
-      'CLAUDE_CODE_EFFORT_LEVEL',
-    );
-    expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('max');
-  });
-
-  test("the pool's pick brings its model's effort; a fallback tier is judged as itself", () => {
-    db.setSessionProviderId(FOLDER, null, kimi.id);
-    expect(select().resolved.customEnv.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
-
-    runtimeConfig.saveSystemSettings({ fallbackModel: 'glm-5-air' });
-    providerPool.reportModelFailure(glm.id, 'glm-5');
-    providerPool.reportModelFailure(kimi.id, 'kimi-k3');
-    const onKimi = select();
-    expect(onKimi).toMatchObject({
-      profileId: kimi.id,
-      modelOverride: 'glm-5-air',
-    });
-    // Kimi does not list the fallback model: kimi-k3's effort is not its.
-    expect(onKimi.resolved.customEnv).not.toHaveProperty(
-      'CLAUDE_CODE_EFFORT_LEVEL',
-    );
-
-    db.setSessionProviderId(FOLDER, null, glm.id);
-    const onGlm = select();
-    expect(onGlm).toMatchObject({
-      profileId: glm.id,
-      modelOverride: 'glm-5-air',
-    });
-    expect(onGlm.resolved.customEnv.CLAUDE_CODE_EFFORT_LEVEL).toBe('low');
+describe('the runner fallback model', () => {
+  test('is named for the connection: [1m] when its window needs it', () => {
+    runtimeConfig.saveSystemSettings({ fallbackModel: 'glm-5-long' });
+    const selection = select({ modelConfigId: glm.id });
+    expect(selection.resolved.fallbackModel).toBe('glm-5-long[1m]');
+    expect(envOf(selection)('HAPPYCLAW_FALLBACK_MODEL')).toBe('glm-5-long[1m]');
   });
 });
 
 describe('one SDK session runs on one model', () => {
   test('a session from before models were recorded keeps its SDK session', () => {
-    // Pinned by the Agent's binding, no model anywhere.
     legacySession(glm.id);
     expect(db.getSessionModel(FOLDER, null)).toBeNull();
     const pinned = launch({ modelConfigId: glm.id });
     expect(pinned).toMatchObject({ predicted: false, reset: false });
     expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
     expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
-
-    // Bound by the pool's sticky failover.
-    db.deleteAllSessionsForFolder(FOLDER);
-    legacySession(kimi.id);
-    const pooled = launch();
-    expect(pooled).toMatchObject({ predicted: false, reset: false });
-    expect(pooled.selection.profileId).toBe(kimi.id);
-    expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
-    expect(db.getSessionModel(FOLDER, null)).toBe('kimi-k3');
   });
 
   test('a pick and an un-pick each start a new session exactly once', () => {
@@ -426,7 +370,7 @@ describe('one SDK session runs on one model', () => {
     pick(glm.id);
     const steps: Array<[string, boolean]> = [];
     const turn = (label: string) => {
-      const { predicted, reset } = launch();
+      const { predicted, reset } = launch({ modelConfigId: glm.id });
       expect(predicted).toBe(reset);
       steps.push([label, reset]);
     };
@@ -440,8 +384,8 @@ describe('one SDK session runs on one model', () => {
     pick(glm.id, 'glm-5-air');
     turn('picked once more');
     pick(null);
-    turn('no pick: the pool keeps the binding on its default');
-    turn('pool again');
+    turn('no pick: the Agent binding runs its default');
+    turn('binding again');
     expect(steps).toEqual([
       ['the configuration default, as before', false],
       ['picked', true],
@@ -449,24 +393,21 @@ describe('one SDK session runs on one model', () => {
       ['back to the default', true],
       ['default again', false],
       ['picked once more', true],
-      ['no pick: the pool keeps the binding on its default', true],
-      ['pool again', false],
+      ['no pick: the Agent binding runs its default', true],
+      ['binding again', false],
     ]);
     expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
   });
 
-  test('switching only the 1M window keeps the session: the upstream model is the same', () => {
+  test('a session recorded with [1m] keeps running: only the window differed', () => {
     legacySession(glm.id);
-    pick(glm.id);
-    expect(launch()).toMatchObject({ predicted: false, reset: false });
-    pick(glm.id, 'glm-5[1m]');
-    const widened = launch();
-    expect(widened).toMatchObject({ predicted: false, reset: false });
-    expect(widened.selection.resolved.config.anthropicModel).toBe('glm-5[1m]');
-    expect(db.getSessionModel(FOLDER, null)).toBe('glm-5[1m]');
-    pick(glm.id);
-    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    db.setSessionModel(FOLDER, null, 'glm-5[1m]');
+    expect(launch({ modelConfigId: glm.id })).toMatchObject({
+      predicted: false,
+      reset: false,
+    });
     expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
+    expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
   });
 
   test("an Agent's model binding that changes the model starts a new session once", () => {
@@ -480,42 +421,12 @@ describe('one SDK session runs on one model', () => {
     expect(launch(agent)).toMatchObject({ predicted: false, reset: false });
   });
 
-  test('pool rotation starts a new session only when the provider changes', () => {
-    balancing('round-robin');
+  test('another connection starts a new session', () => {
     legacySession(glm.id);
-    let changes = 0;
-    for (let i = 0; i < 6; i += 1) {
-      const { reset, selection } = launch();
-      const changed = selection.previousProviderId !== selection.profileId;
-      if (changed) changes += 1;
-      expect(reset).toBe(changed);
-      expect(db.getSessionModel(FOLDER, null)).toBe(
-        selection.profileId === glm.id ? 'glm-5' : 'kimi-k3',
-      );
-    }
-    expect(changes).toBeGreaterThan(0);
-  });
-
-  test('a fallback tier escalation keeps the session, as it always has', () => {
-    runtimeConfig.saveSystemSettings({ fallbackModel: 'claude-opus-5' });
-    legacySession(glm.id);
-    expect(launch()).toMatchObject({ predicted: false, reset: false });
-    expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
-
-    providerPool.reportModelFailure(glm.id, 'glm-5');
-    providerPool.reportModelFailure(kimi.id, 'kimi-k3');
-    const escalated = launch();
-    expect(escalated.selection).toMatchObject({
-      profileId: glm.id,
-      modelOverride: 'claude-opus-5',
+    expect(launch({ modelConfigId: kimi.id })).toMatchObject({
+      predicted: true,
+      reset: true,
     });
-    expect(escalated).toMatchObject({ predicted: false, reset: false });
-    expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
-    expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
-
-    providerPool.resetModelQuarantine(glm.id);
-    providerPool.resetModelQuarantine(kimi.id);
-    expect(launch()).toMatchObject({ predicted: false, reset: false });
-    expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
+    expect(db.getSessionModel(FOLDER, null)).toBe('kimi-k3');
   });
 });

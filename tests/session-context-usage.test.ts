@@ -303,7 +303,7 @@ describe('the window when Claude Code has not reported one', () => {
     });
   });
 
-  test("a connection's own CLAUDE_CODE_AUTO_COMPACT_WINDOW is the window", async () => {
+  test("a connection model's declared window is the window", async () => {
     session([assistant('glm-5.3', 100_000, 0, 0)], { model: 'glm-5.3' });
     bound(
       runtimeConfig.createProvider({
@@ -312,7 +312,7 @@ describe('the window when Claude Code has not reported one', () => {
         anthropicBaseUrl: 'https://glm.example.test',
         anthropicAuthToken: 'glm-token-123456',
         anthropicModel: 'glm-5.3',
-        customEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500000' },
+        models: [{ id: 'glm-5.3', contextWindow: 500_000 }],
       }),
     );
     expect(await usage.readSessionContextUsage(FOLDER, null)).toMatchObject({

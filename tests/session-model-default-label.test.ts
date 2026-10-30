@@ -1,7 +1,7 @@
 /**
  * The chat picker labels "default" with `default.model`. It must name the
  * model a launch without a conversation pick really runs, so the label is
- * checked against the real pool selection, not against a copy of its rules.
+ * checked against the real launch selection, not against a copy of its rules.
  *
  * Real configuration file and database in a temp DATA_DIR.
  */
@@ -53,13 +53,13 @@ vi.mock(
 );
 
 const OWNER = vi.hoisted(() => 'label-owner');
+const ADMIN = 'label-admin';
 const JID = 'web:default-label';
 const FOLDER = 'default-label';
 
 const runtimeConfig = await import('../src/runtime-config.js');
 const db = await import('../src/db.js');
 const runner = await import('../src/container-runner.js');
-const { providerPool } = await import('../src/provider-pool.js');
 const groupRoutes = (await import('../src/routes/groups.js')).default;
 const { CODEX_GATEWAY_BASE_URL_PLACEHOLDER } =
   await import('../src/codex-gateway/types.js');
@@ -86,8 +86,7 @@ beforeAll(() => {
     anthropicBaseUrl: 'https://glm.example.test',
     anthropicAuthToken: 'glm-token',
     anthropicModel: 'glm-5',
-    models: [{ id: 'glm-5' }, { id: 'glm-5-air', hidden: true }],
-    enabled: true,
+    models: [{ id: 'glm-5' }, { id: 'glm-5-air' }],
   });
   kimi = runtimeConfig.createProvider({
     name: 'Kimi',
@@ -95,7 +94,6 @@ beforeAll(() => {
     anthropicBaseUrl: 'https://kimi.example.test',
     anthropicAuthToken: 'kimi-token',
     anthropicModel: 'kimi-k3',
-    enabled: false,
   });
   chatgpt = runtimeConfig.createProvider({
     name: 'ChatGPT',
@@ -111,7 +109,18 @@ beforeAll(() => {
       planType: null,
       email: null,
     },
-    enabled: false,
+  });
+  const at = new Date().toISOString();
+  db.createUser({
+    id: ADMIN,
+    username: ADMIN,
+    password_hash: 'test-only',
+    display_name: ADMIN,
+    role: 'admin',
+    status: 'active',
+    created_at: at,
+    updated_at: at,
+    must_change_password: false,
   });
 });
 
@@ -121,19 +130,28 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  runtimeConfig.setDefaultModelConfig(null);
-  runtimeConfig.setProviderEnabled(glm.id, true);
-  runtimeConfig.setProviderEnabled(kimi.id, false);
+  bindMain(OWNER, null);
+  bindMain(ADMIN, null);
   db.deleteWorkspaceAgentProfile(FOLDER);
   db.deleteAllSessionsForFolder(FOLDER);
   agentId = '';
-  for (const provider of [glm, kimi, chatgpt]) {
-    providerPool.resetHealth(provider.id);
-  }
 });
 
-/** Bind the workspace to an Agent on (configuration, model). */
-function bindAgent(modelConfigId: string, model?: string): void {
+/** Bind a user's main Agent to (configuration, model). */
+function bindMain(
+  userId: string,
+  modelConfigId: string | null,
+  model?: string,
+): void {
+  const main = db.getOrCreateDefaultAgentProfile(userId);
+  db.updateAgentProfile(main.id, userId, {
+    modelConfigId,
+    model: model ?? null,
+  });
+}
+
+/** Bind the workspace to an Agent on (configuration, model), or on none. */
+function bindAgent(modelConfigId: string | null, model?: string): void {
   const profile = db.createAgentProfile({
     ownerUserId: OWNER,
     name: `Agent ${Math.random()}`,
@@ -169,20 +187,12 @@ function launched(): {
     FOLDER,
     null,
     profile?.model_config_id,
-    null,
     profile?.model,
   )!;
-  providerPool.releaseSession(selection.profileId);
-  const effortLine = runtimeConfig
-    .buildClaudeEnvLines(
-      selection.resolved.config,
-      selection.resolved.customEnv,
-    )
-    .find((line) => line.startsWith('CLAUDE_CODE_EFFORT_LEVEL='));
   return {
     profileId: selection.profileId,
     model: selection.sessionModel || null,
-    effort: effortLine?.split('=')[1] ?? null,
+    effort: selection.resolved.launchEffort ?? null,
   };
 }
 
@@ -196,19 +206,17 @@ async function expectLabelMatchesLaunch(expected: {
   expect(label).toMatchObject(expected);
   expect(label.modelConfigId).toBe(launch.profileId);
   expect(label.model).toBe(launch.model);
-  // A model that takes efforts runs at the one the label names.
-  if (expected.effort) expect(label.effort).toBe(launch.effort);
+  // Outside ChatGPT the label's effort is the one the launch writes.
+  if (expected.effort !== undefined) {
+    expect(label.effort).toBe(expected.effort);
+    expect(launch.effort).toBe(expected.effort);
+  }
 }
 
 describe('default.model names what an unpicked launch runs', () => {
   test("an Agent's model within its configuration", async () => {
     bindAgent(glm.id, 'glm-5-air');
-    // glm-5-air runs low, but takes no effort a conversation could pick.
-    await expectLabelMatchesLaunch({
-      source: 'agent',
-      model: 'glm-5-air',
-      effort: null,
-    });
+    await expectLabelMatchesLaunch({ source: 'agent', model: 'glm-5-air' });
   });
 
   test("an Agent's model the configuration no longer offers", async () => {
@@ -218,29 +226,35 @@ describe('default.model names what an unpicked launch runs', () => {
 
   test('an Agent bound to a configuration without a model', async () => {
     bindAgent(kimi.id);
+    // The registry's default for kimi-k3, never a blanket max.
     await expectLabelMatchesLaunch({
       source: 'agent',
       model: 'kimi-k3',
-      effort: 'max',
+      effort: 'high',
     });
   });
 
-  test('the global default', async () => {
-    runtimeConfig.setDefaultModelConfig(kimi.id);
-    await expectLabelMatchesLaunch({
-      source: 'default',
-      model: 'kimi-k3',
-      effort: 'max',
-    });
+  test("the workspace's own main Agent is the Agent", async () => {
+    bindMain(OWNER, glm.id, 'glm-5-air');
+    await expectLabelMatchesLaunch({ source: 'agent', model: 'glm-5-air' });
   });
 
-  test('the single enabled configuration', async () => {
-    await expectLabelMatchesLaunch({ source: 'single', model: 'glm-5' });
+  test("an unbound Agent follows the owner's main Agent, with its model", async () => {
+    bindAgent(null);
+    bindMain(OWNER, glm.id, 'glm-5-air');
+    await expectLabelMatchesLaunch({ source: 'owner_main', model: 'glm-5-air' });
   });
 
-  test('a ChatGPT subscription, as default and as an Agent model', async () => {
-    runtimeConfig.setDefaultModelConfig(chatgpt.id);
-    await expectLabelMatchesLaunch({ source: 'default', model: 'gpt-6-sol' });
+  test('the system main HappyClaw', async () => {
+    bindAgent(null);
+    bindMain(ADMIN, kimi.id);
+    await expectLabelMatchesLaunch({ source: 'system_main', model: 'kimi-k3' });
+  });
+
+  test('a ChatGPT subscription, inherited and as an Agent model', async () => {
+    bindAgent(null);
+    bindMain(OWNER, chatgpt.id);
+    await expectLabelMatchesLaunch({ source: 'owner_main', model: 'gpt-6-sol' });
     // ChatGPT's effort is the gateway's, as its catalog view reports it.
     const chatgptView = (
       await (
@@ -257,12 +271,15 @@ describe('default.model names what an unpicked launch runs', () => {
     await expectLabelMatchesLaunch({ source: 'agent', model: 'gpt-6.1-sol' });
   });
 
-  test('the automatic pool names no model', async () => {
-    runtimeConfig.setProviderEnabled(kimi.id, true);
+  test('nothing bound names no connection', async () => {
     expect(await labelled()).toMatchObject({
-      source: 'pool',
+      source: 'none',
       modelConfigId: null,
       model: null,
+      effort: null,
     });
+    expect(
+      runner.trySelectPoolProvider(FOLDER, null, null, null),
+    ).toBeNull();
   });
 });

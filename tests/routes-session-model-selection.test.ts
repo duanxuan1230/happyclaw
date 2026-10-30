@@ -28,8 +28,6 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   chatgptPlan: null as string | null,
   chatgptRefreshError: null as { kind: string } | null,
-  /** The global default; null leaves the automatic pool in charge. */
-  defaultConfigId: null as string | null,
   workspaceEnv: {} as Record<string, string>,
 }));
 
@@ -81,10 +79,6 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => {
   return {
     ...real,
     getContainerEnvConfig: () => mocks.workspaceEnv,
-    getUsableDefaultProvider: () =>
-      savedProviders().find(
-        (provider) => provider.id === mocks.defaultConfigId,
-      ) ?? null,
     getProviders: () => savedProviders(),
   };
 });
@@ -121,10 +115,10 @@ function savedProviders() {
       type: 'third_party',
       enabled: false,
       anthropicBaseUrl: 'https://glm.example.test',
-      anthropicModel: 'glm-5.3[1m]',
+      anthropicModel: 'glm-5.3',
       anthropicAuthToken: 'glm-token',
       models: [
-        { id: 'glm-5.3[1m]' },
+        { id: 'glm-5.3', contextWindow: 1_000_000 },
         { id: 'glm-5.3-air', effort: 'low' },
         { id: 'glm-5.3-legacy', hidden: true },
       ],
@@ -149,6 +143,17 @@ const { issueCodexGatewayToken, revokeCodexGatewayToken } =
   await import('../src/codex-gateway/runner-tokens.js');
 
 const OWNER_ID = 'alice';
+const ADMIN_ID = 'model-selection-admin';
+
+/** Bind a user's main Agent (its default profile) to a connection. */
+function bindMain(userId: string, modelConfigId: string | null): void {
+  const main = db.getOrCreateDefaultAgentProfile(userId);
+  db.updateAgentProfile(main.id, userId, { modelConfigId, model: null });
+}
+
+function bindOwnerMain(modelConfigId: string | null): void {
+  bindMain(OWNER_ID, modelConfigId);
+}
 const GROUP_JID = 'web:model-selection-group';
 const GROUP_FOLDER = 'model-selection-group';
 const AGENT_ID = 'agent-model-1';
@@ -177,6 +182,18 @@ beforeAll(() => {
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
+  const at = new Date().toISOString();
+  db.createUser({
+    id: ADMIN_ID,
+    username: ADMIN_ID,
+    password_hash: 'test-only',
+    display_name: ADMIN_ID,
+    role: 'admin',
+    status: 'active',
+    created_at: at,
+    updated_at: at,
+    must_change_password: false,
+  });
   db.setRegisteredGroup(GROUP_JID, {
     name: 'Model Selection Group',
     folder: GROUP_FOLDER,
@@ -218,7 +235,7 @@ beforeEach(() => {
   mocks.permissions = [];
   mocks.chatgptPlan = null;
   mocks.chatgptRefreshError = null;
-  mocks.defaultConfigId = null;
+  bindOwnerMain(null);
   mocks.workspaceEnv = {};
   mocks.drainCalls = [];
   mocks.refresh.mockClear();
@@ -239,26 +256,29 @@ describe('GET /:jid/model-selection', () => {
     expect(body.selectedModelConfigId).toBeNull();
     expect(body.selectedModel).toBeNull();
     expect(body.selectedEffort).toBeNull();
-    expect(body.default).toMatchObject({ source: 'pool', enabledCount: 2 });
+    // Nothing is bound: no pool, no single-enabled fallback.
+    expect(body.default).toEqual({
+      source: 'none',
+      modelConfigId: null,
+      model: null,
+      effort: null,
+    });
     // A ChatGPT configuration offers its account catalog (`codex`); every
-    // other one offers its own model list, the default model always in it.
+    // other one offers its own model list with what each model takes.
     expect(body.options.map(({ codex, ...option }: any) => option)).toEqual([
       {
         id: 'official',
         name: 'Claude 官方',
         kind: 'official',
-        enabled: true,
         model: 'opus',
         usable: true,
-        // What the model takes, from its capabilities. With no effort of its
-        // own and none from the endpoint, Claude Code picks the level: no
-        // default effort is claimed.
         models: [
           {
             id: 'opus',
-            hidden: false,
             efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'medium',
             contextWindow: 1_000_000,
+            effortsSource: 'registry',
           },
         ],
       },
@@ -266,7 +286,6 @@ describe('GET /:jid/model-selection', () => {
         id: 'chatgpt',
         name: 'ChatGPT 订阅',
         kind: 'codex',
-        enabled: true,
         model: 'gpt-6-sol',
         usable: true,
       },
@@ -274,36 +293,46 @@ describe('GET /:jid/model-selection', () => {
         id: 'glm',
         name: 'GLM',
         kind: 'third_party',
-        enabled: false,
-        model: 'glm-5.3[1m]',
+        model: 'glm-5.3',
         usable: true,
-        // A third-party endpoint runs at max unless a model says otherwise;
-        // a model without known capabilities offers no efforts to pick.
         models: [
           {
-            id: 'glm-5.3[1m]',
-            hidden: false,
+            id: 'glm-5.3',
             efforts: ['low', 'high', 'max'],
-            defaultEffort: 'max',
+            defaultEffort: 'high',
             contextWindow: 1_000_000,
+            effortsSource: 'registry',
           },
-          { id: 'glm-5.3-air', hidden: false, defaultEffort: 'low' },
-          { id: 'glm-5.3-legacy', hidden: true, defaultEffort: 'max' },
+          // Nothing is known about it: no effort is offered, claimed or sent.
+          {
+            id: 'glm-5.3-air',
+            efforts: [],
+            defaultEffort: null,
+            contextWindow: null,
+            effortsSource: 'none',
+          },
+          {
+            id: 'glm-5.3-legacy',
+            efforts: [],
+            defaultEffort: null,
+            contextWindow: null,
+            effortsSource: 'none',
+          },
         ],
       },
       {
         id: 'copy',
         name: 'GLM (副本)',
         kind: 'third_party',
-        enabled: false,
         model: 'glm-5.3',
         usable: false,
         models: [
           {
             id: 'glm-5.3',
-            hidden: false,
             efforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
             contextWindow: 1_000_000,
+            effortsSource: 'registry',
           },
         ],
       },
@@ -316,48 +345,71 @@ describe('GET /:jid/model-selection', () => {
     expect(JSON.stringify(body)).not.toContain('secret');
   });
 
-  test('claims no default effort where Claude Code picks the level itself', async () => {
-    // An official connection without an effort of its own: opus takes
-    // efforts, but nothing here sets one.
-    mocks.defaultConfigId = 'official';
+  test("the workspace's Agent binding is what an unselected conversation runs on", async () => {
+    bindOwnerMain('glm');
     const { body } = await call('GET');
-    expect(body.default).toMatchObject({
-      source: 'default',
-      model: 'opus',
-      effort: null,
-    });
-  });
-
-  test('reports the global default as what an unselected conversation runs on', async () => {
-    mocks.defaultConfigId = 'glm';
-    const { body } = await call('GET');
+    // The model's own default effort, never a blanket max.
     expect(body.default).toEqual({
-      source: 'default',
+      source: 'agent',
       modelConfigId: 'glm',
-      model: 'glm-5.3[1m]',
-      effort: 'max',
-      enabledCount: 2,
+      model: 'glm-5.3',
+      effort: 'high',
     });
     expect(body.selectedModelConfigId).toBeNull();
   });
 
-  test('a Workspace that brings its own provider environment keeps it over the global default', async () => {
-    mocks.defaultConfigId = 'glm';
-    mocks.workspaceEnv = { anthropicBaseUrl: 'https://own.example.test' };
-    const { body } = await call('GET');
-    expect(body.default).toMatchObject({
-      source: 'workspace_env',
-      modelConfigId: null,
+  test('an unbound Agent follows the owner main, then the system main', async () => {
+    const custom = db.createAgentProfile({
+      ownerUserId: OWNER_ID,
+      name: `Unbound ${Math.random()}`,
     });
+    db.assignWorkspaceAgentProfile(GROUP_FOLDER, custom.id);
+    try {
+      bindOwnerMain('official');
+      expect((await call('GET')).body.default).toMatchObject({
+        source: 'owner_main',
+        modelConfigId: 'official',
+        model: 'opus',
+        effort: 'medium',
+      });
+      bindOwnerMain(null);
+      bindMain(ADMIN_ID, 'glm');
+      expect((await call('GET')).body.default).toMatchObject({
+        source: 'system_main',
+        modelConfigId: 'glm',
+      });
+    } finally {
+      bindMain(ADMIN_ID, null);
+      db.deleteWorkspaceAgentProfile(GROUP_FOLDER);
+    }
+  });
+
+  test('a Workspace that brings its own provider environment outranks inherited bindings', async () => {
+    const custom = db.createAgentProfile({
+      ownerUserId: OWNER_ID,
+      name: `Unbound ${Math.random()}`,
+    });
+    db.assignWorkspaceAgentProfile(GROUP_FOLDER, custom.id);
+    try {
+      bindOwnerMain('glm');
+      mocks.workspaceEnv = { anthropicBaseUrl: 'https://own.example.test' };
+      const { body } = await call('GET');
+      expect(body.default).toMatchObject({
+        source: 'workspace_env',
+        modelConfigId: null,
+      });
+    } finally {
+      db.deleteWorkspaceAgentProfile(GROUP_FOLDER);
+    }
   });
 
   test('a conversation pick is reported next to, not instead of, the default', async () => {
-    mocks.defaultConfigId = 'glm';
+    bindOwnerMain('glm');
     await call('PUT', '', { modelConfigId: 'official' });
     const { body } = await call('GET');
     expect(body.selectedModelConfigId).toBe('official');
     expect(body.default).toMatchObject({
-      source: 'default',
+      source: 'agent',
       modelConfigId: 'glm',
     });
   });

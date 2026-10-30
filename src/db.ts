@@ -82,6 +82,7 @@ import {
 } from './agent-profile-identity.js';
 import { assertDatabaseMaintenanceAccess } from './database-maintenance.js';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
+import { splitOneMillionSuffix } from './model-providers.js';
 import type {
   RouterCursorChange,
   RouterCursorKind,
@@ -2720,9 +2721,52 @@ export function initDatabase(
     })();
   }
 
+  // v85 -> v86: a model's window is a field of its connection, so stored
+  // model names lose Claude Code's `[1m]` switch (the launch adds it back
+  // from the window). Idempotent: a name without the suffix is left alone.
+  if (
+    rawSchemaVersionBeforeInit === null ||
+    Number(rawSchemaVersionBeforeInit) < 86
+  ) {
+    stripStoredOneMillionSuffixes();
+  }
+
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', String(CURRENT_SCHEMA_VERSION));
+}
+
+/** Columns holding a model name a launch reads back. */
+const STORED_MODEL_NAME_COLUMNS = [
+  ['session_model_selections', 'model'],
+  ['agent_profiles', 'model'],
+  ['sessions', 'model'],
+] as const;
+
+function stripStoredOneMillionSuffixes(): void {
+  db.transaction(() => {
+    for (const [table, column] of STORED_MODEL_NAME_COLUMNS) {
+      if (!tableExists(table)) continue;
+      const rows = db
+        .prepare(
+          `SELECT rowid AS id, ${column} AS model FROM ${table}
+           WHERE lower(${column}) LIKE '%[1m]'`,
+        )
+        .all() as Array<{ id: number; model: string }>;
+      const update = db.prepare(
+        `UPDATE ${table} SET ${column} = ? WHERE rowid = ?`,
+      );
+      for (const row of rows) {
+        update.run(splitOneMillionSuffix(row.model).model || null, row.id);
+      }
+      if (rows.length > 0) {
+        logger.info(
+          { table, column, count: rows.length },
+          'Stripped [1m] from stored model names',
+        );
+      }
+    }
+  })();
 }
 
 const LEGACY_ROUTER_CURSOR_BLOBS: ReadonlyArray<
@@ -5431,7 +5475,7 @@ export function setSessionModelSelection(
     groupFolder,
     effectiveAgentId,
     modelConfigId,
-    overrides?.model || null,
+    storedModelName(overrides?.model),
     overrides?.effort || null,
     updatedBy ?? null,
     new Date().toISOString(),
@@ -6544,6 +6588,11 @@ export function commitAgentBuilderDraft(
   })();
 }
 
+/** A model name as stored: never with Claude Code's `[1m]` switch. */
+function storedModelName(model: string | null | undefined): string | null {
+  return (model && splitOneMillionSuffix(model).model) || null;
+}
+
 const DEFAULT_AGENT_PROFILE_NAME = 'HappyClaw';
 const LEGACY_DEFAULT_AGENT_PROFILE_NAME = 'Default Agent';
 
@@ -6688,7 +6737,7 @@ export function createAgentProfile(input: {
     input.avatarColor ?? null,
     input.avatarUrl ?? null,
     input.modelConfigId ?? null,
-    (input.modelConfigId && input.model) || null,
+    (input.modelConfigId && storedModelName(input.model)) || null,
     runtimePolicyJson,
     identityHash,
     now,
@@ -6770,7 +6819,7 @@ export function updateAgentProfile(
   const nextModel = !nextModelConfigId
     ? null
     : updates.model !== undefined
-      ? updates.model || null
+      ? storedModelName(updates.model)
       : modelConfigChanged
         ? null
         : existing.model;
@@ -7171,6 +7220,50 @@ export function peekAgentProfileForWorkspace(
   }
   if (!ownerUserId) return undefined;
   return readDefaultProfile(ownerUserId);
+}
+
+/** A user's main Agent (their default profile), without creating it. */
+export function peekDefaultAgentProfile(
+  userId: string,
+): AgentProfile | undefined {
+  const row = prepareCached(
+    "SELECT * FROM agent_profiles WHERE owner_user_id = ? AND is_default = 1 AND status = 'active' LIMIT 1",
+  ).get(userId) as Record<string, unknown> | undefined;
+  return row ? mapAgentProfileRow(row) : undefined;
+}
+
+/**
+ * The main Agent of the user who owns a workspace folder: the creator of its
+ * Web workspace, the home one first. Read-only.
+ */
+export function peekWorkspaceOwnerMainAgentProfile(
+  groupFolder: string,
+): AgentProfile | undefined {
+  const row = prepareCached(`SELECT created_by
+       FROM registered_groups
+       WHERE folder = ? AND jid LIKE 'web:%' AND created_by IS NOT NULL
+       ORDER BY is_home DESC, added_at ASC
+       LIMIT 1`).get(groupFolder) as { created_by: string } | undefined;
+  return row ? peekDefaultAgentProfile(row.created_by) : undefined;
+}
+
+/**
+ * The system main HappyClaw: the main Agent of the earliest-created active
+ * admin. Every Agent that binds no connection, directly or through its
+ * owner's main Agent, falls back to its binding.
+ */
+export function peekSystemMainAgentProfile(): AgentProfile | undefined {
+  const adminId = getSystemMainAdminUserId();
+  return adminId ? peekDefaultAgentProfile(adminId) : undefined;
+}
+
+/** The earliest-created active admin, whose main Agent is the system main. */
+export function getSystemMainAdminUserId(): string | null {
+  const row = prepareCached(`SELECT id FROM users
+       WHERE role = 'admin' AND status = 'active'
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`).get() as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 export function getAgentProfileForWorkspace(

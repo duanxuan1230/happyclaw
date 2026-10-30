@@ -221,8 +221,6 @@ describe('container launch substitution', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
-      false,
       {
         envLines: ['HTTP_PROXY=http://proxy.example:8080'],
         addHostGateway: false,
@@ -277,8 +275,6 @@ describe('container launch substitution', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
-      false,
       { envLines: [], addHostGateway: false },
       lease,
     );

@@ -219,6 +219,8 @@ describe.skipIf(process.platform === 'darwin')(
         runtimeConfig.providerToConfig(provider),
       );
       db.setSessionProviderId(SIBLING, null, provider.id);
+      // The conversation runs on the provider: nothing runs unbound.
+      db.setSessionModelSelection(FOLDER, null, provider.id, 'test');
 
       process.env.HAPPYCLAW_TEST_ROTATED_OAUTH = JSON.stringify(rotated);
       const first = await runOnce();
