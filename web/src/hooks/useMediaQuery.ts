@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { useEffect, useState } from 'react';
 
 interface QueryStore {
   mql: MediaQueryList;
@@ -42,14 +42,14 @@ function subscribe(query: string, listener: () => void): () => void {
 }
 
 export function useMediaQuery(query: string): boolean {
-  // Stable per query, so a re-render does not resubscribe.
-  const subscribeToQuery = useCallback(
-    (listener: () => void) => subscribe(query, listener),
-    [query],
+  const [matches, setMatches] = useState(() =>
+    typeof window === 'undefined' ? false : storeFor(query).mql.matches,
   );
-  return useSyncExternalStore(
-    subscribeToQuery,
-    () => storeFor(query).mql.matches,
-    () => false,
-  );
+  useEffect(() => {
+    const update = () => setMatches(storeFor(query).mql.matches);
+    const unsubscribe = subscribe(query, update);
+    update();
+    return unsubscribe;
+  }, [query]);
+  return matches;
 }
