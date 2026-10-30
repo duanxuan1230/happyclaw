@@ -3,13 +3,7 @@ import { Loader2, MoreHorizontal, RefreshCw, Star, Trash2 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { ResponsiveMenu } from '@/components/common/ResponsiveMenu';
 import {
   NativeSelect,
   NativeSelectOption,
@@ -273,8 +267,54 @@ export function ConnectionModelList({
                     onToggle={() => toggleOneMillion(entry)}
                     disabled={disabled}
                   />
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                  <ResponsiveMenu
+                    title={`${entry.id} 的操作`}
+                    groups={[
+                      [
+                        ...(!isDefault
+                          ? [
+                              {
+                                label: '设为默认模型',
+                                icon: Star,
+                                onSelect: () =>
+                                  void save(
+                                    models.map((other) =>
+                                      other.id === entry.id
+                                        ? { id: other.id, effort: other.effort }
+                                        : other,
+                                    ),
+                                    entry.id,
+                                  ),
+                              },
+                            ]
+                          : []),
+                        ...(isDefault && allowNoDefault
+                          ? [
+                              {
+                                label: '不再指定默认模型',
+                                icon: Star,
+                                onSelect: () => void save(models, ''),
+                              },
+                            ]
+                          : []),
+                      ],
+                      isDefault
+                        ? []
+                        : [
+                            {
+                              label: '从连接中删除',
+                              icon: Trash2,
+                              destructive: true,
+                              onSelect: () =>
+                                void save(
+                                  models.filter(
+                                    (other) => other.id !== entry.id,
+                                  ),
+                                ),
+                            },
+                          ],
+                    ]}
+                    trigger={
                       <Button
                         type="button"
                         variant="ghost"
@@ -284,51 +324,8 @@ export function ConnectionModelList({
                       >
                         <MoreHorizontal />
                       </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-44">
-                      {!isDefault && (
-                        <DropdownMenuItem
-                          onSelect={() =>
-                            void save(
-                              models.map((other) =>
-                                other.id === entry.id
-                                  ? { id: other.id, effort: other.effort }
-                                  : other,
-                              ),
-                              entry.id,
-                            )
-                          }
-                        >
-                          <Star />
-                          设为默认模型
-                        </DropdownMenuItem>
-                      )}
-                      {isDefault && allowNoDefault && (
-                        <DropdownMenuItem
-                          onSelect={() => void save(models, '')}
-                        >
-                          <Star />
-                          不再指定默认模型
-                        </DropdownMenuItem>
-                      )}
-                      {!isDefault && (
-                        <>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={() =>
-                              void save(
-                                models.filter((other) => other.id !== entry.id),
-                              )
-                            }
-                          >
-                            <Trash2 />
-                            从连接中删除
-                          </DropdownMenuItem>
-                        </>
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                    }
+                  />
                 </div>
               </li>
             );

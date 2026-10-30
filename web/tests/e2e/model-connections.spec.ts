@@ -256,7 +256,11 @@ test.describe('managing a connection', () => {
       });
     }
     await dialog.getByRole('button', { name: 'glm-5.2 的更多操作' }).click();
-    await page.getByRole('menuitem', { name: '设为默认模型' }).click();
+    // On a phone the row menu is an action sheet.
+    await page
+      .getByRole('dialog', { name: 'glm-5.2 的操作' })
+      .getByRole('button', { name: '设为默认模型' })
+      .click();
     const confirm = page.getByRole('alertdialog');
     await expect(confirm).toContainText('保存会停止 3 个运行中的会话');
     await expect(confirm).toContainText('聊天记录保留');

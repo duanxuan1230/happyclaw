@@ -13,16 +13,11 @@ import {
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Switch } from '@/components/ui/switch';
 import { IconButton } from '@/components/common/IconButton';
 import { ListGroup, ListRow } from '@/components/common/ListRow';
+import { ResponsiveMenu } from '@/components/common/ResponsiveMenu';
+import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { effectiveProviderModels } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
 import {
@@ -135,6 +130,8 @@ export function ProviderList({
   testingId,
   disabled,
 }: ProviderListProps) {
+  // Below `sm` the row hides its default and reset buttons (`max-sm:hidden`).
+  const narrow = useMediaQuery('(max-width: 639px)');
   if (providers.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-surface-border px-6 py-10 text-center">
@@ -205,6 +202,10 @@ export function ProviderList({
                   >
                     {testing ? '测试中…' : status.label}
                   </Badge>
+                  {/* Touch has no hover title, so the hint is spelled out. */}
+                  {status.hint && !testing && (
+                    <span className="pointer-fine:hidden">{status.hint}</span>
+                  )}
                   {source && (
                     <span
                       className="max-w-60 truncate font-mono"
@@ -276,8 +277,61 @@ export function ProviderList({
                     }
                     className="mx-1.5"
                   />
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                  <ResponsiveMenu
+                    title={`「${provider.name}」的操作`}
+                    groups={[
+                      [
+                        {
+                          label: '管理',
+                          icon: Settings2,
+                          onSelect: () => onManage(provider),
+                        },
+                        {
+                          label: '测试连接',
+                          icon: PlugZap,
+                          disabled: testing,
+                          onSelect: () => onTest(provider),
+                        },
+                        // 窄屏把行内按钮收进菜单，给名称留出空间
+                        ...(narrow
+                          ? [
+                              {
+                                label: isDefault ? '取消默认' : '设为默认',
+                                icon: Star,
+                                onSelect: () => onSetDefault(provider),
+                              },
+                            ]
+                          : []),
+                        ...(narrow && canResetHealth
+                          ? [
+                              {
+                                label: '重置健康状态',
+                                icon: RotateCcw,
+                                disabled,
+                                onSelect: () => onResetHealth(provider),
+                              },
+                            ]
+                          : []),
+                        ...(canDuplicate
+                          ? [
+                              {
+                                label: '复制',
+                                icon: Copy,
+                                onSelect: () => onDuplicate(provider),
+                              },
+                            ]
+                          : []),
+                      ],
+                      [
+                        {
+                          label: '删除',
+                          icon: Trash2,
+                          destructive: true,
+                          onSelect: () => onDelete(provider),
+                        },
+                      ],
+                    ]}
+                    trigger={
                       <Button
                         type="button"
                         variant="ghost"
@@ -291,55 +345,8 @@ export function ProviderList({
                           <MoreHorizontal />
                         )}
                       </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-36">
-                      <DropdownMenuItem onSelect={() => onManage(provider)}>
-                        <Settings2 />
-                        管理
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={testing}
-                        onSelect={() => onTest(provider)}
-                      >
-                        <PlugZap />
-                        测试连接
-                      </DropdownMenuItem>
-                      {/* 窄屏把行内按钮收进菜单，给名称留出空间 */}
-                      <DropdownMenuItem
-                        className="sm:hidden"
-                        onSelect={() => onSetDefault(provider)}
-                      >
-                        <Star />
-                        {isDefault ? '取消默认' : '设为默认'}
-                      </DropdownMenuItem>
-                      {canResetHealth && (
-                        <DropdownMenuItem
-                          className="sm:hidden"
-                          disabled={disabled}
-                          onSelect={() => onResetHealth(provider)}
-                        >
-                          <RotateCcw />
-                          重置健康状态
-                        </DropdownMenuItem>
-                      )}
-                      {canDuplicate && (
-                        <DropdownMenuItem
-                          onSelect={() => onDuplicate(provider)}
-                        >
-                          <Copy />
-                          复制
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onSelect={() => onDelete(provider)}
-                      >
-                        <Trash2 />
-                        删除
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                    }
+                  />
                 </>
               }
             />
