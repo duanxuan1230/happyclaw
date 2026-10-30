@@ -532,9 +532,7 @@ export class MacosKeychainCredentialStore {
       }
 
       const payload = parsePayload(existingJson);
-      const clearedByClaudeCode =
-        payload.claudeAiOauth !== undefined &&
-        isClearedClaudeAiOauth(payload.claudeAiOauth);
+      const clearedByClaudeCode = isClearedClaudeAiOauth(payload.claudeAiOauth);
       const existingOauth =
         payload.claudeAiOauth === undefined || clearedByClaudeCode
           ? null
@@ -544,7 +542,11 @@ export class MacosKeychainCredentialStore {
         if (clearedByClaudeCode) {
           // Claude Code blanked the item after the previous account was
           // revoked. Without this branch every later spawn fails forever, even
-          // after switching to a healthy account.
+          // after switching to a healthy account. When the same provider still
+          // owns the item, the database credential written back is probably
+          // the revoked one, and the next run will blank it again until that
+          // provider is signed in afresh.
+          const sameProvider = ownership?.providerId === options.providerId;
           logger.warn(
             {
               folder: options.folder ?? null,
@@ -552,7 +554,9 @@ export class MacosKeychainCredentialStore {
               previousProviderId: ownership?.providerId ?? null,
               providerId: options.providerId,
             },
-            'Replacing Keychain claudeAiOauth cleared by Claude Code with the selected provider credentials',
+            sameProvider
+              ? 'Keychain claudeAiOauth cleared by Claude Code; restoring the same provider credentials, which are probably revoked'
+              : 'Replacing Keychain claudeAiOauth cleared by Claude Code with the selected provider credentials',
           );
         }
         const merged = mergeClaudeKeychainPayload(existingJson, desired);

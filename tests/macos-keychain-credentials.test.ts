@@ -534,6 +534,7 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
       providerId: 'official-b',
     });
     expect(message).toContain('cleared by Claude Code');
+    expect(message).not.toContain('probably revoked');
     const logged = JSON.stringify(warnMock.mock.calls);
     expect(logged).not.toContain(REFRESHED.accessToken);
     expect(logged).not.toContain(REFRESHED.refreshToken);
@@ -552,6 +553,7 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
   });
 
   test('replaces a cleared item even when the same provider still owns it', async () => {
+    warnMock.mockClear();
     const fake = new FakeKeychain();
     const service = claudeKeychainServiceName(CONFIG_DIR);
     fake.items.set(service, JSON.stringify({ claudeAiOauth: OAUTH }));
@@ -574,6 +576,17 @@ describe('Keychain claudeAiOauth cleared by Claude Code', () => {
     expect(JSON.parse(fake.items.get(service)!).claudeAiOauth).toEqual(
       normalizeClaudeAiOauth(OAUTH),
     );
+    // The restored credential is likely the revoked one; say so without tokens.
+    expect(warnMock).toHaveBeenCalledTimes(1);
+    const [context, message] = warnMock.mock.calls[0];
+    expect(context).toMatchObject({
+      previousProviderId: 'official-a',
+      providerId: 'official-a',
+    });
+    expect(message).toContain('probably revoked');
+    const logged = JSON.stringify(warnMock.mock.calls);
+    expect(logged).not.toContain(OAUTH.accessToken);
+    expect(logged).not.toContain(OAUTH.refreshToken);
   });
 
   test.each([
