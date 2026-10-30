@@ -615,6 +615,7 @@ describe('reading a connection saved before models carried their settings', () =
       models: [
         { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
         { id: 'k3-big', contextWindow: 1_000_000 },
+        'k3-long[1m]',
       ],
       customEnv: {
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
@@ -622,17 +623,69 @@ describe('reading a connection saved before models carried their settings', () =
       },
     });
     const [provider] = runtimeConfig.getProviders();
-    // A declared 1M was the window only through `[1m]` in an older file, so a
-    // smaller compact window still lowers it.
+    const all = ['low', 'medium', 'high', 'xhigh', 'max'];
+    // A declared 1M stays; a 1M that only came from `[1m]` in the stored
+    // list was a ceiling the compact window lowered.
     expect(provider.models).toEqual([
       { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
       {
         id: 'k3-big',
+        contextWindow: 1_000_000,
+        efforts: all,
+        defaultEffort: 'high',
+      },
+      {
+        id: 'k3-long',
         contextWindow: 256_000,
-        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        efforts: all,
         defaultEffort: 'high',
       },
     ]);
+  });
+
+  test('a window the user declares later is not lowered by a kept legacy key', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' },
+    });
+    const [relay] = runtimeConfig.getProviders();
+    // The wizard declares GLM-5.3 at 1M on the relay that kept the key.
+    runtimeConfig.updateProvider(relay.id, {
+      models: [{ id: 'glm-5.3', contextWindow: 1_000_000 }],
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toEqual([
+      { id: 'glm-5.3', contextWindow: 1_000_000 },
+    ]);
+  });
+
+  test('editing the env keeps the legacy keys the API does not show', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        OLD_FLAG: 'x',
+      },
+    });
+    const [relay] = runtimeConfig.getProviders();
+    const shown = runtimeConfig.toPublicProvider(relay).customEnv;
+    expect(shown).not.toHaveProperty('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+    // The editor saves what it was shown, minus one key.
+    const { OLD_FLAG: _dropped, ...edited } = shown;
+    const updated = runtimeConfig.updateProvider(relay.id, {
+      customEnv: { ...edited, NEW_FLAG: 'y' },
+    });
+    expect(updated.customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      NEW_FLAG: 'y',
+    });
+    expect(updated.customEnv).not.toHaveProperty('OLD_FLAG');
+    expect(readFile().providers[0].customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    });
   });
 
   test('a pass-through relay turns role keys into roles with their models', () => {

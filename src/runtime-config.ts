@@ -1721,6 +1721,16 @@ const UNATTACHED_LEGACY_KEYS = [
   'CLAUDE_CODE_EFFORT_LEVEL',
 ] as const;
 
+/** The legacy keys a connection's env still keeps (see above). */
+function keptLegacyEnv(env: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    UNATTACHED_LEGACY_KEYS.filter((key) => env[key]?.trim()).map((key) => [
+      key,
+      env[key],
+    ]),
+  );
+}
+
 /** Connections whose kept legacy keys were already logged this process. */
 const loggedUnattachedLegacyKeys = new Set<string>();
 
@@ -1740,7 +1750,10 @@ const loggedUnattachedLegacyKeys = new Set<string>();
  * - A connection with an endpoint gets CONNECTION_ENV_PREFILL once, where its
  *   env has no value, so the runtime defaults it ran with keep applying.
  */
-function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
+function migrateConnectionModelFields(
+  provider: UnifiedProvider,
+  storedModelIds: readonly unknown[] = [],
+): boolean {
   const env = provider.customEnv;
   const legacyKeys = CONNECTION_MODEL_ENV_KEYS.filter((key) =>
     Object.hasOwn(env, key),
@@ -1763,8 +1776,17 @@ function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
           models: provider.models,
         })
       : [...(provider.models ?? [])];
-    /** Ids named with `[1m]`: their 1M is a ceiling a compact window lowers. */
+    /**
+     * Ids named with `[1m]` (the connection's model, a role key, or the
+     * stored list): their 1M is a ceiling a compact window lowers. A 1M the
+     * user declared as a window is theirs and stays.
+     */
     const oneMillionIds = new Set<string>(oneMillion ? [model] : []);
+    for (const id of storedModelIds) {
+      if (typeof id !== 'string') continue;
+      const named = splitOneMillionSuffix(id);
+      if (named.oneMillion) oneMillionIds.add(named.model);
+    }
     const legacyRoles: Record<string, string> = {};
     for (const [key, role] of LEGACY_ROLE_ENV_KEYS) {
       const named = splitOneMillionSuffix(env[key]?.trim() ?? '');
@@ -1789,7 +1811,8 @@ function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
     if (attached && compact) {
       models = models.map((entry) =>
         !entry.contextWindow ||
-        (entry.contextWindow === ONE_MILLION_CONTEXT &&
+        (oneMillionIds.has(entry.id) &&
+          entry.contextWindow === ONE_MILLION_CONTEXT &&
           compact < ONE_MILLION_CONTEXT)
           ? { ...entry, contextWindow: compact }
           : entry,
@@ -1878,7 +1901,14 @@ function migrateConnectionsInPlace(
     ) {
       changed = true;
     }
-    if (migrateConnectionModelFields(provider)) changed = true;
+    const storedIds = Array.isArray(raw?.models)
+      ? raw.models.map((entry: unknown) =>
+          typeof entry === 'string'
+            ? entry
+            : (entry as { id?: unknown } | null)?.id,
+        )
+      : [];
+    if (migrateConnectionModelFields(provider, storedIds)) changed = true;
   });
   return changed;
 }
@@ -2608,10 +2638,11 @@ export function updateProvider(
     anthropicModel,
     ...(patch.customEnv !== undefined
       ? {
-          customEnv: sanitizeCustomEnvMap(
-            patch.customEnv,
-            CONNECTION_ENV_WRITE,
-          ),
+          customEnv: {
+            ...sanitizeCustomEnvMap(patch.customEnv, CONNECTION_ENV_WRITE),
+            // The API never shows these, so a new env cannot mean to drop them.
+            ...keptLegacyEnv(current.customEnv),
+          },
         }
       : {}),
     updatedAt: new Date().toISOString(),
