@@ -1195,6 +1195,7 @@ test.describe('touch composer', () => {
       '从此会话创建自动化…',
       '终端',
       '清除上下文',
+      '切换模型',
     ]);
     await sheet.getByRole('button', { name: '清除上下文' }).click();
     const confirm = page.getByRole('alertdialog');

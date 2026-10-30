@@ -387,6 +387,26 @@ test('the phone header’s ⋯ sheet says how full the context is; its buttons t
       json: { usedTokens: 12_000, contextWindow: 200_000, percentage: 6 },
     }),
   );
+  await page.route('**/api/groups/**/model-selection*', (route) =>
+    route.fulfill({
+      json: {
+        selectedModelConfigId: null,
+        selectedModel: null,
+        selectedEffort: null,
+        default: { source: 'pool', modelConfigId: null, enabledCount: 1 },
+        options: [
+          {
+            id: 'official',
+            name: 'Claude 官方',
+            kind: 'official',
+            enabled: true,
+            model: 'opus',
+            usable: true,
+          },
+        ],
+      },
+    }),
+  );
   await prepareHarness(page);
   // The 40px capsule buttons take taps 22px out from their centre, except
   // where the other button's face is.
@@ -434,7 +454,14 @@ test('the phone header’s ⋯ sheet says how full the context is; its buttons t
 
   await header.getByRole('button', { name: '更多选项' }).click();
   const sheet = page.getByRole('dialog', { name: '更多选项' });
-  await expect(
-    sheet.getByRole('button', { name: '上下文 已用 12K / 200K（6%）' }),
-  ).toBeVisible();
+  await expect(sheet.getByRole('button', { name: '切换模型' })).toBeVisible();
+  await settleAnimations(sheet);
+  // The usage row opens the model sheet, which shows the same figures.
+  await sheet
+    .getByRole('button', { name: '上下文 已用 12K / 200K（6%）' })
+    .click();
+  await expect(sheet).toHaveCount(0);
+  await expect(page.locator('[data-context-usage-line]')).toHaveText(
+    '上下文 已用 12K / 200K（6%）',
+  );
 });

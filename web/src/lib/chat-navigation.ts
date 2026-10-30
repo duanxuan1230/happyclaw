@@ -1,4 +1,3 @@
-import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '../stores/chat';
 import { setWorkspaceLastAgent } from '../utils/workspaceLastAgent';
 
@@ -29,18 +28,10 @@ export function openWorkspaceSession(
  * Whether the current history entry has one of this app's before it. The
  * router numbers its entries in `history.state.idx` (kept across reloads and
  * by replace navigations), so 0 is the first page of this app in the tab.
+ * Back buttons step back when it does (cindy's goBackGuarded), so history
+ * never piles up list → chat → list, and replace their page otherwise.
  */
 export function hasAppEntryBefore(): boolean {
   const idx = (window.history.state as { idx?: unknown } | null)?.idx;
   return typeof idx === 'number' && idx > 0;
-}
-
-/**
- * Back out of a page (cindy's goBackGuarded): step back when the app has an
- * entry before this one, so the history never piles up list → chat → list;
- * otherwise (a deep link, a fresh tab) replace this entry with `fallback`.
- */
-export function goBackGuarded(navigate: NavigateFunction, fallback: string) {
-  if (hasAppEntryBefore()) void navigate(-1);
-  else void navigate(fallback, { replace: true });
 }

@@ -73,33 +73,18 @@ export function ConnectionBanner() {
   const notice = useConnectionNotice();
   const isPhone = useIsPhone();
   const isChatRoute = useLocation().pathname.startsWith('/chat');
-  const toastId = useRef<string | number | undefined>(undefined);
-
   useEffect(() => {
-    if (toastId.current !== undefined) {
-      toast.dismiss(toastId.current);
-      toastId.current = undefined;
-    }
     if (isPhone || !notice) return;
-    if (notice === 'offline') {
-      toastId.current = toast.error(NOTICE_TEXT.offline, {
-        duration: Infinity,
-      });
-    } else if (notice === 'reconnecting') {
-      toastId.current = toast.loading(NOTICE_TEXT.reconnecting, {
-        duration: Infinity,
-      });
-    } else {
-      toast.success(NOTICE_TEXT.restored, { duration: RESTORED_MS });
-    }
+    const id =
+      notice === 'offline'
+        ? toast.error(NOTICE_TEXT.offline, { duration: Infinity })
+        : notice === 'reconnecting'
+          ? toast.loading(NOTICE_TEXT.reconnecting, { duration: Infinity })
+          : toast.success(NOTICE_TEXT.restored, { duration: RESTORED_MS });
+    return () => {
+      toast.dismiss(id);
+    };
   }, [notice, isPhone]);
-
-  useEffect(
-    () => () => {
-      if (toastId.current !== undefined) toast.dismiss(toastId.current);
-    },
-    [],
-  );
 
   if (!isPhone || !notice) return null;
   return (

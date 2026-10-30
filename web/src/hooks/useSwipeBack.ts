@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { useIsPhone } from '../components/layout/phone';
 import { hasAppEntryBefore } from '../lib/chat-navigation';
+import { isIOSDevice } from '../utils/url';
 import { useMediaQuery } from './useMediaQuery';
 import { useStableCallback } from './useStableCallback';
 
@@ -19,13 +20,6 @@ interface SwipeBackOptions {
 const SLIDE = 'transform 250ms cubic-bezier(0.4, 0, 0.2, 1)';
 /** After a swipe out, how long the container may stay aside for the route to change. */
 const LEAVE_FALLBACK_MS = 400;
-
-function isIOS(): boolean {
-  return (
-    /iP(hone|od|ad)/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-  );
-}
 
 /**
  * Drag from the left edge to go back, on phones.
@@ -101,7 +95,7 @@ export function useSwipeBack(
     (e: TouchEvent) => {
       const target = e.target instanceof Element ? e.target : null;
       if (target?.closest('[data-swipe-back-ignore="true"]')) return;
-      if (!isStandalone && isIOS() && hasAppEntryBefore()) return;
+      if (!isStandalone && isIOSDevice() && hasAppEntryBefore()) return;
 
       const touch = e.touches[0];
       if (touch.clientX < edgeWidth) {

@@ -35,7 +35,7 @@ import { withBasePath } from '../utils/url';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 import { useClearWorkspace } from '../hooks/useClearWorkspace';
 import type { GroupEntry } from '../utils/group-utils';
-import { goBackGuarded, hasAppEntryBefore } from '../lib/chat-navigation';
+import { hasAppEntryBefore } from '../lib/chat-navigation';
 import { cn } from '@/lib/utils';
 import { useDeleteWorkspace } from '../hooks/useDeleteWorkspace';
 import { useWorkspaceTree } from '../hooks/useWorkspaceTree';
@@ -174,8 +174,12 @@ export function ChatPage() {
       navigate('/chat');
       return;
     }
-    if (!hasAppEntryBefore() && groupFolder) revealOnPhoneHome(groupFolder);
-    goBackGuarded(navigate, '/chat');
+    if (hasAppEntryBefore()) {
+      navigate(-1);
+      return;
+    }
+    if (groupFolder) revealOnPhoneHome(groupFolder);
+    navigate('/chat', { replace: true });
   });
 
   useSwipeBack(chatViewRef, handleBackToList, {
@@ -281,6 +285,7 @@ export function ChatPage() {
               primary={agentPartitions.primary}
               custom={agentPartitions.custom}
               actions={workspaceActions}
+              paused={phoneChatOpen}
             />
           ) : loading ? (
             <div className="px-4 pt-4">

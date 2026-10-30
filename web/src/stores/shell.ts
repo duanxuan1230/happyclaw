@@ -90,7 +90,7 @@ interface ShellState {
    * `?sessions=1` link, a new workspace). Kept here rather than in the
    * history entry, so going back to the list never scrolls it.
    */
-  phoneHomeReveal: { folder: string; nonce: number } | null;
+  phoneHomeReveal: { folder: string } | null;
 
   setSidebarWidth: (width: number) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -187,12 +187,6 @@ export const useShellStore = create<ShellState>((set, get) => ({
         nonce: (state.composerDraftRequest?.nonce ?? 0) + 1,
       },
     })),
-  revealOnPhoneHome: (folder) =>
-    set((state) => ({
-      phoneHomeReveal: {
-        folder,
-        nonce: (state.phoneHomeReveal?.nonce ?? 0) + 1,
-      },
-    })),
+  revealOnPhoneHome: (folder) => set({ phoneHomeReveal: { folder } }),
   clearPhoneHomeReveal: () => set({ phoneHomeReveal: null }),
 }));

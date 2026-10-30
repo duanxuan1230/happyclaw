@@ -1,5 +1,7 @@
 import {
+  createContext,
   memo,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -48,7 +50,7 @@ import {
 import type { AgentDisplayIdentity } from '../../../utils/agent-identity';
 import type { AgentInfo, SessionWorktreeInfo } from '../../../types';
 import { WorktreeBranchTag } from '../../chat/WorktreeBranchTag';
-import { preloadedComponent } from '../../../lib/preloaded-component';
+import { lazyImBindingDialog } from '../../common/lazy-dialogs';
 import { useLongPress } from '../../../hooks/useLongPress';
 import type { MenuAction } from '../../common/ResponsiveMenu';
 import type { GroupEntry } from '../../../utils/group-utils';
@@ -68,14 +70,7 @@ import {
   useWorkspaceSessions,
 } from './workspace-sessions';
 
-const lazyBindingDialog = preloadedComponent(
-  () =>
-    import('../../chat/ImBindingDialog').then((m) => ({
-      default: m.ImBindingDialog,
-    })),
-  () => null,
-);
-const ImBindingDialog = lazyBindingDialog.Component;
+const ImBindingDialog = lazyImBindingDialog.Component;
 
 /** Sessions shown under a workspace before 显示更多, as in cindy's projects. */
 const INITIAL_VISIBLE = 5;
@@ -102,7 +97,11 @@ interface PhoneWorkspaceListProps {
   primary: AgentWorkspaceSection | null;
   custom: AgentWorkspaceSection[];
   actions: PhoneWorkspaceActions;
+  /** Hidden under an open conversation: skip per-update work. */
+  paused?: boolean;
 }
+
+const ListPausedContext = createContext(false);
 
 /**
  * The phone home, after cindy's mobile list: one level where each workspace
@@ -115,6 +114,7 @@ export function PhoneWorkspaceList({
   primary,
   custom,
   actions,
+  paused = false,
 }: PhoneWorkspaceListProps) {
   const navigate = useNavigate();
   const appearance = useAuthStore((s) => s.appearance);
@@ -211,27 +211,29 @@ export function PhoneWorkspaceList({
   );
 
   return (
-    <div ref={listRef} data-hc-phone-workspace-list>
-      {sections.map((section) => (
-        <section key={section.title} aria-label={section.title}>
-          <h2 className="px-4 pt-4 pb-1 text-label font-medium text-faint-foreground">
-            {section.title}
-          </h2>
-          <ul>
-            {section.entries.map((entry) => (
-              <WorkspaceBlock
-                key={entry.group.jid}
-                entry={entry}
-                expanded={expandedWorkspaces[entry.group.jid] !== false}
-                onExpandedChange={toggleExpanded}
-                menuActions={menuActions}
-                navigate={navigateTo}
-              />
-            ))}
-          </ul>
-        </section>
-      ))}
-    </div>
+    <ListPausedContext.Provider value={paused}>
+      <div ref={listRef} data-hc-phone-workspace-list>
+        {sections.map((section) => (
+          <section key={section.title} aria-label={section.title}>
+            <h2 className="px-4 pt-4 pb-1 text-label font-medium text-faint-foreground">
+              {section.title}
+            </h2>
+            <ul>
+              {section.entries.map((entry) => (
+                <WorkspaceBlock
+                  key={entry.group.jid}
+                  entry={entry}
+                  expanded={expandedWorkspaces[entry.group.jid] !== false}
+                  onExpandedChange={toggleExpanded}
+                  menuActions={menuActions}
+                  navigate={navigateTo}
+                />
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+    </ListPausedContext.Provider>
   );
 }
 
@@ -350,6 +352,7 @@ function WorkspaceSessions({
 }) {
   const { containerRef, sessions } = useWorkspaceSessions<HTMLUListElement>(
     group.jid,
+    { paused: useContext(ListPausedContext) },
   );
   const openCreateAutomation = useAutomationsStore((s) => s.openCreateForm);
   const boundTo = useBoundAutomations(group.jid);
@@ -504,12 +507,13 @@ function PhoneSessionRow({
 }) {
   const previewId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
-  const longPress = useLongPress(() => setMenuOpen(true));
-  // Fetched while the menu is open, so 会话绑定 opens its dialog in the same
-  // tap that closes the sheet: one hands its history entry to the other.
-  useEffect(() => {
-    if (menuOpen) void lazyBindingDialog.preload();
-  }, [menuOpen]);
+  // Fetched as the menu opens, so 会话绑定 opens its dialog in the same tap
+  // that closes the sheet: one hands its history entry to the other.
+  const openMenu = (open: boolean) => {
+    if (open) void lazyImBindingDialog.preload();
+    setMenuOpen(open);
+  };
+  const longPress = useLongPress(() => openMenu(true));
   return (
     // Indented to the workspace name, so the row reads as part of it.
     <li
@@ -569,7 +573,7 @@ function PhoneSessionRow({
               touch
               groups={menu}
               open={menuOpen}
-              onOpenChange={setMenuOpen}
+              onOpenChange={openMenu}
             />
           )}
         </span>

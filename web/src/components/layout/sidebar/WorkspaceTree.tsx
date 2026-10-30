@@ -760,91 +760,68 @@ export function WorkspaceRowMenu({
   // The row stands for its agent, so name the workspace in its actions.
   const noun = agentId ? '工作区' : '';
   if (!hasWorkspaceItems && !hasAgentItems) return null;
-  const groups: MenuAction[][] = [
-    [
-      ...(canCreateSession
-        ? [
-            {
-              label: createSessionLabel(group),
-              icon: Plus,
-              onSelect: () => void actions.onCreateSession!(group),
-            },
-          ]
-        : []),
-      ...(canCreateWorktreeSession
-        ? [
-            {
-              label: '新建独立 worktree 会话…',
-              icon: GitBranch,
-              onSelect: () => setNewSessionOpen(true),
-            },
-          ]
-        : []),
-    ],
-    [
-      ...(canPin
-        ? [
-            {
-              label: group.pinned_at ? '取消固定' : '固定',
-              icon: Pin,
-              onSelect: () => actions.onTogglePin!(group.jid),
-            },
-          ]
-        : []),
-      ...(canModify && actions.onRename
-        ? [
-            {
-              label: `重命名${noun}`,
-              icon: Pencil,
-              onSelect: () => actions.onRename!(group.jid, group.name),
-            },
-          ]
-        : []),
-    ],
-    [
-      ...(canModify
-        ? [
-            {
-              label: '重建工作区',
-              icon: RotateCcw,
-              onSelect: () => actions.onClearHistory(group.jid, displayName),
-            },
-          ]
-        : []),
-      ...(!isHome && canModify && actions.onDelete
-        ? [
-            {
-              label: `删除${noun}`,
-              icon: Trash2,
-              destructive: true,
-              onSelect: () => actions.onDelete!(group.jid, group.name),
-            },
-          ]
-        : []),
-    ],
-    hasAgentItems
-      ? [
-          ...(actions.onCreateWorkspace
-            ? [
-                {
-                  label: '新建工作区',
-                  icon: FolderPlus,
-                  onSelect: () => actions.onCreateWorkspace!(agentId!),
-                },
-              ]
-            : []),
-          ...(actions.onOpenAgent
-            ? [
-                {
-                  label: '智能体设置',
-                  icon: Bot,
-                  onSelect: () => actions.onOpenAgent!(agentId!),
-                },
-              ]
-            : []),
-        ]
-      : [],
-  ];
+  const create: MenuAction[] = [];
+  if (canCreateSession) {
+    create.push({
+      label: createSessionLabel(group),
+      icon: Plus,
+      onSelect: () => void actions.onCreateSession!(group),
+    });
+  }
+  if (canCreateWorktreeSession) {
+    create.push({
+      label: '新建独立 worktree 会话…',
+      icon: GitBranch,
+      onSelect: () => setNewSessionOpen(true),
+    });
+  }
+  const organize: MenuAction[] = [];
+  if (canPin) {
+    organize.push({
+      label: group.pinned_at ? '取消固定' : '固定',
+      icon: Pin,
+      onSelect: () => actions.onTogglePin!(group.jid),
+    });
+  }
+  if (canModify && actions.onRename) {
+    organize.push({
+      label: `重命名${noun}`,
+      icon: Pencil,
+      onSelect: () => actions.onRename!(group.jid, group.name),
+    });
+  }
+  const manage: MenuAction[] = [];
+  if (canModify) {
+    manage.push({
+      label: '重建工作区',
+      icon: RotateCcw,
+      onSelect: () => actions.onClearHistory(group.jid, displayName),
+    });
+    if (!isHome && actions.onDelete) {
+      manage.push({
+        label: `删除${noun}`,
+        icon: Trash2,
+        destructive: true,
+        onSelect: () => actions.onDelete!(group.jid, group.name),
+      });
+    }
+  }
+  const agent: MenuAction[] = [];
+  if (hasAgentItems && actions.onCreateWorkspace) {
+    agent.push({
+      label: '新建工作区',
+      icon: FolderPlus,
+      onSelect: () => actions.onCreateWorkspace!(agentId!),
+    });
+  }
+  if (hasAgentItems && actions.onOpenAgent) {
+    agent.push({
+      label: '智能体设置',
+      icon: Bot,
+      onSelect: () => actions.onOpenAgent!(agentId!),
+    });
+  }
+  const groups = [create, organize, manage, agent];
   return (
     <>
       <RowMenu
@@ -952,29 +929,18 @@ export function RowMenu({
   onOpenChange?: (open: boolean) => void;
   children?: ReactNode;
 }) {
-  const isPhone = useIsPhone();
   const [mountedState, setMounted] = useState(false);
   const [openState, setOpenState] = useState(false);
   const open = openProp ?? openState;
-  const mounted = mountedState || open;
   const setOpen = (next: boolean) => {
     setOpenState(next);
     onOpenChange?.(next);
   };
   // Radix notices keyboard use through a document listener that only exists
   // once the menu is mounted, so on the first keyboard open it focused the
-  // menu itself instead of its first item. Move focus on once the content has
-  // mounted and Radix has focused it.
+  // menu itself instead of its first item. The mounted menu moves focus on.
   const openedByKeyboardRef = useRef(false);
   const pointerTypeRef = useRef('');
-  const [content, setContent] = useState<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!content || !openedByKeyboardRef.current) return;
-    openedByKeyboardRef.current = false;
-    content
-      .querySelector<HTMLElement>('[role="menuitem"]:not([data-disabled])')
-      ?.focus({ preventScroll: true });
-  }, [content]);
   // Touch rows get a 44px target around the 36px button.
   const className = cn(
     rowIconButtonClass,
@@ -984,43 +950,91 @@ export function RowMenu({
   );
   const icon = <MoreHorizontal className="size-4" />;
 
-  if (!mounted) {
-    const openMenu = (byKeyboard: boolean) => {
-      openedByKeyboardRef.current = byKeyboard;
-      setMounted(true);
-      setOpen(true);
-    };
+  if (mountedState || open) {
     return (
-      <button
-        type="button"
-        aria-label={label}
-        aria-haspopup={groups && isPhone ? 'dialog' : 'menu'}
-        aria-expanded={false}
-        onClick={(event) => {
-          event.stopPropagation();
-          // A mouse opened it on pointerdown already.
-          if (pointerTypeRef.current !== 'mouse') openMenu(false);
-        }}
-        onPointerDown={(event) => {
-          pointerTypeRef.current = event.pointerType;
-          if (event.pointerType !== 'mouse') return;
-          if (event.button !== 0 || event.ctrlKey) return;
-          event.preventDefault();
-          openMenu(false);
-        }}
-        onKeyDown={(event) => {
-          if (['Enter', ' ', 'ArrowDown'].includes(event.key)) {
-            event.preventDefault();
-            openMenu(true);
-          }
-        }}
+      <MountedRowMenu
+        label={label}
         className={className}
+        icon={icon}
+        groups={groups}
+        open={open}
+        onOpenChange={setOpen}
+        openedByKeyboardRef={openedByKeyboardRef}
       >
-        {icon}
-      </button>
+        {children}
+      </MountedRowMenu>
     );
   }
 
+  const openMenu = (byKeyboard: boolean) => {
+    openedByKeyboardRef.current = byKeyboard;
+    setMounted(true);
+    setOpen(true);
+  };
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-haspopup="menu"
+      aria-expanded={false}
+      onClick={(event) => {
+        event.stopPropagation();
+        // A mouse opened it on pointerdown already.
+        if (pointerTypeRef.current !== 'mouse') openMenu(false);
+      }}
+      onPointerDown={(event) => {
+        pointerTypeRef.current = event.pointerType;
+        if (event.pointerType !== 'mouse') return;
+        if (event.button !== 0 || event.ctrlKey) return;
+        event.preventDefault();
+        openMenu(false);
+      }}
+      onKeyDown={(event) => {
+        if (['Enter', ' ', 'ArrowDown'].includes(event.key)) {
+          event.preventDefault();
+          openMenu(true);
+        }
+      }}
+      className={className}
+    >
+      {icon}
+    </button>
+  );
+}
+
+/**
+ * RowMenu once used: a dropdown, or with `groups` on a phone a bottom action
+ * sheet. Only mounted menus ask whether this is a phone, so a long tree's
+ * rows add no media-query listeners.
+ */
+function MountedRowMenu({
+  label,
+  className,
+  icon,
+  groups,
+  open,
+  onOpenChange,
+  openedByKeyboardRef,
+  children,
+}: {
+  label: string;
+  className: string;
+  icon: ReactNode;
+  groups?: MenuAction[][];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  openedByKeyboardRef: React.RefObject<boolean>;
+  children?: ReactNode;
+}) {
+  const isPhone = useIsPhone();
+  const [content, setContent] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!content || !openedByKeyboardRef.current) return;
+    openedByKeyboardRef.current = false;
+    content
+      .querySelector<HTMLElement>('[role="menuitem"]:not([data-disabled])')
+      ?.focus({ preventScroll: true });
+  }, [content, openedByKeyboardRef]);
   const trigger = (
     <button
       type="button"
@@ -1035,7 +1049,7 @@ export function RowMenu({
     return (
       <ActionSheet
         open={open}
-        onOpenChange={setOpen}
+        onOpenChange={onOpenChange}
         title={label}
         groups={groups}
         trigger={trigger}
@@ -1043,7 +1057,7 @@ export function RowMenu({
     );
   }
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent ref={setContent} align="end" className="w-40">
         {groups ? <MenuActionItems groups={groups} /> : children}

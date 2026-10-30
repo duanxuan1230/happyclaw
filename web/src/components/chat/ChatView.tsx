@@ -52,6 +52,7 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronRight,
+  Cpu,
   Folder,
   Gauge,
   GitCompare,
@@ -79,6 +80,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Spinner } from '@/components/ui/spinner';
 import { IconButton } from '../common/IconButton';
+import { lazyImBindingDialog } from '../common/lazy-dialogs';
 import { InfoTip } from '../common/InfoTip';
 import { wsManager } from '../../api/ws';
 import { api } from '../../api/client';
@@ -105,11 +107,6 @@ const lazyContainerEnvPanel = preloadedComponent(
 const lazyReviewPanel = preloadedComponent(
   () =>
     import('../review/ReviewPanel').then((m) => ({ default: m.ReviewPanel })),
-  Nothing,
-);
-const lazyImBindingDialog = preloadedComponent(
-  () =>
-    import('./ImBindingDialog').then((m) => ({ default: m.ImBindingDialog })),
   Nothing,
 );
 // Opening a workspace before the idle preload finished would otherwise show
@@ -1331,11 +1328,39 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         : []),
     ],
   ];
+  // The model and the context, both in the composer's model sheet (whose
+  // foot shows the usage). It opens once the ⋯ sheet has closed and given
+  // back its history entry (opened alongside, the two raced over it), and
+  // once the composer is there: its code may still be loading.
+  const openModelSheet = () => {
+    const deadline = performance.now() + 3000;
+    const clickPill = () => {
+      const pill =
+        containerRef.current?.querySelector<HTMLElement>('[data-model-pill]');
+      if (pill) pill.click();
+      else if (performance.now() < deadline) requestAnimationFrame(clickPill);
+    };
+    const afterClose = () => {
+      window.removeEventListener('popstate', afterClose);
+      window.clearTimeout(fallback);
+      clickPill();
+    };
+    window.addEventListener('popstate', afterClose);
+    const fallback = window.setTimeout(afterClose, 300);
+  };
   const contextFigures = contextUsageFigures(phoneContextUsage);
-  if (contextFigures) {
-    // Information, not an action: the row only closes the sheet.
+  if (isPhone) {
     headerActions.push([
-      { label: contextFigures.label, icon: Gauge, onSelect: () => {} },
+      { label: '切换模型', icon: Cpu, onSelect: openModelSheet },
+      ...(contextFigures
+        ? [
+            {
+              label: contextFigures.label,
+              icon: Gauge,
+              onSelect: openModelSheet,
+            },
+          ]
+        : []),
     ]);
   }
   const hasHeaderActions = headerActions.some((group) => group.length > 0);
@@ -1815,7 +1840,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         <SheetContent
           side="bottom"
-          className="gap-0 p-0 data-[side=bottom]:h-[85dvh]"
+          className="gap-0 p-0 data-[side=bottom]:h-[min(85dvh,calc(var(--vvh,100dvh)-3rem))]"
         >
           <SheetHeader className="px-4 pt-4 pb-2">
             <SheetTitle>终端</SheetTitle>

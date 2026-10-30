@@ -17,22 +17,28 @@ export const MAIN_BINDING = '__main__';
 /**
  * A workspace's conversations, newest first. They are fetched once the
  * element behind `containerRef` scrolls into view: a workspace far down a
- * long list should not cost a request on every load.
+ * long list should not cost a request on every load. While `paused` (the
+ * list is hidden) the running state is not recomputed per store update.
  */
-export function useWorkspaceSessions<T extends Element>(groupJid: string) {
+export function useWorkspaceSessions<T extends Element>(
+  groupJid: string,
+  { paused = false }: { paused?: boolean } = {},
+) {
   const loadAgents = useChatStore((s) => s.loadAgents);
   const agents = useChatStore((s) => s.agents[groupJid] ?? EMPTY_AGENTS);
   // A joined id string keeps streaming deltas from re-rendering the list:
   // it only changes when a session starts or stops answering.
   // A card frozen by a stop is not a running query.
-  const activeQueryIds = useChatStore((s) =>
-    (s.agents[groupJid] ?? EMPTY_AGENTS)
+  const lastActiveRef = useRef('');
+  const activeQueryIds = useChatStore((s) => {
+    if (paused) return lastActiveRef.current;
+    return (lastActiveRef.current = (s.agents[groupJid] ?? EMPTY_AGENTS)
       .filter(
         (a) => s.agentWaiting[a.id] || isLiveStream(s.agentStreaming[a.id]),
       )
       .map((a) => a.id)
-      .join(','),
-  );
+      .join(','));
+  });
 
   const containerRef = useRef<T>(null);
   useEffect(() => {
