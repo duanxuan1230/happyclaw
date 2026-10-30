@@ -283,8 +283,8 @@ describe('buildClaudeEnvLines', () => {
         agentEffort: 'max',
       }),
     ).toBe('low');
-    // Other third-party gateways keep every tier on the provider model,
-    // with the window the registry knows for it.
+    // Other third-party gateways keep every tier on the provider model; a
+    // window the registry knows is only a suggestion, so no `[1m]`.
     expect(
       buildClaudeEnvLines(
         config({
@@ -293,7 +293,7 @@ describe('buildClaudeEnvLines', () => {
         }),
         NO_CUSTOM_ENV,
       ),
-    ).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-sol[1m]');
+    ).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-6-sol');
   });
 
   test('official: [1m] only for a declared window, never from the registry', () => {
@@ -312,7 +312,14 @@ describe('buildClaudeEnvLines', () => {
       models: [{ id: 'claude-sonnet-5', contextWindow: 1_000_000 }],
     });
     expect(declared).toContain('ANTHROPIC_MODEL=claude-sonnet-5[1m]');
-    for (const lines of [registry, declared]) {
+    // A name a session or Agent saved with `[1m]` keeps its 1M opt-in,
+    // even when the connection lists the model without a window.
+    const saved = official({
+      anthropicModel: 'claude-sonnet-4-5[1m]',
+      models: [{ id: 'claude-sonnet-4-5' }],
+    });
+    expect(saved).toContain('ANTHROPIC_MODEL=claude-sonnet-4-5[1m]');
+    for (const lines of [registry, declared, saved]) {
       for (const prefix of [
         'ANTHROPIC_DEFAULT_',
         'CLAUDE_CODE_SUBAGENT_MODEL=',

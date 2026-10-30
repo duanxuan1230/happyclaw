@@ -17,6 +17,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const runtimeConfig = await import('../src/runtime-config.js');
+const loggerModule = await import('../src/logger.js');
 const { CODEX_GATEWAY_BASE_URL_PLACEHOLDER } =
   await import('../src/codex-gateway/types.js');
 
@@ -525,13 +526,25 @@ describe('reading a connection saved before models carried their settings', () =
 
     const [provider] = runtimeConfig.getProviders();
     expect(provider.anthropicModel).toBe('glm-5.3');
-    // `[1m]` made it 1M; the compact window does not replace a window.
+    // The compact window lowered the 1M `[1m]` gave; it and the effort
+    // applied to every launch, so every entry without its own gets them. A
+    // model a key named but the list lacked is added, and the effort is
+    // declared for it since nothing is known about its efforts.
     expect(provider.models).toEqual([
-      { id: 'glm-5.3', contextWindow: 1_000_000, defaultEffort: 'high' },
-      { id: 'glm-5.3-flash' },
+      { id: 'glm-5.3', contextWindow: 800_000, defaultEffort: 'high' },
+      { id: 'glm-5.3-flash', contextWindow: 800_000, defaultEffort: 'high' },
+      {
+        id: 'not-a-model-of-it',
+        contextWindow: 800_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
     ]);
-    // The sub-agent key named the connection's own model: dropped.
-    expect(provider.roles).toEqual({ smallFast: 'glm-5.3-flash' });
+    // The sub-agent key named the connection's own model: no role.
+    expect(provider.roles).toEqual({
+      smallFast: 'glm-5.3-flash',
+      opus: 'not-a-model-of-it',
+    });
     expect(provider.customEnv).toEqual({
       API_TIMEOUT_MS: '600000',
       CUSTOM_FLAG: 'kept',
@@ -557,8 +570,14 @@ describe('reading a connection saved before models carried their settings', () =
       },
     });
     const [provider] = runtimeConfig.getProviders();
+    // Nothing is known about k3's efforts: the old effort stays usable.
     expect(provider.models).toEqual([
-      { id: 'k3', contextWindow: 256_000, defaultEffort: 'max' },
+      {
+        id: 'k3',
+        contextWindow: 256_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'max',
+      },
     ]);
     const env = runtimeConfig.buildClaudeEnvLines(
       runtimeConfig.providerToConfig(provider),
@@ -571,6 +590,126 @@ describe('reading a connection saved before models carried their settings', () =
       env.some((line) => line.startsWith('CLAUDE_CODE_EFFORT_LEVEL=')),
     ).toBe(false);
     expect(runtimeConfig.providerEffortLevel(provider)).toBe('max');
+  });
+
+  test('a compact window below 1M is the window of a [1m] model', () => {
+    legacy({
+      anthropicModel: 'x-model[1m]',
+      customEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toEqual([
+      { id: 'x-model', contextWindow: 400_000 },
+    ]);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_MODEL=x-model[1m]');
+    expect(env).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000');
+  });
+
+  test('a declared window or effort is not overridden', () => {
+    legacy({
+      anthropicModel: 'k3',
+      models: [
+        { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
+        { id: 'k3-big', contextWindow: 1_000_000 },
+      ],
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    // A declared 1M was the window only through `[1m]` in an older file, so a
+    // smaller compact window still lowers it.
+    expect(provider.models).toEqual([
+      { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
+      {
+        id: 'k3-big',
+        contextWindow: 256_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+    ]);
+  });
+
+  test('a pass-through relay turns role keys into roles with their models', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-5-5',
+        CLAUDE_CODE_SUBAGENT_MODEL: 'relay-big[1m]',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.anthropicModel).toBe('');
+    expect(provider.models).toEqual([
+      { id: 'claude-haiku-5-5' },
+      { id: 'relay-big', contextWindow: 1_000_000 },
+    ]);
+    expect(provider.roles).toEqual({
+      smallFast: 'claude-haiku-5-5',
+      subagent: 'relay-big',
+    });
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5');
+    expect(env).toContain('CLAUDE_CODE_SUBAGENT_MODEL=relay-big[1m]');
+    expect(env.some((line) => line.startsWith('ANTHROPIC_MODEL='))).toBe(false);
+  });
+
+  test('a pass-through relay with no entry keeps its window and effort keys', () => {
+    const { logger } = loggerModule;
+    vi.mocked(logger.warn).mockClear();
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        CUSTOM_FLAG: 'kept',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toBeUndefined();
+    expect(provider.customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CUSTOM_FLAG: 'kept',
+    });
+    // Kept in the file, said once, not injected, not offered for editing.
+    expect(readFile().providers[0].customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    });
+    const saved = fs.readFileSync(configFile, 'utf-8');
+    runtimeConfig.getProviders();
+    expect(fs.readFileSync(configFile, 'utf-8')).toBe(saved);
+    expect(
+      vi
+        .mocked(logger.warn)
+        .mock.calls.filter((call) =>
+          String(call[1]).includes('keeps legacy env keys'),
+        ),
+    ).toHaveLength(1);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('CUSTOM_FLAG=kept');
+    expect(
+      env.some(
+        (line) =>
+          line.startsWith('CLAUDE_CODE_AUTO_COMPACT_WINDOW=') ||
+          line.startsWith('CLAUDE_CODE_EFFORT_LEVEL='),
+      ),
+    ).toBe(false);
+    expect(
+      runtimeConfig.toPublicProvider(provider).customEnv,
+    ).not.toHaveProperty('CLAUDE_CODE_EFFORT_LEVEL');
   });
 
   test('a key the user deleted after the prefill stays deleted', () => {
