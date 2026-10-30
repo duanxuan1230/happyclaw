@@ -509,6 +509,49 @@ describe('Feishu durable Inbox and cursor integration', () => {
     expect(controls.messageReply).not.toHaveBeenCalled();
   });
 
+  test('a quote-reply in an ordinary group is answered in the main chat, not a thread', async () => {
+    const accountId = `account-quote-reply-${Date.now()}`;
+    const followUp = vi.fn(() => ({ disposition: 'started' as const }));
+    const connected = await connect(accountId, vi.fn(), {
+      shouldProcessGroupMessage: () => true,
+      onFollowUpMessage: followUp,
+    });
+    const messageId = 'om_quote_reply';
+    const createTime = Date.now();
+
+    // Quoting an earlier message in a non-topic group: root_id = parent_id, no thread_id.
+    await connected.handler({
+      ...event(messageId, createTime, ''),
+      message: {
+        ...event(messageId, createTime, '').message,
+        chat_id: 'oc_quote_group',
+        chat_type: 'group',
+        root_id: 'om_quoted_answer',
+        parent_id: 'om_quoted_answer',
+        content: JSON.stringify({ text: '@_user_1 能再说详细点吗' }),
+        mentions: [
+          {
+            key: '@_user_1',
+            name: 'Inbox Test Bot',
+            id: { open_id: 'ou_bot' },
+          },
+        ],
+      },
+    });
+
+    expect(followUp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceJid: 'feishu:oc_quote_group',
+        messageId,
+      }),
+    );
+    const stored = db
+      .getMessagesSince('web:durable-feishu-test', { timestamp: '', id: '' })
+      .find((message) => message.id === messageId);
+    expect(stored?.channel_context?.message.rootId).toBeUndefined();
+    expect(stored?.channel_context?.message.parentId).toBe('om_quoted_answer');
+  });
+
   test('only a real Bot mention can execute the exact lowercase /break command in a group', async () => {
     const accountId = `account-break-command-${Date.now()}`;
     const onSessionBreak = vi.fn().mockResolvedValue('Current task stopped.');

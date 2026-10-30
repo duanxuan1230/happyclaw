@@ -1157,12 +1157,12 @@ function planFeishuRoute(
     ? plan.rootMessageId
     : threadId
       ? plan?.rootMessageId || rootId || messageId
-      : rootId;
+      : undefined;
   // A quote-reply in an ordinary (non-topic) group or a private chat has
-  // root_id = parent_id but no thread_id. It still yields a root target,
-  // so the answer is posted with reply_in_thread under the quoted message
-  // (Feishu falls back to a plain reply where threads are unsupported).
-  // This is the current product behaviour, kept deliberately.
+  // root_id = parent_id but no thread_id. Answer it in the main chat like any
+  // other message: opening a thread under the quoted message hides the answer
+  // from the chat. The quoted content still reaches the agent as a referenced
+  // message.
   return {
     routedMeta,
     deliveryRootMessageId,
