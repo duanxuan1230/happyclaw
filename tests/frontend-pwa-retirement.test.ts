@@ -48,6 +48,40 @@ describe('PWA cache retirement', () => {
     );
   });
 
+  test('manifest shortcuts open real routes in the existing window', () => {
+    const app = read('web/src/App.tsx');
+    const manifest = JSON.parse(read('web/public/manifest.webmanifest')) as {
+      launch_handler?: { client_mode: string | string[] };
+      shortcuts?: Array<{ name: string; url: string }>;
+    };
+
+    expect(manifest.launch_handler?.client_mode).toEqual(
+      expect.arrayContaining(['navigate-existing']),
+    );
+    expect(manifest.shortcuts?.length).toBeGreaterThan(0);
+    for (const shortcut of manifest.shortcuts ?? []) {
+      // Relative to the scope, so a sub-path deployment keeps working.
+      expect(shortcut.url).toMatch(/^\.\/[a-z-]+$/);
+      expect(app).toContain(`path="/${shortcut.url.slice(2)}"`);
+    }
+  });
+
+  test('turns off iOS data detectors for dates and addresses too', () => {
+    const html = read('web/index.html');
+    const detection = html.match(
+      /name="format-detection"\s+content="([^"]+)"/,
+    )?.[1];
+
+    expect(detection?.split(/,\s*/)).toEqual(
+      expect.arrayContaining([
+        'telephone=no',
+        'email=no',
+        'date=no',
+        'address=no',
+      ]),
+    );
+  });
+
   test('ships a non-caching self-destruct worker for old installations', () => {
     const worker = read('web/public/sw.js');
 

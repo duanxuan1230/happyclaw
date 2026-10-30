@@ -33,5 +33,28 @@
       "type": "image/png",
       "purpose": "maskable"
     }
+  ],
+  "launch_handler": {
+    "client_mode": ["navigate-existing", "auto"]
+  },
+  "shortcuts": [
+    {
+      "name": "定时任务",
+      "short_name": "任务",
+      "description": "查看和管理定时任务",
+      "url": "./tasks"
+    },
+    {
+      "name": "记忆",
+      "short_name": "记忆",
+      "description": "查看工作区记忆",
+      "url": "./memory"
+    },
+    {
+      "name": "设置",
+      "short_name": "设置",
+      "description": "账户和系统设置",
+      "url": "./settings"
+    }
   ]
 }
