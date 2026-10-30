@@ -810,6 +810,13 @@ export function MarkdownContent({
         // card lets wide tables overflow so it can grow to fit them.
         'overflow-clip [overflow-clip-margin:0.25rem] [.share-card-content_&]:overflow-visible',
         trimEdges && '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+        // A settled reply wraps like edited text: no lone character or
+        // punctuation on a paragraph's last line, headings in even lines.
+        // Not while it streams, where re-breaking the last lines as words
+        // arrive would make them jump.
+        !streaming &&
+          !fade &&
+          '[&_li]:text-pretty [&_p]:text-pretty [&_:is(h1,h2,h3,h4)]:text-balance',
       )}
     >
       <MarkdownStreamingContext.Provider value={streaming}>

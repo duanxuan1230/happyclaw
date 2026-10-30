@@ -154,6 +154,26 @@ test.describe('chat Markdown rendering', () => {
     );
   });
 
+  test('a settled reply wraps without a lone last character; a streaming one does not re-break', async ({
+    page,
+  }) => {
+    const sink = await openMarkdown(page);
+    const wrap = (locator: Locator) =>
+      locator.evaluate((element) => getComputedStyle(element).textWrapStyle);
+    expect(await wrap(sink.locator('p').first())).toBe('pretty');
+    expect(await wrap(sink.locator('li').first())).toBe('pretty');
+    expect(await wrap(sink.locator('h1').first())).toBe('balance');
+
+    await page.evaluate(() => {
+      (window as MarkdownHarnessWindow).markdownHarness.setPartial(
+        '流式回复的第一段，还在一个字一个字地出来。',
+      );
+    });
+    const streaming = page.locator('p', { hasText: '流式回复的第一段' }).last();
+    await expect(streaming).toBeVisible();
+    expect(await wrap(streaming)).not.toBe('pretty');
+  });
+
   test('footnote references jump within the message', async ({
     page,
     context,
