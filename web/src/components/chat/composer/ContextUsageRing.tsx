@@ -44,6 +44,15 @@ export function contextUsageFigures(
   };
 }
 
+/** Warning from 80%, error from 95%. */
+function usageTone(percent: number): string {
+  return percent >= 95
+    ? 'text-error'
+    : percent >= 80
+      ? 'text-warning'
+      : 'text-muted-foreground';
+}
+
 const SIZE = 16;
 const STROKE = 2;
 const RADIUS = (SIZE - STROKE) / 2;
@@ -61,12 +70,7 @@ export function ContextUsageRing({
   const figures = contextUsageFigures(usage);
   if (!figures) return null;
   const { percent, label } = figures;
-  const tone =
-    percent >= 95
-      ? 'text-error'
-      : percent >= 80
-        ? 'text-warning'
-        : 'text-muted-foreground';
+  const tone = usageTone(percent);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -129,6 +133,39 @@ export function ConversationContextUsage({
   jid: string;
   agentId: string | null;
 }) {
+  return <ContextUsageRing usage={useConversationContextUsage(jid, agentId)} />;
+}
+
+/**
+ * The same figures as one line of text, for a phone (its composer row has no
+ * room for the ring, and a touch screen shows no tooltip).
+ */
+export function ConversationContextUsageLine({
+  jid,
+  agentId,
+}: {
+  jid: string;
+  agentId: string | null;
+}) {
+  const figures = contextUsageFigures(
+    useConversationContextUsage(jid, agentId),
+  );
+  if (!figures) return null;
+  return (
+    <p
+      data-context-usage-line
+      className={cn(
+        'text-micro leading-4 tabular-nums',
+        usageTone(figures.percent),
+      )}
+    >
+      {figures.label}
+    </p>
+  );
+}
+
+/** One conversation's usage, loaded when shown and after a reconnect. */
+function useConversationContextUsage(jid: string, agentId: string | null) {
   const usage = useChatStore(
     (s) => s.contextUsage[contextUsageKey(jid, agentId)],
   );
@@ -142,5 +179,5 @@ export function ConversationContextUsage({
       off();
     };
   }, [jid, agentId, load]);
-  return <ContextUsageRing usage={usage} />;
+  return usage;
 }

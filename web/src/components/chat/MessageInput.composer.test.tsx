@@ -117,8 +117,10 @@ vi.mock('../../lib/follow-up-preferences', () => ({
 import { useAuthStore } from '../../stores/auth';
 import { useChatStore, type QueuedFollowUp } from '../../stores/chat';
 import { useFileStore } from '../../stores/files';
+import { useShellStore } from '../../stores/shell';
 import { serializeEditorContent } from './composer/cindy/composerContentSerialization';
 import { plainTextToComposerDocument } from './composer/cindy/composerListDocument';
+import { useComposerDock, useDockOverlay } from './composer/composerDock';
 import { clearPaletteSourceCache } from './composer/paletteSources';
 import { MessageInput } from './MessageInput';
 
@@ -504,37 +506,72 @@ describe('phone dock', () => {
     expect(dock()).toBe('card');
   });
 
-  test('a sheet the card opened does not fold it; leaving for the page does', async () => {
+  /** A dock control that reports its sheet, and shows the compact flag. */
+  let reportSheet: (open: boolean) => void = () => {};
+  function SheetControl() {
+    reportSheet = useDockOverlay('model');
+    const compact = useComposerDock()?.compact;
+    return <button type="button" data-compact={String(compact)} />;
+  }
+
+  test('a sheet a dock control opened keeps the card open; leaving for the page folds it', async () => {
     env.phone = true;
-    let expanded = true;
-    const view = () => (
+    await render(
       <MessageInput
         groupJid="web:g1"
         onSend={vi.fn()}
-        // The model picker's trigger, its sheet open or not.
-        modelSelector={<button type="button" aria-expanded={expanded} />}
-      />
+        modelSelector={<SheetControl />}
+      />,
     );
-    await render(view());
     const dock = () =>
       container!
         .querySelector('[data-hc-composer]')!
         .getAttribute('data-composer-dock');
+    const compact = () =>
+      container!.querySelector('[data-compact]')!.getAttribute('data-compact');
     const outside = document.body.appendChild(document.createElement('input'));
+    expect(compact()).toBe('true');
+
+    // Opened from the resting pill: the card opens for it, focus or not.
+    await act(async () => reportSheet(true));
+    expect(dock()).toBe('card');
+    expect(compact()).toBe('false');
+    await act(async () => reportSheet(false));
+    expect(dock()).toBe('pill');
+
+    // Opened from the card: focus leaving for the sheet does not fold it.
     await act(async () => {
       editor().commands.focus();
     });
+    await act(async () => reportSheet(true));
     await act(async () => outside.focus());
     expect(dock()).toBe('card');
-
-    expanded = false;
-    await render(view());
+    await act(async () => reportSheet(false));
     await act(async () => {
       editor().commands.focus();
     });
     await act(async () => outside.focus());
     expect(dock()).toBe('pill');
     outside.remove();
+  });
+
+  test('a control unmounted with its sheet open no longer holds the card', async () => {
+    env.phone = true;
+    const view = (control: boolean) => (
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        modelSelector={control ? <SheetControl /> : <span />}
+      />
+    );
+    await render(view(true));
+    await act(async () => reportSheet(true));
+    await render(view(false));
+    expect(
+      container!
+        .querySelector('[data-hc-composer]')!
+        .getAttribute('data-composer-dock'),
+    ).toBe('pill');
   });
 
   test('publishes its height for the list it floats over', async () => {
@@ -981,6 +1018,35 @@ describe('expanding a long paste', () => {
     expect(text()).toBe(`前文 ${log} 后文`);
   });
 
+  test("on a touch screen only the chip's expand control unfolds it", async () => {
+    const matchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === '(pointer: coarse)',
+    })) as unknown as typeof window.matchMedia;
+    try {
+      await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+      await paste({ text: log });
+      const chip = () =>
+        editorEl().querySelector<HTMLElement>('[data-pasted-text-chip]');
+      const clickOn = (target: Element) =>
+        act(async () => {
+          const { view } = editor();
+          const event = new MouseEvent('click');
+          Object.defineProperty(event, 'target', { value: target });
+          view.someProp('handleClickOn', (handle) =>
+            handle(view, 1, view.state.doc.nodeAt(1)!, 1, event, true),
+          );
+        });
+      await clickOn(chip()!);
+      expect(chip()).not.toBeNull();
+      await clickOn(chip()!.querySelector('[data-pasted-text-expand]')!);
+      expect(chip()).toBeNull();
+      expect(text()).toBe(log);
+    } finally {
+      window.matchMedia = matchMedia;
+    }
+  });
+
   test('Enter on a selected chip expands it instead of sending', async () => {
     const onSend = vi.fn(() => true);
     await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
@@ -992,6 +1058,19 @@ describe('expanding a long paste', () => {
     expect(onSend).not.toHaveBeenCalled();
     expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
     expect(text()).toBe(log);
+  });
+});
+
+describe('answering AskUserQuestion', () => {
+  test('each picked option lands on its own line', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await act(async () =>
+      useShellStore.getState().requestComposerDraft('选项 A'),
+    );
+    await act(async () =>
+      useShellStore.getState().requestComposerDraft('选项 B'),
+    );
+    expect(text()).toBe('选项 A\n选项 B');
   });
 });
 
@@ -1187,6 +1266,9 @@ describe('palettes', () => {
       },
       '/api/groups/web%3Ag1/files': {
         files: [
+          { name: '.git', path: '.git', type: 'directory' },
+          { name: '.github', path: '.github', type: 'directory' },
+          { name: '.env.example', path: '.env.example', type: 'file' },
           { name: 'notes.txt', path: 'notes.txt', type: 'file' },
           { name: 'docs', path: 'docs', type: 'directory' },
           {
@@ -1269,7 +1351,13 @@ describe('palettes', () => {
     await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
     await typeAtCaret('看 @');
     await wait(0);
-    expect(paletteRows()).toEqual(['docs/', 'notes.txt']);
+    // .git is never offered; hidden entries follow the visible ones.
+    expect(paletteRows()).toEqual([
+      'docs/',
+      '.github/',
+      'notes.txt',
+      '.env.example',
+    ]);
 
     // Tab enters a directory.
     await keyDown('Tab');
