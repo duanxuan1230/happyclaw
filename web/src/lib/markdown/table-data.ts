@@ -3,7 +3,12 @@
  * (tab-separated) or saving as CSV.
  */
 
-/** A cell's text with `<br>` as a line break and whitespace runs collapsed. */
+/**
+ * A cell's text with `<br>` as a line break and whitespace runs collapsed.
+ * Math is its TeX source between `$`, as the reply wrote it: KaTeX renders
+ * a formula as MathML and HTML side by side, whose text read together is
+ * the formula twice over, glyph by glyph.
+ */
 function cellText(cell: Element): string {
   let text = '';
   const walk = (node: Node) => {
@@ -11,7 +16,16 @@ function cellText(cell: Element): string {
       if (child.nodeType === 3) text += child.textContent ?? '';
       else if (child instanceof Element) {
         if (child.tagName === 'BR') text += '\n';
-        else walk(child);
+        else if (child.classList.contains('katex')) {
+          const tex = child.querySelector(
+            'annotation[encoding="application/x-tex"]',
+          )?.textContent;
+          if (tex != null) text += `$${tex.trim()}$`;
+          else {
+            const html = child.querySelector('.katex-html');
+            if (html) walk(html);
+          }
+        } else walk(child);
       }
     }
   };
@@ -30,28 +44,48 @@ export function readTable(table: HTMLTableElement): string[][] {
   ).filter((row) => row.length > 0);
 }
 
+/** A number as a spreadsheet reads it: `-12.5`, `+1,234`, `1e-3`, `50%`. */
+const PLAIN_NUMBER = /^[+-]?(?:\d[\d,]*(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
+
 /**
- * Tab-separated rows: Excel, Numbers, Google Sheets and Feishu sheets split
- * a paste of these into cells. A line break in a cell would start a new row
- * there, so it becomes a space.
+ * A cell a spreadsheet would run as a formula (`=…`, `@…`, a leading tab or
+ * carriage return, or a `+`/`-` that does not start a plain number) is kept
+ * as text with a leading apostrophe. `-2+3+cmd|…` starts with a number and
+ * is still a formula, so the whole cell must be the number.
  */
-export function toTsv(rows: readonly (readonly string[])[]): string {
-  return rows
-    .map((row) => row.map((cell) => cell.replace(/[\t\n]+/g, ' ')).join('\t'))
-    .join('\n');
+function inert(cell: string): string {
+  return /^[=@\t\r]/.test(cell) ||
+    (/^[+-]/.test(cell) && !PLAIN_NUMBER.test(cell))
+    ? `'${cell}`
+    : cell;
+}
+
+/** Rows of `separator`-joined cells, quoting (RFC 4180) any that match `special`. */
+function delimited(
+  rows: readonly (readonly string[])[],
+  separator: string,
+  special: RegExp,
+  newline: string,
+): string {
+  const field = (cell: string) => {
+    const safe = inert(cell);
+    return special.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
+  return rows.map((row) => row.map(field).join(separator)).join(newline);
 }
 
 /**
- * CSV (RFC 4180, CRLF) with a byte-order mark so Excel reads it as UTF-8.
- * A cell that a spreadsheet would run as a formula (`=…`, `@…`, `+`/`-`
- * not followed by a number) is kept as text with a leading apostrophe.
+ * Tab-separated rows: Excel, Numbers, Google Sheets and Feishu sheets split
+ * a paste of these into cells, and keep a quoted cell's tab or line break
+ * inside the cell.
  */
+export function toTsv(rows: readonly (readonly string[])[]): string {
+  return delimited(rows, '\t', /["\t\r\n]/, '\n');
+}
+
+/** CSV (RFC 4180, CRLF) with a byte-order mark so Excel reads it as UTF-8. */
 export function toCsv(rows: readonly (readonly string[])[]): string {
-  const field = (cell: string) => {
-    const safe = /^(=|@|[+-](?![\d.]))/.test(cell) ? `'${cell}` : cell;
-    return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-  };
-  return '﻿' + rows.map((row) => row.map(field).join(',')).join('\r\n');
+  return '﻿' + delimited(rows, ',', /[",\r\n]/, '\r\n');
 }
 
 /** `表格-20261030-1542.csv`, in local time. */

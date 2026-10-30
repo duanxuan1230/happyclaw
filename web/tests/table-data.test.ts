@@ -31,13 +31,28 @@ describe('table data', () => {
     ]);
   });
 
-  it('copies as tab-separated rows, one line per row', () => {
+  it('reads a formula as its TeX source, not KaTeX glyphs twice', () => {
+    // The markup rehype-katex renders for `$a^2$`.
+    const katex =
+      '<span class="katex"><span class="katex-mathml"><math><semantics>' +
+      '<mrow><msup><mi>a</mi><mn>2</mn></msup></mrow>' +
+      '<annotation encoding="application/x-tex">a^2</annotation>' +
+      '</semantics></math></span><span class="katex-html" aria-hidden="true">' +
+      '<span class="base"><span class="mord mathnormal">a</span>' +
+      '<span class="msupsub"><span class="mord">2</span></span></span></span></span>';
+    expect(
+      readTable(table(`<tbody><tr><td>面积 ${katex} 平方米</td></tr></tbody>`)),
+    ).toEqual([['面积 $a^2$ 平方米']]);
+  });
+
+  it('copies as tab-separated rows, quoting a cell with a tab, line break or quote', () => {
     expect(
       toTsv([
         ['a', 'b\tc'],
-        ['一行\n两行', '2'],
+        ['一行\n两行', '说 "好"'],
+        ['甲,乙', '=SUM(A1)'],
       ]),
-    ).toBe('a\tb c\n一行 两行\t2');
+    ).toBe('a\t"b\tc"\n"一行\n两行"\t"说 ""好"""\n甲,乙\t\'=SUM(A1)');
   });
 
   it('saves CSV for Excel: BOM, CRLF, quoting, and no formulas', () => {
@@ -50,8 +65,36 @@ describe('table data', () => {
         ['@user', '-x'],
       ]),
     ).toBe(
-      '﻿名称,金额\r\n"甲,乙",-12.5\r\n"说 ""好""",\'=SUM(A1)\r\n"一行\n两行",+86 138\r\n\'@user,\'-x',
+      '﻿名称,金额\r\n"甲,乙",-12.5\r\n"说 ""好""",\'=SUM(A1)\r\n"一行\n两行",\'+86 138\r\n\'@user,\'-x',
     );
+  });
+
+  it('keeps only a whole plain number unquoted after a leading sign', () => {
+    const numbers = ['-12.5', '+1,234', '-.5', '+3%', '1e-3', '-2.5E+4', '-0'];
+    const formulas = [
+      "-2+3+cmd|' /C calc'!A0",
+      '+1+HYPERLINK("http://x","y")',
+      '-1-1',
+      '+86 138',
+      '-x',
+      '\t=1',
+      '\r=1',
+    ];
+    // The text a spreadsheet gets for the cell, quoting aside.
+    const csvCell = (cell: string) =>
+      toCsv([[cell]])
+        .slice(1)
+        .replace(/^"(.*)"$/s, '$1');
+    const tsvCell = (cell: string) =>
+      toTsv([[cell]]).replace(/^"(.*)"$/s, '$1');
+    for (const cell of numbers) {
+      expect(csvCell(cell)).toBe(cell);
+      expect(tsvCell(cell)).toBe(cell);
+    }
+    for (const cell of formulas) {
+      expect(csvCell(cell).replace(/""/g, '"')).toBe(`'${cell}`);
+      expect(tsvCell(cell).replace(/""/g, '"')).toBe(`'${cell}`);
+    }
   });
 
   it('names the file by the local time', () => {
