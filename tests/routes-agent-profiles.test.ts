@@ -171,41 +171,39 @@ describe('/api/agent-profiles routes', () => {
     const listRes = await routes.request('/', { method: 'GET' });
     const listBody = await listRes.json();
     expect(listBody).not.toHaveProperty('default_model_config_id');
+    // Every connection, with no enable switch or default mark.
     expect(listBody.model_configs).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
+        {
           id: automaticModel.id,
           name: 'Automatic model config',
-          enabled: true,
-        }),
+          type: 'official',
+          model: 'claude-default-test',
+          usable: true,
+          models: [
+            {
+              id: 'claude-default-test',
+              efforts: [],
+              defaultEffort: null,
+              contextWindow: null,
+              effortsSource: 'none',
+            },
+          ],
+        },
         expect.objectContaining({
           id: selectedModel.id,
           name: 'Research model config',
-          enabled: false,
+          model: 'research-model',
+          usable: true,
         }),
       ]),
     );
-    // Without a global default no configuration is marked as what an
-    // unbound Agent follows.
-    expect(
-      listBody.model_configs.every((item: any) => item.is_default === false),
-    ).toBe(true);
-
-    runtimeConfig.setDefaultModelConfig(selectedModel.id);
-    const defaulted = await (
-      await routes.request('/', { method: 'GET' })
-    ).json();
-    expect(
-      defaulted.model_configs.map((item: any) => [item.id, item.is_default]),
-    ).toEqual(
-      expect.arrayContaining([
-        [selectedModel.id, true],
-        [automaticModel.id, false],
-      ]),
-    );
-    // Choosing a configuration as the default switches it on; put it back.
-    runtimeConfig.setDefaultModelConfig(null);
-    runtimeConfig.setProviderEnabled(selectedModel.id, false);
+    // Nothing is bound yet: no main Agent hands anything down.
+    expect(listBody.inherited_model).toEqual({
+      owner_main: null,
+      system_main: null,
+      system_main_profile_id: null,
+    });
 
     const createRes = await routes.request('/', {
       method: 'POST',
@@ -1589,21 +1587,109 @@ describe('/api/agent-profiles model within a configuration', () => {
       model: 'list-fast',
     });
     const body = await (await routes.request('/', { method: 'GET' })).json();
+    const unknown = (id: string) => ({
+      id,
+      efforts: [],
+      defaultEffort: null,
+      contextWindow: null,
+      effortsSource: 'none',
+    });
     expect(
-      body.model_configs.find((item: any) => item.id === listed.id).models,
-    ).toEqual([
-      { id: 'list-default', hidden: false },
-      { id: 'list-fast', hidden: false },
-      { id: 'list-old', hidden: true },
-    ]);
+      body.model_configs
+        .find((item: any) => item.id === listed.id)
+        .models.map((model: any) => model.id),
+    ).toEqual(['list-default', 'list-fast', 'list-old']);
     // A configuration saved without a list offers its one model.
     expect(
       body.model_configs.find((item: any) => item.id === other.id).models,
-    ).toEqual([{ id: 'other-default', hidden: false }]);
+    ).toEqual([unknown('other-default')]);
     expect(
       body.profiles.find((item: any) => item.id === created.body.profile.id),
     ).toMatchObject({ model_config_id: listed.id, model: 'list-fast' });
     expect(body.profiles.find((item: any) => item.is_default).model).toBeNull();
+  });
+
+  test('inherited_model names what the main Agents hand down; PATCH checks the effort', async () => {
+    const effortful = runtimeConfig.createProvider({
+      name: 'Effortful config',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://effort.example.test',
+      anthropicAuthToken: 'effort-token',
+      anthropicModel: 'eff-a',
+      models: [
+        { id: 'eff-a', efforts: ['low', 'high'], defaultEffort: 'low' },
+        { id: 'eff-none' },
+      ],
+    });
+    const main = db.getOrCreateDefaultAgentProfile('routes-agent-user');
+    expect(
+      await send('PATCH', `/${main.id}`, {
+        model_config_id: effortful.id,
+        model: 'eff-a',
+        runtime_policy: { reasoning: { effort: 'high' } },
+      }),
+    ).toMatchObject({ status: 200 });
+    const list = async () =>
+      (await (await routes.request('/', { method: 'GET' })).json())
+        .inherited_model;
+    expect(await list()).toEqual({
+      owner_main: {
+        model_config_id: effortful.id,
+        model: 'eff-a',
+        effort: 'high',
+      },
+      system_main: null,
+      system_main_profile_id: null,
+    });
+
+    // The bound model must take the Agent's explicit effort.
+    expect(
+      await send('PATCH', `/${main.id}`, { model: 'eff-none' }),
+    ).toMatchObject({ status: 400, body: { code: 'EFFORT_NOT_SUPPORTED' } });
+    expect(
+      await send('PATCH', `/${main.id}`, {
+        runtime_policy: { reasoning: { effort: 'max' } },
+      }),
+    ).toMatchObject({ status: 400, body: { code: 'EFFORT_NOT_SUPPORTED' } });
+    expect(
+      await send('PATCH', `/${main.id}`, {
+        model: 'eff-none',
+        runtime_policy: { reasoning: { effort: 'inherit' } },
+      }),
+    ).toMatchObject({ status: 200 });
+
+    // The system main is the earliest active admin's main Agent; its id is
+    // only told to its owner.
+    const at = new Date().toISOString();
+    db.createUser({
+      id: 'routes-agent-admin',
+      username: 'routes-agent-admin',
+      password_hash: 'hash',
+      display_name: 'Admin',
+      role: 'admin',
+      status: 'active',
+      created_at: at,
+      updated_at: at,
+      must_change_password: false,
+    });
+    const adminMain = db.getOrCreateDefaultAgentProfile('routes-agent-admin');
+    db.updateAgentProfile(adminMain.id, 'routes-agent-admin', {
+      modelConfigId: effortful.id,
+    });
+    expect(await list()).toMatchObject({
+      system_main: {
+        model_config_id: effortful.id,
+        model: 'eff-a',
+        effort: 'low',
+      },
+      system_main_profile_id: null,
+    });
+    db.updateAgentProfile(adminMain.id, 'routes-agent-admin', {
+      modelConfigId: null,
+    });
+    db.updateAgentProfile(main.id, 'routes-agent-user', {
+      modelConfigId: null,
+    });
   });
 
   test('a ChatGPT configuration offers its catalog', async () => {
@@ -1630,8 +1716,15 @@ describe('/api/agent-profiles model within a configuration', () => {
     const models = body.model_configs.find(
       (item: any) => item.id === chatGpt.id,
     ).models;
-    expect(models).toContainEqual({ id: 'gpt-6-sol', hidden: false });
-    expect(models.every((model: any) => model.hidden === false)).toBe(true);
+    // The account catalog: verified efforts, window unknown.
+    expect(models).toContainEqual(
+      expect.objectContaining({
+        id: 'gpt-6-sol',
+        contextWindow: null,
+        effortsSource: 'registry',
+      }),
+    );
+    expect(models.every((model: any) => !('hidden' in model))).toBe(true);
 
     const bound = await send('POST', '/', {
       name: 'ChatGPT Model Agent',

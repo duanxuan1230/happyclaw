@@ -29,15 +29,16 @@ import {
 } from './codex-gateway/model-catalog.js';
 import { listCodexModelsForProvider } from './codex-gateway/model-catalog-sync.js';
 import {
-  modelCapabilities,
+  isModelEffort,
+  resolveModelCapabilities,
   splitOneMillionSuffix,
+  type ModelCapabilitySource,
   type ModelEffort,
-  type ProviderModelEntry,
+  type ResolvedModelCapabilities,
 } from './model-providers.js';
 import { hasPermission } from './permissions.js';
 import {
   findProviderModel,
-  providerEffortLevel,
   providerModels,
   type UnifiedProvider,
 } from './runtime-config.js';
@@ -52,12 +53,58 @@ type ModelConfiguration = ChatGptProvider &
   Pick<UnifiedProvider, 'anthropicBaseUrl' | 'models' | 'customEnv'>;
 
 /**
- * Whether `model` of a configuration takes `effort` as Claude Code's effort
- * level. Only models whose capabilities list efforts do; a pass-through relay
- * (no model) takes none.
+ * What `model` of a configuration takes: the connection's entry (declared
+ * window and efforts), else the registry, else its family. A model nothing is
+ * known about, and a pass-through relay (no model), take no effort.
  */
-function modelTakesEffort(model: string, effort: string): boolean {
-  return !!modelCapabilities(model)?.efforts?.includes(effort as ModelEffort);
+export function connectionModelCapabilities(
+  provider: Pick<
+    UnifiedProvider,
+    'anthropicBaseUrl' | 'anthropicModel' | 'models'
+  >,
+  model: string,
+): ResolvedModelCapabilities {
+  const id = splitOneMillionSuffix(model).model;
+  return resolveModelCapabilities(
+    findProviderModel(provider, id) ?? { id: id || model },
+  );
+}
+
+/** Whether the connection's list has `model`, named with or without `[1m]`. */
+function offersModel(provider: ModelConfiguration, model: string): boolean {
+  return !!findProviderModel(provider, splitOneMillionSuffix(model).model);
+}
+
+function modelTakesEffort(
+  provider: ModelConfiguration,
+  model: string,
+  effort: string,
+): boolean {
+  return (
+    !!model &&
+    isModelEffort(effort) &&
+    connectionModelCapabilities(provider, model).efforts.includes(effort)
+  );
+}
+
+/**
+ * The effort a launch on `model` runs Claude Code at: the first of `picks`
+ * (most specific first) the model takes, else its default, else none.
+ */
+export function resolveLaunchEffort(
+  provider: ModelConfiguration,
+  model: string,
+  picks: ReadonlyArray<string | null | undefined>,
+): ModelEffort | null {
+  if (!model) return null;
+  const { efforts, defaultEffort } = connectionModelCapabilities(
+    provider,
+    model,
+  );
+  for (const pick of picks) {
+    if (isModelEffort(pick) && efforts.includes(pick)) return pick;
+  }
+  return defaultEffort;
 }
 
 /**
@@ -74,14 +121,13 @@ function checkConnectionChoice(
   staleModel: boolean;
   staleEffort: boolean;
 } {
-  // Hidden models count: hiding only leaves a model out of the picker.
   const model =
-    stored.model && findProviderModel(provider, stored.model)
-      ? stored.model
+    stored.model && offersModel(provider, stored.model)
+      ? splitOneMillionSuffix(stored.model).model
       : null;
   const effort =
     stored.effort &&
-    modelTakesEffort(model ?? provider.anthropicModel, stored.effort)
+    modelTakesEffort(provider, model ?? provider.anthropicModel, stored.effort)
       ? stored.effort
       : null;
   return {
@@ -170,7 +216,7 @@ export function resolveSessionLaunchOverrides(
           providerId: provider.id,
           effort: detail.effort,
         },
-        'Conversation effort is not taken by the model it runs; following the configured effort',
+        'Conversation effort is not taken by the model it runs; following the Agent or the model default',
       );
     }
     return {
@@ -233,7 +279,9 @@ export function resolveAgentLaunchModel(
       authoritative: source === 'live',
     }).model;
   } else {
-    model = findProviderModel(provider, agentModel) ? agentModel : null;
+    model = offersModel(provider, agentModel)
+      ? splitOneMillionSuffix(agentModel).model
+      : null;
   }
   if (!model && context.warn !== false) {
     logger.warn(
@@ -247,27 +295,6 @@ export function resolveAgentLaunchModel(
     );
   }
   return model ?? undefined;
-}
-
-/**
- * The model a launch on `provider` runs when the conversation picked none:
- * the Agent's model when the Agent's binding is what pins the launch and the
- * configuration still offers it, else the configuration's own. Null for a
- * pass-through relay, which names no model.
- */
-export function unpickedLaunchModel(
-  provider: ModelConfiguration,
-  agentModel: string | null | undefined,
-  groupFolder: string,
-): string | null {
-  const model =
-    resolveAgentLaunchModel(provider, agentModel, {
-      groupFolder,
-      warn: false,
-    }) ?? provider.anthropicModel;
-  return provider.codexOAuthCredentials
-    ? chatGptLaunchModel(model, provider)
-    : model || null;
 }
 
 /**
@@ -314,87 +341,49 @@ export function chatGptLaunchModel(
 /** A model a conversation or an Agent may pick within a configuration. */
 export interface ConnectionModelChoice {
   id: string;
-  /** Left out of the chat picker; an explicit choice may still name it. */
-  hidden: boolean;
-  /** Efforts a conversation may pick on this model; absent: none. */
-  efforts?: readonly ModelEffort[];
-  /** The effort this model runs at when no effort is picked. */
-  defaultEffort?: ModelEffort;
-  contextWindow?: number;
+  /** Efforts the model takes; empty: none, and none is sent. */
+  efforts: ModelEffort[];
+  /** The effort the model runs at when nothing is picked. */
+  defaultEffort: ModelEffort | null;
+  contextWindow: number | null;
+  /** Where the efforts come from; only `registry` is verified. */
+  effortsSource: ModelCapabilitySource;
 }
 
 /**
- * What a model of a configuration offers beyond its id. Its effort without a
- * pick follows the launch: an Agent's own effort, else the model's
- * configured one, else the configuration's environment. With none of them
- * Claude Code chooses the level itself, so none is claimed.
- */
-function connectionModelCapabilities(
-  provider: ModelConfiguration,
-  entry: ProviderModelEntry,
-  agentEffort: ModelEffort | undefined,
-): Omit<ConnectionModelChoice, 'id' | 'hidden'> {
-  const capabilities = modelCapabilities(entry.id);
-  const defaultEffort =
-    agentEffort ?? entry.effort ?? providerEffortLevel(provider);
-  return {
-    ...(capabilities?.efforts ? { efforts: capabilities.efforts } : {}),
-    ...(defaultEffort ? { defaultEffort } : {}),
-    ...(capabilities?.contextWindow
-      ? { contextWindow: capabilities.contextWindow }
-      : {}),
-  };
-}
-
-/**
- * The effort a launch on `provider` runs at when the conversation picked
- * none, or null when the model it runs takes no effort level (or is a
- * ChatGPT subscription, whose view says it).
- */
-export function unpickedLaunchEffort(
-  provider: ModelConfiguration,
-  model: string | null,
-  agentEffort: ModelEffort | undefined,
-): ModelEffort | null {
-  if (provider.codexOAuthCredentials || !model) return null;
-  const entry = findProviderModel(provider, model) ?? { id: model };
-  const offered = connectionModelCapabilities(provider, entry, agentEffort);
-  return offered.efforts ? (offered.defaultEffort ?? null) : null;
-}
-
-/**
- * The models a configuration offers to pick from: its own list, or a ChatGPT
- * subscription's account catalog, where nothing is hidden.
+ * The models a configuration offers to pick from, with what each takes: its
+ * own list, or a ChatGPT subscription's account catalog (verified efforts,
+ * window unknown).
  */
 export function listConnectionModels(
   provider: ModelConfiguration,
 ): ConnectionModelChoice[] {
   if (provider.codexOAuthCredentials) {
-    return listCodexModelsForProvider(provider).models.map((entry) => ({
-      id: entry.value,
-      hidden: false,
-    }));
+    return listCodexModelsForProvider(provider).models.map((entry) => {
+      const efforts = entry.efforts.filter(isModelEffort);
+      return {
+        id: entry.value,
+        efforts,
+        defaultEffort:
+          isModelEffort(entry.defaultEffort) &&
+          efforts.includes(entry.defaultEffort)
+            ? entry.defaultEffort
+            : null,
+        contextWindow: null,
+        effortsSource: 'registry',
+      };
+    });
   }
-  return providerModels(provider).map((entry) => ({
-    id: entry.id,
-    hidden: entry.hidden === true,
-  }));
-}
-
-/**
- * What the chat picker offers within a configuration that is not a ChatGPT
- * subscription (that one shows its catalog view): each model with the
- * efforts it takes and the one it runs at without a pick.
- */
-export function listSessionPickerModels(
-  provider: ModelConfiguration,
-  agentEffort: ModelEffort | undefined,
-): ConnectionModelChoice[] {
-  return providerModels(provider).map((entry) => ({
-    id: entry.id,
-    hidden: entry.hidden === true,
-    ...connectionModelCapabilities(provider, entry, agentEffort),
-  }));
+  return providerModels(provider).map((entry) => {
+    const capabilities = resolveModelCapabilities(entry);
+    return {
+      id: entry.id,
+      efforts: capabilities.efforts,
+      defaultEffort: capabilities.defaultEffort,
+      contextWindow: capabilities.contextWindow,
+      effortsSource: capabilities.effortsSource,
+    };
+  });
 }
 
 export interface CodexModelChoice {
@@ -511,9 +500,7 @@ export function validateSessionChoice(
   if (!provider.codexOAuthCredentials) {
     const model = requested.model?.trim() || null;
     const effort = requested.effort?.trim() || null;
-    // Hidden models count: the picker leaves them out, an explicit choice may
-    // still name one.
-    if (model && !findProviderModel(provider, model)) {
+    if (model && !offersModel(provider, model)) {
       return {
         ok: false,
         rejection: {
@@ -523,7 +510,7 @@ export function validateSessionChoice(
       };
     }
     const runs = model ?? provider.anthropicModel;
-    if (effort && !modelTakesEffort(runs, effort)) {
+    if (effort && !modelTakesEffort(provider, runs, effort)) {
       return {
         ok: false,
         rejection: {
@@ -534,7 +521,11 @@ export function validateSessionChoice(
         },
       };
     }
-    return { ok: true, model, effort };
+    return {
+      ok: true,
+      model: model && splitOneMillionSuffix(model).model,
+      effort,
+    };
   }
   const { models, source } = listCodexModelsForProvider(provider);
   const choice = resolveCodexSessionChoice({

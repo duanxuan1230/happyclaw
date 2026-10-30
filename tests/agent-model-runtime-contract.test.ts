@@ -27,7 +27,7 @@ describe('Agent model runtime contracts', () => {
     const runner = read('src/container-runner.ts');
     expect(
       runner.match(
-        /trySelectPoolProvider\(\s*group\.folder,\s*sessionAgentId,\s*input\.agentProfile\?\.modelConfigId,\s*transientRetryProfileForInput\(input\.turnId\),\s*input\.agentProfile\?\.model,\s*\)/g,
+        /trySelectPoolProvider\(\s*group\.folder,\s*sessionAgentId,\s*input\.agentProfile\?\.modelConfigId,\s*input\.agentProfile\?\.model,\s*resolveAgentSdkEffort\(input\.agentProfile\?\.runtimePolicy\),\s*\)/g,
       ),
     ).toHaveLength(2);
   });

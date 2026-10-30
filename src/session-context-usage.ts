@@ -15,7 +15,15 @@ import {
   getSessionModel,
   getSessionProviderId,
 } from './db.js';
-import { modelCapabilities, splitOneMillionSuffix } from './model-providers.js';
+import {
+  CLAUDE_CODE_DEFAULT_CONTEXT,
+  ONE_MILLION_CONTEXT,
+  effectiveProviderModels,
+  findModelEntry,
+  resolveModelCapabilities,
+  splitOneMillionSuffix,
+  windowOf,
+} from './model-providers.js';
 import { latestSdkContextWindow } from './run-context-snapshot.js';
 import { getProviderById } from './runtime-config.js';
 import { sessionTranscriptPath } from './session-workflows.js';
@@ -39,9 +47,6 @@ export const NO_CONTEXT_USAGE: SessionContextUsage = {
   updatedAt: null,
 };
 
-/** Claude Code's window for a model it is given no larger one for. */
-const DEFAULT_CONTEXT_WINDOW = 200_000;
-const ONE_MILLION_WINDOW = 1_000_000;
 /** Transcript bytes read from the end to find the last request. */
 const RECENT_TAIL_BYTES = 256 * 1024;
 const MAX_TAIL_BYTES = 8 * 1024 * 1024;
@@ -138,11 +143,11 @@ async function lastRequest(transcript: string): Promise<LastRequest | null> {
 
 /**
  * The window Claude Code works with, best known first: what it reported for
- * this conversation's model in this process; the connection's own
- * CLAUDE_CODE_AUTO_COMPACT_WINDOW; 1M for a `[1m]` model; on an official
- * connection the model's own window (Claude Code runs 1M-native Claude
- * models at 1M there); elsewhere the model's window capped at Claude Code's
- * default, which is what an Anthropic-compatible endpoint is given.
+ * this conversation's model in this process; on a third-party connection the
+ * window the launch derived `[1m]` and the compact window from (windowOf);
+ * on an official connection the model's own window (Claude Code runs
+ * 1M-native Claude models at 1M there); without a connection 1M for a `[1m]`
+ * model, else the model's window capped at Claude Code's default.
  */
 function contextWindowFor(
   groupFolder: string,
@@ -158,18 +163,26 @@ function contextWindowFor(
   if (reported) return reported;
   const providerId = getSessionProviderId(groupFolder, agentId);
   const provider = providerId ? getProviderById(providerId) : null;
-  const configured = Number(
-    provider?.customEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW?.trim(),
-  );
-  if (Number.isSafeInteger(configured) && configured > 0) return configured;
+  const runs = launchModel || model;
+  if (provider && !provider.codexOAuthCredentials) {
+    const models = effectiveProviderModels(provider);
+    if (provider.anthropicBaseUrl) {
+      return windowOf(models, runs) ?? CLAUDE_CODE_DEFAULT_CONTEXT;
+    }
+    const { model: id, oneMillion } = splitOneMillionSuffix(runs);
+    return (
+      resolveModelCapabilities(findModelEntry(models, id) ?? { id })
+        .contextWindow ??
+      (oneMillion ? ONE_MILLION_CONTEXT : CLAUDE_CODE_DEFAULT_CONTEXT)
+    );
+  }
   if (launchModel && splitOneMillionSuffix(launchModel).oneMillion) {
-    return ONE_MILLION_WINDOW;
+    return ONE_MILLION_CONTEXT;
   }
-  const capability = modelCapabilities(launchModel || model)?.contextWindow;
-  if (provider?.type === 'official' && !provider.anthropicBaseUrl) {
-    return capability ?? DEFAULT_CONTEXT_WINDOW;
-  }
-  return Math.min(capability ?? DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW);
+  return Math.min(
+    windowOf([], runs) ?? CLAUDE_CODE_DEFAULT_CONTEXT,
+    CLAUDE_CODE_DEFAULT_CONTEXT,
+  );
 }
 
 /**
@@ -201,7 +214,7 @@ export async function readSessionContextUsage(
   if (last.usedTokens > contextWindow) {
     contextWindow = Math.max(
       contextWindow,
-      modelCapabilities(launchModel || last.model)?.contextWindow ?? 0,
+      windowOf([], launchModel || last.model) ?? 0,
     );
   }
   return {

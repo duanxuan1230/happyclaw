@@ -370,7 +370,6 @@ describe('a pinned ChatGPT launch', () => {
       'grp',
       null,
       'gpt',
-      null,
       'gpt-6-astra',
     );
     providerPool.releaseSession('gpt');
@@ -384,13 +383,7 @@ describe('a pinned ChatGPT launch', () => {
 
     // The account's own list rules out a model it does not have.
     mocks.catalog = { models: CATALOG, source: 'live' };
-    const stale = runner.trySelectPoolProvider(
-      'grp',
-      null,
-      'gpt',
-      null,
-      'gpt-7-new',
-    );
+    const stale = runner.trySelectPoolProvider('grp', null, 'gpt', 'gpt-7-new');
     providerPool.releaseSession('gpt');
     expect(stale?.resolved.config.anthropicModel).toBe('gpt-6.1-sol');
     expect(mocks.logger.warn).toHaveBeenCalledWith(
@@ -546,15 +539,6 @@ describe('changing the model starts a new session', () => {
       resetSession: true,
       sessionModel: 'gpt-6.1-sol',
     });
-  });
-
-  test('is predicted when the pin is dropped but the pool keeps the binding', () => {
-    setProviders(chatGpt('gpt'), chatGpt('gpt-2'), thirdParty('glm'));
-    resumableSession('gpt', 'gpt-6-astra');
-    // No pin: the pool's sticky binding returns to the configuration's model.
-    expect(runner.willClearSessionOnProviderSwitch('grp', null)).toBe(true);
-    resumableSession('gpt', 'gpt-6.1-sol');
-    expect(runner.willClearSessionOnProviderSwitch('grp', null)).toBe(false);
   });
 
   test('another configuration resets through the provider rule', () => {

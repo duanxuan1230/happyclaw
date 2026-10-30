@@ -116,15 +116,14 @@ import {
   hasUncoveredCursorMessageThrough,
   shouldRecoverPendingHistory,
 } from './delivery-cursor.js';
+import { backfillSystemMainModelBinding } from './model-binding-backfill.js';
 import {
   AvailableGroup,
   ContainerInput,
   ContainerOutput,
-  closeRunnerAfterRotatingProviderTurn,
   runContainerAgent,
   runHostAgent,
   runAgentWithModelFallback,
-  shouldRotatePoolProviderAfterTurn,
   willClearSessionOnProviderSwitch,
   writeGroupsSnapshot,
 } from './container-runner.js';
@@ -181,7 +180,6 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
-  setSessionProviderId,
   deleteSession,
   storeMessageDirect,
   updateLatestMessageTokenUsage,
@@ -2955,28 +2953,6 @@ function resetConversationSessionForAgentProfileMismatch(
     'Cleared conversation agent Claude session after AgentProfile identity changed',
   );
   return true;
-}
-
-/**
- * Drop the resumable SDK session after a rotating-strategy turn while keeping
- * enough host metadata for the next cold run to predict the provider switch,
- * inject persisted history, and preserve AgentProfile identity.
- */
-function resetSessionAfterProviderRotation(
-  groupFolder: string,
-  agentId: string | null | undefined,
-  selectedProviderId: string | null,
-  profile: AgentProfile | undefined,
-): void {
-  deleteSession(groupFolder, agentId);
-  setSession(groupFolder, '', agentId, {
-    agentProfileId: profile?.id,
-    agentProfileVersion: profile?.version,
-    identityHash: profile?.identity_hash,
-  });
-  if (selectedProviderId) {
-    setSessionProviderId(groupFolder, agentId, selectedProviderId);
-  }
 }
 
 /**
@@ -11798,12 +11774,6 @@ async function runAgent(
   }
   const sessionId = sessions[group.folder];
   const containerAgentProfile = toRunnerAgentProfile(resolvedAgentProfile);
-  const rotateProviderAfterTurn = shouldRotatePoolProviderAfterTurn(
-    group.folder,
-    resolvedAgentProfile?.model_config_id,
-  );
-  let rotatingTurnCompleted = false;
-  let selectedProviderIdForRun: string | null = null;
   const happyClawOwnerProfile = resolveHappyClawOwnerProfileForTurn({
     group,
     profile: resolvedAgentProfile,
@@ -11872,23 +11842,6 @@ async function runAgent(
         commitIpcDeliveryReceipts,
       );
     }
-    if (
-      closeRunnerAfterRotatingProviderTurn(
-        rotateProviderAfterTurn,
-        rotatingTurnCompleted,
-        output,
-        () => queue.closeStdin(chatJid),
-      )
-    ) {
-      rotatingTurnCompleted = true;
-      logger.info(
-        {
-          groupFolder: group.folder,
-          providerId: selectedProviderIdForRun,
-        },
-        'Rotating provider turn completed; closing runner before the next request',
-      );
-    }
   };
 
   ipcWatcherManager?.watchRuntime(group.folder);
@@ -11907,7 +11860,6 @@ async function runAgent(
       identifier: string,
       selectedProviderId: string | null,
     ) => {
-      selectedProviderIdForRun = selectedProviderId;
       // 宿主机模式：containerName 传 null，走 process.kill() 路径
       const containerName = executionMode === 'container' ? identifier : null;
       queue.registerProcess(chatJid, proc, {
@@ -12015,16 +11967,6 @@ async function runAgent(
         identityHash: resolvedAgentProfile?.identity_hash,
       });
       setSessionInteractionMode(group.folder, undefined, interactionMode);
-    }
-
-    if (rotatingTurnCompleted) {
-      delete sessions[group.folder];
-      resetSessionAfterProviderRotation(
-        group.folder,
-        null,
-        selectedProviderIdForRun,
-        resolvedAgentProfile,
-      );
     }
 
     // Agent was interrupted by _close sentinel (home folder drain).
@@ -16818,13 +16760,6 @@ async function processAgentConversation(
   /** Card note while the input waits for a usage-limit reset. */
   let agentUsageLimitWaitNote: string | null = null;
   let parkedForUsageLimitWait = false;
-  const rotateProviderAfterAgentTurn = shouldRotatePoolProviderAfterTurn(
-    effectiveGroup.folder,
-    agentProfile?.model_config_id,
-    agentId,
-  );
-  let rotatingAgentTurnCompleted = false;
-  let selectedAgentProviderIdForRun: string | null = null;
   let agentDeliveryNeedsManualReconciliation = false;
   let agentDeterministicTerminalError: string | null = null;
   let hadError = false;
@@ -18314,24 +18249,6 @@ async function processAgentConversation(
       hadError = true;
       if (output.error) lastError = output.error;
     }
-    if (
-      closeRunnerAfterRotatingProviderTurn(
-        rotateProviderAfterAgentTurn,
-        rotatingAgentTurnCompleted,
-        output,
-        () => queue.closeStdin(virtualJid),
-      )
-    ) {
-      rotatingAgentTurnCompleted = true;
-      logger.info(
-        {
-          chatJid,
-          agentId,
-          providerId: selectedAgentProviderIdForRun,
-        },
-        'Rotating agent provider turn completed; closing runner before the next request',
-      );
-    }
   };
 
   const wrappedOnOutput = async (output: ContainerOutput): Promise<void> => {
@@ -18398,7 +18315,6 @@ async function processAgentConversation(
       identifier: string,
       selectedProviderId: string | null,
     ) => {
-      selectedAgentProviderIdForRun = selectedProviderId;
       const containerName = executionMode === 'container' ? identifier : null;
       queue.registerProcess(virtualJid, proc, {
         containerName,
@@ -18554,16 +18470,6 @@ async function processAgentConversation(
         agentId,
         interactionMode,
       );
-    }
-
-    if (rotatingAgentTurnCompleted) {
-      resetSessionAfterProviderRotation(
-        effectiveGroup.folder,
-        agentId,
-        selectedAgentProviderIdForRun,
-        agentProfile,
-      );
-      currentAgentSessionId = undefined;
     }
 
     // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）
@@ -22641,6 +22547,11 @@ async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
   logger.info('Database initialized');
+  try {
+    backfillSystemMainModelBinding();
+  } catch (err) {
+    logger.warn({ err }, 'Failed to move the default model onto HappyClaw');
+  }
 
   const migratedAutoCompactProfiles = migrateAgentProfileAutoCompactWindow(
     getLegacySystemAutoCompactWindow(),
