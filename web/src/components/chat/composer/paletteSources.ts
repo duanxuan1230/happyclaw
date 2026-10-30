@@ -144,7 +144,8 @@ export async function loadWorkspaceDirectory(
   dir: string,
 ): Promise<WorkspaceEntry[]> {
   const data = await listWorkspaceFiles(workspaceJid, dir);
-  const hidden = (entry: WorkspaceEntry) => (entry.name.startsWith('.') ? 1 : 0);
+  const hidden = (entry: WorkspaceEntry) =>
+    entry.name.startsWith('.') ? 1 : 0;
   return data.files
     .filter((file) => !file.isSystem && !UNLISTED_NAMES.has(file.name))
     .map((file) => ({

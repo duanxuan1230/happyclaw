@@ -109,7 +109,8 @@ export function pastedTextChipClickExpands(
 ): boolean {
   if (!coarsePointer) return true;
   return (
-    target instanceof Element && !!target.closest(`[${PASTED_TEXT_EXPAND_ATTR}]`)
+    target instanceof Element &&
+    !!target.closest(`[${PASTED_TEXT_EXPAND_ATTR}]`)
   );
 }
 
