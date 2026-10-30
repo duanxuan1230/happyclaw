@@ -3,9 +3,8 @@
 // Thin layer over AutomationService: it owns permissions (owner isolation,
 // 404 for other users' automations, Host workspaces need an admin) and the
 // Chinese error texts. index.ts injects the service once the runtime is up.
-// Read-only guests reach only the list and detail reads (guest guard), scoped
-// to the workspaces they are granted, with shell commands and their output
-// left out.
+// Read-only guests act as `viewer`s of the workspaces they are granted; the
+// guest guard lets them reach only the list and detail reads.
 
 import { Hono, type Context } from 'hono';
 import type { ZodType } from 'zod';
@@ -23,13 +22,7 @@ import {
   AutomationMarkReadSchema,
   AutomationPatchSchema,
 } from '../schemas.js';
-import { getAutomation } from '../automation-store.js';
-import { getRegisteredGroup, listActiveGuestGrantJids } from '../db.js';
-import {
-  canViewGroup,
-  redactAutomationForGuest,
-  redactAutomationRunForGuest,
-} from '../guest-access.js';
+import { listActiveGuestGrantJids } from '../db.js';
 import type { AuthUser } from '../types.js';
 import type { Variables } from '../web-context.js';
 
@@ -45,6 +38,8 @@ automationRoutes.use('*', authMiddleware);
 
 function actorOf(c: Context<{ Variables: Variables }>): AutomationActor {
   const user = c.get('user') as AuthUser;
+  if (user.role === 'guest')
+    return { kind: 'viewer', workspaceJids: listActiveGuestGrantJids(user.id) };
   return { kind: 'web', userId: user.id, isAdmin: user.role === 'admin' };
 }
 
@@ -87,37 +82,6 @@ function handle(handler: Handler) {
   };
 }
 
-/** Workspaces a guest may currently view (grant, owner and workspace intact). */
-function guestWorkspaceJids(user: AuthUser): string[] {
-  return listActiveGuestGrantJids(user.id).filter((jid) => {
-    const group = getRegisteredGroup(jid);
-    return !!group && canViewGroup(user, { ...group, jid });
-  });
-}
-
-/**
- * A guest reads a workspace's automations the way a non-owner turn does:
- * scoped to that workspace, every write refused by the service.
- */
-function viewerOf(workspaceJid: string): AutomationActor {
-  return { kind: 'other_turn', workspaceJid, sessionJid: workspaceJid };
-}
-
-/** The guest's actor for one automation, or a 404 like any hidden one. */
-function guestActorFor(user: AuthUser, automationId: string): AutomationActor {
-  const automation = getAutomation(automationId);
-  if (
-    !automation ||
-    !guestWorkspaceJids(user).includes(automation.workspaceJid)
-  )
-    throw new AutomationError(404, '自动化不存在');
-  return viewerOf(automation.workspaceJid);
-}
-
-function isGuest(c: Context<{ Variables: Variables }>): boolean {
-  return (c.get('user') as AuthUser).role === 'guest';
-}
-
 function param(c: Context<{ Variables: Variables }>, name: string): string {
   return c.req.param(name) ?? '';
 }
@@ -132,17 +96,6 @@ automationRoutes.get(
   '/',
   handle((c, service) => {
     const workspaceJid = c.req.query('workspace') || undefined;
-    if (isGuest(c)) {
-      const jids = guestWorkspaceJids(c.get('user') as AuthUser).filter(
-        (jid) => !workspaceJid || jid === workspaceJid,
-      );
-      return c.json({
-        automations: jids
-          .flatMap((jid) => service.list(viewerOf(jid)))
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-          .map(redactAutomationForGuest),
-      });
-    }
     return c.json({
       automations: service.list(actorOf(c), { workspaceJid }),
     });
@@ -174,15 +127,8 @@ automationRoutes.get(
 automationRoutes.get(
   '/:id',
   handle((c, service) => {
-    const id = param(c, 'id');
-    if (isGuest(c)) {
-      const actor = guestActorFor(c.get('user') as AuthUser, id);
-      return c.json({
-        automation: redactAutomationForGuest(service.get(actor, id)),
-        runs: service.listRuns(actor, id, 50).map(redactAutomationRunForGuest),
-      });
-    }
     const actor = actorOf(c);
+    const id = param(c, 'id');
     return c.json({
       automation: service.get(actor, id),
       runs: service.listRuns(actor, id, 50),
@@ -252,19 +198,15 @@ automationRoutes.post(
 
 automationRoutes.get(
   '/:id/runs',
-  handle((c, service) => {
-    const id = param(c, 'id');
-    const limit = parseLimit(c.req.query('limit'));
-    if (isGuest(c)) {
-      const actor = guestActorFor(c.get('user') as AuthUser, id);
-      return c.json({
-        runs: service
-          .listRuns(actor, id, limit)
-          .map(redactAutomationRunForGuest),
-      });
-    }
-    return c.json({ runs: service.listRuns(actorOf(c), id, limit) });
-  }),
+  handle((c, service) =>
+    c.json({
+      runs: service.listRuns(
+        actorOf(c),
+        param(c, 'id'),
+        parseLimit(c.req.query('limit')),
+      ),
+    }),
+  ),
 );
 
 automationRoutes.post(

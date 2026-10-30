@@ -18,11 +18,15 @@ export function isGuestAllowedPath(pathname: string): boolean {
 }
 
 /** Settings tabs a guest can open (own password, devices, local prefs). */
-export const GUEST_SETTINGS_TABS = [
+const GUEST_SETTINGS_TABS: readonly string[] = [
   'preferences',
   'security',
   'about',
-] as const;
+];
+
+export function isGuestSettingsTab(tab: string): boolean {
+  return GUEST_SETTINGS_TABS.includes(tab);
+}
 
 export const GUEST_READ_ONLY_NOTICE = '访客模式：只读，无法发送消息';
 

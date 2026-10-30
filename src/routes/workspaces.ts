@@ -18,6 +18,7 @@ import {
   getWorkspaceAgentProfileId,
   getWorkspaceInteractionMode,
   listAgentChannelMountsByWorkspace,
+  listActiveGuestGrantJids,
   listWorkspaceRecords,
   listWorkspaceRuntimeSessionsByWorkspace,
   type AgentChannelMountRecord,
@@ -158,7 +159,11 @@ function serializeWorkspaceSummary(
 }
 
 function listVisibleWorkspaces(user: AuthUser): ResolvedWorkspaceAccess[] {
+  // A guest's grants are few; skip every other workspace up front.
+  const granted =
+    user.role === 'guest' ? new Set(listActiveGuestGrantJids(user.id)) : null;
   return listWorkspaceRecords()
+    .filter((workspace) => !granted || granted.has(workspace.jid))
     .map((workspace) => resolveWorkspaceAccess(user, workspace))
     .filter((access): access is ResolvedWorkspaceAccess => access !== null);
 }

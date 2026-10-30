@@ -934,10 +934,8 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   const [preview, setPreview] = useState<PreviewState>(null);
 
   const isStreaming = useChatStore((s) => !!s.streaming[groupJid]);
-  const isGuest = useIsGuest();
-  const groupReadOnly = useChatStore((s) => !!s.groups[groupJid]?.read_only);
   // Read-only viewers (guests) browse, preview and download only.
-  const readOnly = isGuest || groupReadOnly;
+  const readOnly = useIsGuest();
   const canOpenLocalFolder = useAuthStore(
     (s) => s.user?.role === 'admin' && !readOnly,
   );

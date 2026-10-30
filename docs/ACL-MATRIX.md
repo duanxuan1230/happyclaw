@@ -424,8 +424,9 @@ Agent MCP 调用没有 Cookie，但必须携带由主进程创建的运行上下
   以及 `logs`、`conversations`。名称比较不区分大小写；符号链接按真实路径判断，
   指向文件根之外的一律隐藏；文件根随 `?agentId=` 解析（独立 worktree 会话为其
   worktree）。列表不返回绝对路径。owner 不受影响。
-- 自动化：只列出已授权工作区的自动化及其运行记录，前置检查命令、脚本命令和前置检查
-  输出一律去掉（REST 与 WebSocket 相同）；所有写操作 403。
+- 自动化：访客在服务里是 `viewer` 调用者，只列出已授权工作区的自动化及其运行记录，
+  前置检查命令、脚本命令和前置检查输出一律去掉（REST 与 WebSocket 相同）；所有写
+  操作（包括标记已读）403。
 - Memory：读取用 `canViewGroup`，写入仍是 Modify。
 - WebSocket：访客连接只接收。除 `ping`（回 `pong`）外，任何入站消息（`send_message`、
   `terminal_*` 及未来类型）都在分发前以 `ws_error` 拒绝。广播受众

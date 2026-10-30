@@ -46,11 +46,6 @@ export interface UserPublic {
   guest_owner_username?: string | null;
 }
 
-/** True for read-only guest accounts. */
-export function isGuestUser(user: Pick<UserPublic, 'role'> | null | undefined) {
-  return user?.role === 'guest';
-}
-
 export interface AppearanceConfig {
   appName: string;
   aiName: string;

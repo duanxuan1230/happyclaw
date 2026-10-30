@@ -16,16 +16,12 @@ import {
   getChannelMount,
   getJidsByFolder,
   getRegisteredGroup,
-  deleteUserSessionsByUserId,
-  getUserById,
   hasActiveGuestWorkspaceGrant,
-  listGuestIdsByOwner,
 } from './db.js';
-import { getSystemSettings } from './runtime-config.js';
-import { invalidateUserSessions } from './web-context.js';
 import { canAccessGroup } from './group-acl.js';
 import type { Automation, AutomationRun } from './automation.js';
-import type { RegisteredGroup, User, UserRole } from './types.js';
+import type { RegisteredGroup, UserRole } from './types.js';
+import { stripVirtualJidSuffix } from './utils.js';
 import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
@@ -35,10 +31,6 @@ export const GUEST_READ_ONLY_ERROR = 'Guest accounts are read-only';
 
 type ActorLike = { id: string; role: UserRole };
 type GroupWithJid = RegisteredGroup & { jid: string };
-
-export function isGuestUser(user: { role: UserRole } | null | undefined) {
-  return user?.role === 'guest';
-}
 
 /**
  * Names that hide a path from guests when any of its segments matches
@@ -78,20 +70,13 @@ export function isGuestHiddenWorkspacePath(relativePath: string): boolean {
     .some((part) => part !== '' && part !== '.' && isGuestHiddenName(part));
 }
 
-function stripVirtualSuffix(jid: string): string {
-  const indexes = ['#agent:', '#task:']
-    .map((marker) => jid.indexOf(marker))
-    .filter((index) => index >= 0);
-  return indexes.length ? jid.slice(0, Math.min(...indexes)) : jid;
-}
-
 /**
  * Resolve the `web:` workspace a group row belongs to: the row itself for a
  * workspace, the bound workspace for a bound IM chat, the folder's workspace
  * for an unbound legacy IM chat. A stale binding resolves to nothing.
  */
 export function resolveViewWorkspace(group: GroupWithJid): GroupWithJid | null {
-  const jid = stripVirtualSuffix(group.jid);
+  const jid = stripVirtualJidSuffix(group.jid);
   if (jid.startsWith('web:')) {
     if (jid === group.jid) return group;
     const base = getRegisteredGroup(jid);
@@ -105,7 +90,7 @@ export function resolveViewWorkspace(group: GroupWithJid): GroupWithJid | null {
   };
   const bound = resolveBoundWorkspaceJid(jid, deps);
   if (bound) {
-    const base = stripVirtualSuffix(bound);
+    const base = stripVirtualJidSuffix(bound);
     const row = getRegisteredGroup(base);
     return row && base.startsWith('web:') ? { ...row, jid: base } : null;
   }
@@ -153,60 +138,6 @@ export function canViewHostGroup(
   group: GroupWithJid,
 ): boolean {
   return user.role === 'admin' || guestHasActiveGrant(user, group);
-}
-
-/** Guests one owner may hold at a time (disabled ones count). */
-export const MAX_GUESTS_PER_OWNER = 20;
-
-/**
- * Whether `user` may hold guests: admins always; members only while the
- * `allowMemberGuests` system setting is on (guests skip the invite-only
- * registration, so it is off by default).
- */
-export function canOwnGuests(user: { role: UserRole }): boolean {
-  if (user.role === 'admin') return true;
-  return user.role === 'member' && getSystemSettings().allowMemberGuests;
-}
-
-export type GuestAccountState =
-  | { valid: true; guest: User; owner: User }
-  | { valid: false; reason: 'not_guest' | 'guest_inactive' | 'owner_invalid' };
-
-/**
- * Fresh (uncached) validity of a guest account: the row is an active guest
- * and its owner is active and may hold guests (canOwnGuests). Checked on
- * every guest request so a disabled or deleted owner, or turning
- * `allowMemberGuests` off, cuts the guests off immediately.
- */
-export function getGuestAccountState(guestUserId: string): GuestAccountState {
-  const guest = getUserById(guestUserId);
-  if (!guest || guest.role !== 'guest') {
-    return { valid: false, reason: 'not_guest' };
-  }
-  if (guest.status !== 'active') {
-    return { valid: false, reason: 'guest_inactive' };
-  }
-  const owner = guest.guest_owner_id
-    ? getUserById(guest.guest_owner_id)
-    : undefined;
-  if (!owner || owner.status !== 'active' || !canOwnGuests(owner)) {
-    return { valid: false, reason: 'owner_invalid' };
-  }
-  return { valid: true, guest, owner };
-}
-
-/**
- * Log out every guest of `ownerId`. Called when the owner is disabled or
- * deleted; the per-request owner check already denies them, this also drops
- * their sessions so open tabs and sockets do not linger.
- */
-export function revokeGuestSessionsForOwner(ownerId: string): number {
-  const guestIds = listGuestIdsByOwner(ownerId);
-  for (const guestId of guestIds) {
-    invalidateUserSessions(guestId);
-    deleteUserSessionsByUserId(guestId);
-  }
-  return guestIds.length;
 }
 
 /** Pre-run checks and scripts run on the host; guests see neither. */

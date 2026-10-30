@@ -66,7 +66,7 @@ import {
 } from '../password-hash-busy.js';
 import type { AuthUser, User, UserPublic } from '../types.js';
 import { logger } from '../logger.js';
-import { getGuestAccountState } from '../guest-access.js';
+import { getGuestAccountState } from '../guest-accounts.js';
 import {
   invalidateSessionCache,
   invalidateUserSessions,

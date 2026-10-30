@@ -45,7 +45,7 @@ const { createAutomationCore } = await import('../src/automation-service.js');
 const { insertSessionWorktree } =
   await import('../src/session-worktree-store.js');
 const harness = await import('./automation-harness.js');
-const { MAX_GUESTS_PER_OWNER } = await import('../src/guest-access.js');
+const { MAX_GUESTS_PER_OWNER } = await import('../src/guest-accounts.js');
 const { getGroupAllowedUserIds } =
   await import('../src/group-broadcast-acl.js');
 
@@ -571,6 +571,33 @@ describe('guest reads: granted only', () => {
       (await call(guestCookie, 'GET', `${base}/content/${b64('feature.ts')}`))
         .status,
     ).toBe(404);
+  });
+
+  test('the automation service treats a viewer as read-only', async () => {
+    const viewer = { kind: 'viewer' as const, workspaceJids: [GRANTED, HOME] };
+    const id = automationIds[GRANTED];
+    expect(automationCore.service.get(viewer, id).id).toBe(id);
+    expect(
+      automationCore.service.get(viewer, automationIds[HOME]).preRunCheck,
+    ).toBeNull();
+    expect(() =>
+      automationCore.service.get(viewer, automationIds[UNGRANTED]),
+    ).toThrow(expect.objectContaining({ status: 404 }));
+    for (const attempt of [
+      () => automationCore.service.pause(viewer, id),
+      () => automationCore.service.resume(viewer, id),
+      () => automationCore.service.markRunsRead(viewer, id, []),
+      () =>
+        automationCore.service.create(viewer, {
+          workspaceJid: GRANTED,
+          ...harness.draft({ schedule: { kind: 'manual' } }),
+        }),
+    ]) {
+      expect(attempt).toThrow(expect.objectContaining({ status: 403 }));
+    }
+    await expect(automationCore.service.runNow(viewer, id)).rejects.toThrow(
+      expect.objectContaining({ status: 403 }),
+    );
   });
 
   test('automations: granted workspaces only, host commands left out', async () => {

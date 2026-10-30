@@ -21,7 +21,7 @@ import type {
   AuthEventType,
 } from '../types.js';
 import { invalidateUserSessions, getWebDeps } from '../web-context.js';
-import { revokeGuestSessionsForOwner } from '../guest-access.js';
+import { revokeGuestSessionsForOwner } from '../guest-accounts.js';
 import { imManager } from '../im-manager.js';
 import {
   listUsers,

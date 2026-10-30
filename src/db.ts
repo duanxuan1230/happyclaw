@@ -10854,14 +10854,6 @@ export function deleteGuestWorkspaceGrantsForGuest(guestUserId: string): void {
   ).run(guestUserId);
 }
 
-export function deleteGuestWorkspaceGrantsForWorkspace(
-  workspaceJid: string,
-): void {
-  prepareCached(
-    'DELETE FROM guest_workspace_grants WHERE workspace_jid = ?',
-  ).run(workspaceJid);
-}
-
 /**
  * The only grant predicate: the grant row exists, the guest is an active
  * guest of the grant's owner, the owner is active and not itself a guest, and
@@ -10897,11 +10889,17 @@ export function listActiveGuestIdsForWorkspace(
   return rows.map((row) => row.id);
 }
 
-/** Workspace JIDs a guest may currently view (owner active, rows intact). */
+/**
+ * Workspace JIDs a guest may currently view: active grants on workspaces the
+ * granting owner still owns.
+ */
 export function listActiveGuestGrantJids(guestUserId: string): string[] {
   const rows = prepareCached(
     `SELECT g.workspace_jid AS jid ${ACTIVE_GUEST_GRANT_SQL}
-       AND g.guest_user_id = ?`,
+       AND g.guest_user_id = ?
+       AND EXISTS (SELECT 1 FROM registered_groups r
+                   WHERE r.jid = g.workspace_jid
+                     AND r.created_by = g.owner_user_id)`,
   ).all(guestUserId) as Array<{ jid: string }>;
   return rows.map((row) => row.jid);
 }
@@ -10909,9 +10907,7 @@ export function listActiveGuestGrantJids(guestUserId: string): string[] {
 /** Purge a guest's grants, pins and sessions, then mark the row deleted. */
 export function deleteGuestUser(guestUserId: string): void {
   db.transaction(() => {
-    prepareCached(
-      'DELETE FROM guest_workspace_grants WHERE guest_user_id = ?',
-    ).run(guestUserId);
+    deleteGuestWorkspaceGrantsForGuest(guestUserId);
     if (tableExists('user_pinned_groups')) {
       prepareCached('DELETE FROM user_pinned_groups WHERE user_id = ?').run(
         guestUserId,

@@ -44,11 +44,7 @@ import {
   type DirtyWorktree,
 } from '../session-worktree.js';
 import { listSessionWorktreesByFolder } from '../session-worktree-store.js';
-import {
-  canViewGroup,
-  canViewHostGroup,
-  guestHasActiveGrant,
-} from '../guest-access.js';
+import { canViewGroup, canViewHostGroup } from '../guest-access.js';
 import {
   clearSessionChannelOwner,
   getRegisteredGroup,
@@ -97,6 +93,7 @@ import {
   getUserById,
   getSessionModelSelectionDetail,
   setSessionModelSelection,
+  listActiveGuestGrantJids,
   type SessionModelSelectionDetail,
 } from '../db.js';
 import { releaseOwner, persistGroupUpdate } from '../group-owner.js';
@@ -462,19 +459,18 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
 
   const result: Record<string, GroupPayloadItem> = {};
   const isGuest = user.role === 'guest';
+  const guestGrants = isGuest
+    ? new Set(listActiveGuestGrantJids(user.id))
+    : null;
 
   // 先过滤出要显示的群组 jid
   const visibleEntries: Array<[string, (typeof groups)[string]]> = [];
   for (const [jid, group] of Object.entries(groups)) {
-    if (isGuest) {
+    if (guestGrants) {
       // Guests see exactly the owner's workspaces they were granted
       // (including a host-mode Home). IM rows are merged into their
       // workspace's message view, so they are not listed separately.
-      if (
-        jid.startsWith('web:') &&
-        guestHasActiveGrant(user, { ...group, jid })
-      )
-        visibleEntries.push([jid, group]);
+      if (guestGrants.has(jid)) visibleEntries.push([jid, group]);
       continue;
     }
     const isHome = !!group.is_home;

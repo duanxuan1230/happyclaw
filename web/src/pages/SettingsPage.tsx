@@ -38,7 +38,7 @@ import {
 } from '../components/settings/SystemSettingsSection';
 import { UserChannelsSection } from '../components/settings/UserChannelsSection';
 import { GuestsSection } from '../components/settings/GuestsSection';
-import { GUEST_SCOPE_DESCRIPTION, GUEST_SETTINGS_TABS } from '../lib/guest';
+import { GUEST_SCOPE_DESCRIPTION, isGuestSettingsTab } from '../lib/guest';
 import { UsersPage } from './UsersPage';
 import { MonitorPage, MonitorRefreshButton } from './MonitorPage';
 import type { SettingsTab } from '../components/settings/types';
@@ -136,8 +136,7 @@ export function SettingsPage() {
     if (raw && VALID_TABS.includes(raw)) {
       // Guests keep only their own password, devices and local preferences.
       if (isGuest) {
-        const allowed: readonly SettingsTab[] = GUEST_SETTINGS_TABS;
-        return allowed.includes(raw) ? raw : defaultTab;
+        return isGuestSettingsTab(raw) ? raw : defaultTab;
       }
       if (SYSTEM_TABS.includes(raw) && !canManageSystemConfig)
         return defaultTab;

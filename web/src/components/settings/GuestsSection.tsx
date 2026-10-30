@@ -24,13 +24,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { ResponsiveMenu } from '@/components/common/ResponsiveMenu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { EmptyState } from '@/components/common/EmptyState';
@@ -51,9 +45,10 @@ import {
 } from '../../lib/guest';
 import { SettingsField, SettingsSection } from './SettingsLayout';
 import { getErrorMessage } from './types';
+import { formatDateTime } from '../users/utils';
 
-function formatDateTime(value: string | null | undefined): string {
-  return value ? new Date(value).toLocaleString('zh-CN') : '从未登录';
+function formatLastLogin(value: string | null | undefined): string {
+  return value ? formatDateTime(value) : '从未登录';
 }
 
 function workspaceLabel(workspace: GuestWorkspaceRef): string {
@@ -516,47 +511,50 @@ function GuestRow({
           </span>
           <span className="sm:hidden">
             <span className="text-faint-foreground"> · </span>
-            最近登录 {formatDateTime(guest.last_login_at)}
+            最近登录 {formatLastLogin(guest.last_login_at)}
           </span>
         </>
       }
       meta={
         <span className="hidden sm:inline">
-          {formatDateTime(guest.last_login_at)}
+          {formatLastLogin(guest.last_login_at)}
         </span>
       }
       actions={
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+        <ResponsiveMenu
+          title={guest.display_name || guest.username}
+          align="end"
+          trigger={
             <IconButton
               label={`${guest.display_name || guest.username} 的操作`}
               icon={<MoreHorizontal />}
               hideTooltip
             />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
-            <DropdownMenuItem onSelect={() => onEdit(guest)}>
-              <Edit3 />
-              编辑授权
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onResetPassword(guest)}>
-              <KeyRound />
-              重置密码
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void toggleStatus()}>
-              {active ? <ShieldOff /> : <ShieldCheck />}
-              {active ? '禁用' : '启用'}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant="destructive"
-              onSelect={() => void remove()}
-            >
-              <Trash2 />
-              删除
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          }
+          groups={[
+            [
+              { label: '编辑授权', icon: Edit3, onSelect: () => onEdit(guest) },
+              {
+                label: '重置密码',
+                icon: KeyRound,
+                onSelect: () => onResetPassword(guest),
+              },
+              {
+                label: active ? '禁用' : '启用',
+                icon: active ? ShieldOff : ShieldCheck,
+                onSelect: () => void toggleStatus(),
+              },
+            ],
+            [
+              {
+                label: '删除',
+                icon: Trash2,
+                destructive: true,
+                onSelect: () => void remove(),
+              },
+            ],
+          ]}
+        />
       }
     />
   );

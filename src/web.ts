@@ -49,9 +49,9 @@ import { guestGuardMiddleware } from './middleware/guest-guard.js';
 import {
   GUEST_READ_ONLY_ERROR,
   canViewGroup,
-  getGuestAccountState,
   redactAutomationRunForGuest,
 } from './guest-access.js';
+import { getGuestAccountState } from './guest-accounts.js';
 
 // Route modules
 import authRoutes from './routes/auth.js';
@@ -113,7 +113,10 @@ import {
   listQueuedFollowUps,
   setMessageFollowUp,
 } from './db.js';
-import { getGroupAllowedUserIds } from './group-broadcast-acl.js';
+import {
+  getGroupAllowedUserIds,
+  listViewingGuestIds,
+} from './group-broadcast-acl.js';
 import { onConversationContextCleared } from './context-usage-events.js';
 import {
   NO_CONTEXT_USAGE,
@@ -3904,14 +3907,16 @@ export function broadcastBillingUpdate(
  */
 export function broadcastAutomationEvent(event: AutomationWsEvent): void {
   safeBroadcast(event, false, new Set([event.ownerId]));
-  const guests = getGroupAllowedUserIds(event.workspaceJid);
-  guests?.delete(event.ownerId);
-  if (!guests?.size) return;
+  if (getRegisteredGroup(event.workspaceJid)?.created_by !== event.ownerId) {
+    return;
+  }
+  const guests = listViewingGuestIds(event.workspaceJid, event.ownerId);
+  if (guests.length === 0) return;
   const guestEvent: AutomationWsEvent =
     event.type === 'automation_run_updated'
       ? { ...event, run: redactAutomationRunForGuest(event.run) }
       : event;
-  safeBroadcast(guestEvent, false, guests);
+  safeBroadcast(guestEvent, false, new Set(guests));
 }
 
 export function broadcastWhatsAppStatus(

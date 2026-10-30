@@ -31,7 +31,7 @@ import { SearchInput } from '@/components/common/SearchInput';
 import { sidebarRowClass } from '@/components/layout/sidebar/SidebarItem';
 import { cn } from '@/lib/utils';
 import type { SettingsTab } from './types';
-import { GUEST_SETTINGS_TABS } from '../../lib/guest';
+import { isGuestSettingsTab } from '../../lib/guest';
 
 export interface SettingsNavItem {
   key: SettingsTab;
@@ -209,11 +209,10 @@ export function getSettingsSections({
   isGuest = false,
 }: SettingsPermissions): { label: string; items: NavItem[] }[] {
   if (isGuest) {
-    const allowed: readonly SettingsTab[] = GUEST_SETTINGS_TABS;
     return [
       {
         label: '账户设置',
-        items: accountItems.filter((item) => allowed.includes(item.key)),
+        items: accountItems.filter((item) => isGuestSettingsTab(item.key)),
       },
     ];
   }

@@ -307,12 +307,49 @@ function resolveRequestFileRoot(
   return { rootOverride: getFileRootOverride(group, agentId) };
 }
 
-/** Resolve the group for a file route, or the error response to return. */
+/** Never hides anything: owners see every file. */
+const SHOW_ALL = () => false;
+
+/**
+ * Whether a path is hidden from a guest. Checks both the requested relative
+ * path and where it really points, so a symlink cannot reach a hidden entry
+ * under another name or leave the file root.
+ */
+function guestPathHider(
+  fileRoot: string,
+): (relativePath: string, absolutePath: string) => boolean {
+  let realRoot: string | undefined;
+  return (relativePath, absolutePath) => {
+    if (isGuestHiddenWorkspacePath(relativePath)) return true;
+    try {
+      realRoot ??= fs.realpathSync(fileRoot);
+      const rel = path.relative(realRoot, fs.realpathSync(absolutePath));
+      if (rel.startsWith('..') || path.isAbsolute(rel)) return true;
+      return isGuestHiddenWorkspacePath(rel);
+    } catch {
+      // Fail closed: a path whose real location cannot be resolved is hidden.
+      return true;
+    }
+  };
+}
+
+/**
+ * Resolve the group for a file route, or the error response to return.
+ * `read` (list/download/preview/content) also admits guests holding an
+ * active grant, Host workspaces included, and hands back which paths they
+ * may not see; `write` stays owner-only.
+ */
 function authorizeFileGroup(
   c: Context<{ Variables: Variables }>,
   jid: string,
+  mode: 'read' | 'write' = 'write',
 ):
-  | { group: RegisteredGroup; authUser: AuthUser; rootOverride?: string }
+  | {
+      group: RegisteredGroup;
+      authUser: AuthUser;
+      rootOverride?: string;
+      isHidden: (relativePath: string, absolutePath: string) => boolean;
+    }
   | Response {
   const group = getRegisteredGroup(jid);
   if (!group) {
@@ -320,10 +357,19 @@ function authorizeFileGroup(
   }
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  const principal = { id: authUser.id, role: authUser.role };
+  const read = mode === 'read';
+  if (
+    !(read ? canViewGroup(principal, group) : canAccessGroup(principal, group))
+  ) {
     return c.json({ error: 'Group not found' }, 404);
   }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+  if (
+    isHostExecutionGroup(group) &&
+    !(read
+      ? canViewHostGroup(authUser, group)
+      : hasHostExecutionPermission(authUser))
+  ) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
       403,
@@ -331,64 +377,16 @@ function authorizeFileGroup(
   }
   const root = resolveRequestFileRoot(c, jid, group);
   if (root instanceof Response) return root;
-  return { group, authUser, rootOverride: root.rootOverride };
-}
-
-/**
- * Read-only variant of authorizeFileGroup for list/download/preview/content.
- * Also admits guests holding an active grant (including on a host-mode
- * workspace); write routes keep using authorizeFileGroup.
- */
-function authorizeFileGroupRead(
-  c: Context<{ Variables: Variables }>,
-  jid: string,
-):
-  | { group: RegisteredGroup; authUser: AuthUser; rootOverride?: string }
-  | Response {
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  const authUser = c.get('user') as AuthUser;
-  if (!canViewGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !canViewHostGroup(authUser, group)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
-  const root = resolveRequestFileRoot(c, jid, group);
-  if (root instanceof Response) return root;
-  return { group, authUser, rootOverride: root.rootOverride };
-}
-
-/**
- * Whether a resolved path is hidden from a guest. Checks both the requested
- * relative path and where it really points, so a symlink cannot reach a
- * hidden directory under another name.
- */
-function isHiddenForGuest(
-  authUser: AuthUser,
-  group: RegisteredGroup,
-  rootOverride: string | undefined,
-  relativePath: string,
-  absolutePath?: string,
-): boolean {
-  if (authUser.role !== 'guest') return false;
-  if (isGuestHiddenWorkspacePath(relativePath)) return true;
-  if (!absolutePath) return false;
-  try {
-    const root = fs.realpathSync(getFileRoot(group.folder, rootOverride));
-    const real = fs.realpathSync(absolutePath);
-    const rel = path.relative(root, real);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) return true;
-    return isGuestHiddenWorkspacePath(rel);
-  } catch {
-    // Fail closed: a path whose real location cannot be resolved is hidden.
-    return true;
-  }
+  const { rootOverride } = root;
+  return {
+    group,
+    authUser,
+    rootOverride,
+    isHidden:
+      authUser.role === 'guest'
+        ? guestPathHider(getFileRoot(group.folder, rootOverride))
+        : SHOW_ALL,
+  };
 }
 
 const fileRoutes = new Hono<{ Variables: Variables }>();
@@ -398,37 +396,19 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const subPath = c.req.query('path') || '';
 
-  const access = authorizeFileGroupRead(c, jid);
+  const access = authorizeFileGroup(c, jid, 'read');
   if (access instanceof Response) return access;
-  const { group, authUser, rootOverride } = access;
+  const { group, authUser, rootOverride, isHidden } = access;
   const isGuest = authUser.role === 'guest';
   const fileRoot = getFileRoot(group.folder, rootOverride);
-  if (
-    subPath &&
-    isHiddenForGuest(
-      authUser,
-      group,
-      rootOverride,
-      subPath,
-      path.join(fileRoot, subPath),
-    )
-  ) {
+  if (subPath && isHidden(subPath, path.join(fileRoot, subPath))) {
     return c.json({ error: 'File not found' }, 404);
   }
 
   try {
     const result = listFiles(group.folder, subPath, rootOverride);
     const files = result.files
-      .filter(
-        (entry) =>
-          !isHiddenForGuest(
-            authUser,
-            group,
-            rootOverride,
-            entry.path,
-            path.join(fileRoot, entry.path),
-          ),
-      )
+      .filter((entry) => !isHidden(entry.path, path.join(fileRoot, entry.path)))
       .map((entry) => ({
         ...entry,
         // Guests do not need (and should not learn) host filesystem paths.
@@ -664,9 +644,9 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const access = authorizeFileGroupRead(c, jid);
+  const access = authorizeFileGroup(c, jid, 'read');
   if (access instanceof Response) return access;
-  const { group, authUser, rootOverride } = access;
+  const { group, rootOverride, isHidden } = access;
 
   try {
     // 解码 base64url 路径
@@ -679,16 +659,7 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
       rootOverride,
     );
 
-    if (
-      !fs.existsSync(absolutePath) ||
-      isHiddenForGuest(
-        authUser,
-        group,
-        rootOverride,
-        relativePath,
-        absolutePath,
-      )
-    ) {
+    if (!fs.existsSync(absolutePath) || isHidden(relativePath, absolutePath)) {
       return c.json({ error: 'File not found' }, 404);
     }
 
@@ -762,9 +733,9 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const access = authorizeFileGroupRead(c, jid);
+  const access = authorizeFileGroup(c, jid, 'read');
   if (access instanceof Response) return access;
-  const { group, authUser, rootOverride } = access;
+  const { group, rootOverride, isHidden } = access;
 
   try {
     // 解码 base64url 路径
@@ -777,16 +748,7 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
       rootOverride,
     );
 
-    if (
-      !fs.existsSync(absolutePath) ||
-      isHiddenForGuest(
-        authUser,
-        group,
-        rootOverride,
-        relativePath,
-        absolutePath,
-      )
-    ) {
+    if (!fs.existsSync(absolutePath) || isHidden(relativePath, absolutePath)) {
       return c.json({ error: 'File not found' }, 404);
     }
 
@@ -900,9 +862,9 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const access = authorizeFileGroupRead(c, jid);
+  const access = authorizeFileGroup(c, jid, 'read');
   if (access instanceof Response) return access;
-  const { group, authUser, rootOverride } = access;
+  const { group, rootOverride, isHidden } = access;
 
   try {
     const relativePath = Buffer.from(encodedPath, 'base64url').toString(
@@ -914,16 +876,7 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
       rootOverride,
     );
 
-    if (
-      !fs.existsSync(absolutePath) ||
-      isHiddenForGuest(
-        authUser,
-        group,
-        rootOverride,
-        relativePath,
-        absolutePath,
-      )
-    ) {
+    if (!fs.existsSync(absolutePath) || isHidden(relativePath, absolutePath)) {
       return c.json({ error: 'File not found' }, 404);
     }
 

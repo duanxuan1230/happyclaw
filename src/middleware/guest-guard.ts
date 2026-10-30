@@ -18,10 +18,8 @@ import {
   SESSION_COOKIE_NAME_PLAIN,
   SESSION_COOKIE_NAME_SECURE,
 } from '../config.js';
-import {
-  GUEST_READ_ONLY_ERROR,
-  getGuestAccountState,
-} from '../guest-access.js';
+import { GUEST_READ_ONLY_ERROR } from '../guest-access.js';
+import { getGuestAccountState } from '../guest-accounts.js';
 import { getCachedSessionWithUser } from '../web-context.js';
 import { getAllCookieValues, tryVerifyAny } from './auth.js';
 
@@ -194,9 +192,6 @@ function resolveCookieSession(cookieHeader: string | undefined) {
 export const guestGuardMiddleware = async (c: Context, next: Next) => {
   const session = resolveCookieSession(c.req.header('cookie'));
   if (!session || session.role !== 'guest') return next();
-
-  // Owner state is re-read on every guest request (never cached), so
-  // disabling or deleting the owner cuts the guest off immediately.
   const denial = guestRequestDenial(session.user_id, c.req.method, c.req.path);
   if (denial) return c.json({ error: denial }, 403);
   return next();

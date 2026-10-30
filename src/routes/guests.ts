@@ -42,7 +42,7 @@ import { isUsernameConflictError } from './auth.js';
 import { onPasswordHashBusy } from '../password-hash-busy.js';
 import { getClientIp } from '../utils.js';
 import type { AuthUser, User } from '../types.js';
-import { MAX_GUESTS_PER_OWNER, canOwnGuests } from '../guest-access.js';
+import { MAX_GUESTS_PER_OWNER, canOwnGuests } from '../guest-accounts.js';
 
 const guestRoutes = new Hono<{ Variables: Variables }>();
 guestRoutes.onError(onPasswordHashBusy);

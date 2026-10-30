@@ -394,7 +394,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const isGuest = useIsGuest();
   // Guests view granted workspaces only: no composer, terminal, uploads,
   // session changes or workspace configuration.
-  const readOnly = isGuest || !!group?.read_only;
+  const readOnly = isGuest;
   const canUseTerminal = group?.execution_mode !== 'host' && !readOnly;
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 

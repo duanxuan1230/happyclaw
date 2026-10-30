@@ -6,7 +6,8 @@ import {
   getUserById,
   listActiveGuestIdsForWorkspace,
 } from './db.js';
-import { canOwnGuests } from './guest-access.js';
+import { canOwnGuests } from './guest-accounts.js';
+import { stripVirtualJidSuffix } from './utils.js';
 import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
@@ -71,16 +72,29 @@ export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
     group.folder,
   );
   if (workspaceJid) {
-    const workspace = getRegisteredGroup(workspaceJid);
+    const workspace =
+      workspaceJid === baseChatJid ? group : getRegisteredGroup(workspaceJid);
     if (workspace?.created_by === ownerId) {
-      const guestIds = listActiveGuestIdsForWorkspace(workspaceJid, ownerId);
-      const owner = guestIds.length > 0 ? getUserById(ownerId) : undefined;
-      if (owner && canOwnGuests(owner)) {
-        for (const guestId of guestIds) allowed.add(guestId);
+      for (const guestId of listViewingGuestIds(workspaceJid, ownerId)) {
+        allowed.add(guestId);
       }
     }
   }
   return allowed;
+}
+
+/**
+ * Guests currently allowed to watch `workspaceJid`, a workspace `ownerId`
+ * owns: active grants from that owner, while the owner may hold guests.
+ */
+export function listViewingGuestIds(
+  workspaceJid: string,
+  ownerId: string,
+): string[] {
+  const guestIds = listActiveGuestIdsForWorkspace(workspaceJid, ownerId);
+  if (guestIds.length === 0) return guestIds;
+  const owner = getUserById(ownerId);
+  return owner && canOwnGuests(owner) ? guestIds : [];
 }
 
 function resolveAudienceWorkspaceJid(
@@ -90,8 +104,7 @@ function resolveAudienceWorkspaceJid(
   folder: string,
 ): string | null {
   if (boundJid) {
-    const marker = boundJid.indexOf('#agent:');
-    const base = marker >= 0 ? boundJid.slice(0, marker) : boundJid;
+    const base = stripVirtualJidSuffix(boundJid);
     return base.startsWith('web:') ? base : null;
   }
   if (baseChatJid.startsWith('web:')) return baseChatJid;
