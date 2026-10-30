@@ -11,7 +11,7 @@ const withWebKit = Boolean(process.env.PLAYWRIGHT_WEBKIT);
 
 /** Specs whose composer and layout behaviour also run in a desktop window. */
 const desktopSpecs =
-  /(composer|model-selector|chat-scroll|chat-stream-render|phone-nav)\.spec\.ts$/;
+  /(composer|model-selector|chat-scroll|chat-stream-render|phone-nav|reply-table)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './tests/e2e',
