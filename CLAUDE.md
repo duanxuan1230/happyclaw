@@ -117,7 +117,9 @@ Radix UI。路由以 `web/src/App.tsx` 为准：
 工作区 → 会话树，⌘K 打开命令面板。手机（`phone:`，触屏且窄于 1024px）由左上角
 汉堡菜单打开左侧抽屉导航；首页是一级列表（工作区标题下直接列出会话，可折叠），右下角
 按钮在默认工作区新建对话，`?sessions=1` 重定向到该列表并展开对应工作区。窄桌面窗口
-仍使用底部导航和独立的工作区/会话列表。
+仍使用底部导航和独立的工作区/会话列表。手机上其他页面在 AppLayout 的单行顶栏里用
+`PhonePageHeader` 声明标题、一个主操作和 ⋯ 菜单；设置页是"分组列表 → 子页"
+（`?tab=`）。
 
 Web UI 约定：
 
@@ -131,6 +133,11 @@ Web UI 约定：
   `PageHeader`、`ListRow`、`DataTable`、`IconButton`、`SegmentedControl` 等），
   设置类页面使用 `components/settings/SettingsLayout`。
 - 破坏性确认使用 `confirmDialog()`；未保存离开守卫保持同步的原生 `confirm()`。
+- 手机端由原语统一处理：`Dialog` 渲染为底部 Sheet 且默认不自动聚焦（单字段用
+  `autoFocusOnPhone`），`Sheet`/`Dialog` 和导航抽屉经 `useBackDismiss` 让系统返回先关
+  浮层；行和页面的操作菜单用 `ResponsiveMenu`（手机为 ActionSheet），只在 Tooltip 里的
+  信息用 `InfoTip`；按钮在手机上自带 44px 命中区，输入框不小于 16px（`variant="code"`
+  关闭自动大写与纠错）。键盘遮挡只读 `--keyboard-inset` / `--vvh`（`useVisualViewport`）。
 - 快捷键在 `lib/shortcuts.ts` 注册并用 `Shortcut` 渲染键帽；动画用 `motion` 的 `m.*`，
   经 `MotionProvider` 懒加载并遵循减少动态效果设置。流式回复的贴底跟随（每批一次的
   WAAPI 位移补偿）和逐词淡入（CSS keyframes）是逐帧、逐词的热路径，不走 `m.*`，
