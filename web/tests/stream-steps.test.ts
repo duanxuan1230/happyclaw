@@ -514,7 +514,11 @@ describe('question steps', () => {
 
   it('reads both input shapes and bounds what the model streamed', () => {
     expect(readStepQuestions(input)).toEqual([
-      { question: '午饭吃什么？', options: ['面条', '米饭'] },
+      {
+        question: '午饭吃什么？',
+        options: ['面条', '米饭'],
+        descriptions: ['汤面', '盖饭'],
+      },
     ]);
     expect(
       readStepQuestions({
@@ -538,6 +542,49 @@ describe('question steps', () => {
       undefined,
     );
     expect(readStepQuestions(undefined)).toBe(undefined);
+  });
+
+  it('keeps what each option means, beside its label', () => {
+    const asked = readStepQuestions({
+      questions: [
+        {
+          question: '用哪个方案？',
+          options: [
+            { label: '窄 selector', description: '只改动这一处' },
+            { label: ' ', description: '没有名字的选项连同说明一起丢掉' },
+            { label: '宽 selector' },
+            { label: '重写', description: 'x'.repeat(300) },
+          ],
+        },
+      ],
+    });
+    expect(asked?.[0].options).toEqual(['窄 selector', '宽 selector', '重写']);
+    expect(asked?.[0].descriptions?.slice(0, 2)).toEqual(['只改动这一处', '']);
+    expect(Array.from(asked?.[0].descriptions?.[2] ?? '')).toHaveLength(200);
+    // Without any description there is no field at all.
+    expect(
+      readStepQuestions({ question: '午饭？', options: [{ label: '面条' }] }),
+    ).toEqual([{ question: '午饭？', options: ['面条'] }]);
+  });
+
+  it('reads stored questions again, with or without descriptions', () => {
+    // A trace stored before descriptions were kept.
+    expect(
+      readStepQuestions({
+        questions: [{ question: '午饭？', options: ['面条', '米饭'] }],
+      }),
+    ).toEqual([{ question: '午饭？', options: ['面条', '米饭'] }]);
+    // One stored with them: labels and descriptions stay paired.
+    const stored = [
+      {
+        question: '午饭？',
+        options: ['面条', ' ', '米饭'],
+        descriptions: ['汤面', '空', ''],
+      },
+    ];
+    expect(readStepQuestions({ questions: stored })).toEqual([
+      { question: '午饭？', options: ['面条', '米饭'], descriptions: ['汤面', ''] },
+    ]);
   });
 
   it('keeps the questions after the deferred call returns, which is no failure', () => {
