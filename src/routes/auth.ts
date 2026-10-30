@@ -41,7 +41,7 @@ import {
 } from '../db.js';
 import {
   getRegistrationConfig,
-  getEnabledProviders,
+  getProviders,
   getFeishuProviderConfigWithSource,
   getAppearanceConfig,
 } from '../runtime-config.js';
@@ -125,10 +125,9 @@ export function toUserPublic(u: User): UserPublic {
 }
 
 function buildSetupStatus() {
-  // Check ALL enabled providers, not just the first one.
-  // V3→V4 migration can produce empty providers that sort before real ones,
-  // causing getClaudeProviderConfig() (first-match) to return an unconfigured provider.
-  const providers = getEnabledProviders();
+  // Check every connection, not just the first one: V3→V4 migration can
+  // produce empty providers that sort before real ones.
+  const providers = getProviders();
   const claudeConfigured = providers.some((p) => {
     const hasOfficial =
       !!p.claudeCodeOauthToken?.trim() ||

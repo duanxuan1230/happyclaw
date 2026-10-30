@@ -161,13 +161,13 @@ describe('POST /api/config/codex/oauth/callback', () => {
       codexOAuthNeedsReauth: false,
       codexOAuthLastRefreshError: null,
       codexDefaultEffort: 'low',
-      // The only connection: it joins the pool.
-      enabled: true,
+      // There is no pool to join.
+      enabled: false,
       models: [],
     });
   });
 
-  test('a new login does not join a pool that already has a member', async () => {
+  test('a new login stays out of the legacy pool even beside a member', async () => {
     runtimeConfig.createProvider({
       name: 'Relay',
       type: 'third_party',

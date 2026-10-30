@@ -9,8 +9,10 @@ import { AUTOMATION_LIMITS } from './automation.js';
 import {
   getModelPreset,
   isValidModelId,
+  MAX_CONTEXT_WINDOW,
   MAX_PROVIDER_MODEL_ID_LENGTH,
   MAX_PROVIDER_MODELS,
+  MIN_CONTEXT_WINDOW,
   MODEL_EFFORTS,
 } from './model-providers.js';
 
@@ -1155,16 +1157,36 @@ const ProviderDefaultModelSchema = z
     message: '模型名无效',
   });
 
-/** The whole list a connection offers; the default model need not be in it. */
+/**
+ * The whole list a connection offers; the connection's model need not be in
+ * it. A `[1m]` id from an older client reads as a 1M window.
+ */
 const ProviderModelListSchema = z
   .array(
     z.object({
       id: ProviderModelIdSchema,
-      hidden: z.boolean().optional(),
-      effort: z.enum(MODEL_EFFORTS).optional(),
+      contextWindow: z
+        .number()
+        .int()
+        .min(MIN_CONTEXT_WINDOW)
+        .max(MAX_CONTEXT_WINDOW)
+        .optional(),
+      efforts: z
+        .array(z.enum(MODEL_EFFORTS))
+        .max(MODEL_EFFORTS.length)
+        .optional(),
+      defaultEffort: z.enum(MODEL_EFFORTS).optional(),
     }),
   )
   .max(MAX_PROVIDER_MODELS);
+
+/** Each role names one of the connection's models; others are dropped. */
+const ConnectionModelRolesSchema = z.object({
+  subagent: ProviderDefaultModelSchema.optional(),
+  smallFast: ProviderDefaultModelSchema.optional(),
+  opus: ProviderDefaultModelSchema.optional(),
+  sonnet: ProviderDefaultModelSchema.optional(),
+});
 
 const ProviderPresetIdSchema = z
   .string()
@@ -1185,7 +1207,9 @@ export const UnifiedProviderCreateSchema = z
     claudeCodeOauthToken: z.string().max(2000).optional(),
     claudeOAuthCredentials: ClaudeOAuthCredentialsSchema.optional(),
     claudeCredentialInput: ClaudeCredentialInputSchema.optional(),
+    roles: ConnectionModelRolesSchema.optional(),
     customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
+    /** Accepted from older clients and ignored. */
     weight: z.number().int().min(1).max(100).optional(),
     enabled: z.boolean().optional(),
   })
@@ -1213,7 +1237,9 @@ export const UnifiedProviderPatchSchema = z
     /** The whole new list; models left out are removed. */
     models: ProviderModelListSchema.optional(),
     presetId: ProviderPresetIdSchema.nullable().optional(),
+    roles: ConnectionModelRolesSchema.optional(),
     customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
+    /** Accepted from older clients and ignored. */
     weight: z.number().int().min(1).max(100).optional(),
     // Third-party edits save the token with the other fields in one request,
     // so a failed half can never leave the endpoint and its key out of sync.
@@ -1228,6 +1254,7 @@ export const UnifiedProviderPatchSchema = z
       data.anthropicModel !== undefined ||
       data.models !== undefined ||
       data.presetId !== undefined ||
+      data.roles !== undefined ||
       data.customEnv !== undefined ||
       data.weight !== undefined ||
       data.anthropicAuthToken !== undefined ||
@@ -1255,10 +1282,14 @@ export const ProviderDiscoverModelsSchema = z.object({
   customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
 });
 
-/** A connection to test: as for listing models, plus the model it runs. */
+/**
+ * A connection to test: as for listing models, plus the model it runs and a
+ * draft's roles (its background model is probed too).
+ */
 export const ProviderConnectivityTestSchema =
   ProviderDiscoverModelsSchema.extend({
     anthropicModel: ProviderDefaultModelSchema.optional(),
+    roles: ConnectionModelRolesSchema.optional(),
   });
 export type ProviderConnectivityTestInput = z.infer<
   typeof ProviderConnectivityTestSchema
@@ -1292,14 +1323,6 @@ export const UnifiedProviderSecretsSchema = z
     },
     { message: 'At least one secret field must be provided' },
   );
-
-export const BalancingConfigSchema = z.object({
-  strategy: z
-    .enum(['round-robin', 'weighted-round-robin', 'failover'])
-    .optional(),
-  unhealthyThreshold: z.number().int().min(1).max(20).optional(),
-  recoveryIntervalMs: z.number().int().min(30000).max(3600000).optional(),
-});
 
 export const WeChatConfigSchema = z.object({
   enabled: z.boolean().optional(),

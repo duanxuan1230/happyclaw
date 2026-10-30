@@ -75,13 +75,9 @@ describe('per-account model tier quarantine', () => {
     for (const a of ACCOUNTS) pool.reportModelFailure(a.id, 'fable');
 
     expect(pool.hasCandidateForTier(primaryTier())).toBe(false);
-    // Every account remains eligible for the escalated tier.
-    const picked = new Set([
-      pool.selectProvider('claude-opus-5'),
-      pool.selectProvider('claude-opus-5'),
-      pool.selectProvider('claude-opus-5'),
-    ]);
-    expect(picked).toEqual(new Set(['acct-1', 'acct-2', 'acct-3']));
+    // The accounts remain eligible for the escalated tier.
+    expect(pool.hasCandidateForTier('claude-opus-5')).toBe(true);
+    expect(pool.selectProvider('claude-opus-5')).toBe('acct-1');
   });
 
   test('an account-scope wall removes the account from every tier', () => {
@@ -153,53 +149,33 @@ describe('per-account model tier quarantine', () => {
   });
 });
 
-describe('rotation strategy', () => {
-  test('round-robin strategies rotate per request', () => {
-    for (const strategy of ['round-robin', 'weighted-round-robin'] as const) {
+describe('selection', () => {
+  test('nothing rotates: the first member that can serve, whatever the strategy', () => {
+    for (const strategy of [
+      'round-robin',
+      'weighted-round-robin',
+      'failover',
+    ] as const) {
       const pool = makePool({ strategy });
-      expect(pool.rotatesPerRequest).toBe(true);
+      expect(pool.rotatesPerRequest).toBe(false);
       expect([
         pool.selectProvider(),
         pool.selectProvider(),
         pool.selectProvider(),
-      ]).toEqual(['acct-1', 'acct-2', 'acct-3']);
+      ]).toEqual(['acct-1', 'acct-1', 'acct-1']);
     }
   });
 
-  test('failover stays on one account until it fails', () => {
-    const pool = makePool({ strategy: 'failover' });
-    expect(pool.rotatesPerRequest).toBe(false);
-    expect([pool.selectProvider(), pool.selectProvider()]).toEqual([
-      'acct-1',
-      'acct-1',
-    ]);
-
+  test('stays on one account until it fails', () => {
+    const pool = makePool();
     pool.reportFailure('acct-1', true);
     expect(pool.selectProvider()).toBe('acct-2');
   });
 
-  /**
-   * trySelectPoolProvider re-reads config before every selection, so the two
-   * strategies must stay distinguishable *across* refreshes: rotation state
-   * cannot be reset by a refresh, and failover cannot start drifting.
-   */
-  test('the strategies stay distinct across config refreshes', () => {
-    const rotating = makePool();
-    const sticky = makePool({ strategy: 'failover' });
-    const rotatingPicks: string[] = [];
-    const stickyPicks: string[] = [];
-
-    for (let i = 0; i < ACCOUNTS.length; i += 1) {
-      rotating.refreshFromConfig(ACCOUNTS, BALANCING);
-      sticky.refreshFromConfig(ACCOUNTS, {
-        ...BALANCING,
-        strategy: 'failover',
-      });
-      rotatingPicks.push(rotating.selectProvider(primaryTier()));
-      stickyPicks.push(sticky.selectProvider(primaryTier()));
-    }
-
-    expect(new Set(rotatingPicks).size).toBe(ACCOUNTS.length);
-    expect(new Set(stickyPicks)).toEqual(new Set(['acct-1']));
+  test('members without a legacy enabled flag count as members', () => {
+    const pool = new ProviderPool();
+    pool.refreshFromConfig([{ id: 'acct-1' }, { id: 'acct-2' }]);
+    expect(pool.hasCandidateForTier('')).toBe(true);
+    expect(pool.selectProvider()).toBe('acct-1');
   });
 });

@@ -94,20 +94,30 @@ describe('stored model lists', () => {
     expect(runtimeConfig.toPublicProvider(provider).models).toEqual([]);
   });
 
-  test('creating stores the list, the default first and visible, and the preset', () => {
+  test('creating stores the list in the new shape, with the connection model, and the preset', () => {
     createThirdParty({
       presetId: 'zhipu-glm-cn',
       models: [
-        { id: 'glm-5.3-flash[1m]', effort: 'high' },
-        { id: 'glm-5.3', hidden: true },
-        { id: 'glm-5.2', hidden: true },
+        {
+          id: 'glm-5.3-flash',
+          contextWindow: 1_000_000,
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+        },
+        { id: 'glm-5.3' },
+        { id: 'glm-5.2', contextWindow: 128_000 },
       ],
     });
     const stored = readFile().providers[0];
     expect(stored.models).toEqual([
-      { id: 'glm-5.3-flash[1m]', effort: 'high' },
+      {
+        id: 'glm-5.3-flash',
+        contextWindow: 1_000_000,
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+      },
       { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true },
+      { id: 'glm-5.2', contextWindow: 128_000 },
     ]);
     expect(stored.presetId).toBe('zhipu-glm-cn');
 
@@ -135,6 +145,7 @@ describe('stored model lists', () => {
       { id: 'has space' },
       { id: 'glm-5.2', hidden: true, effort: 'turbo', extra: 1 },
       { id: 'glm-5.2' },
+      { id: 'glm-5.1[1m]', effort: 'high', efforts: ['max', 'nope'] },
       42,
     ];
     file.providers[0].presetId = 'no-such-preset';
@@ -142,9 +153,16 @@ describe('stored model lists', () => {
     writeFile(file);
 
     const [provider] = runtimeConfig.getProviders();
+    // `[1m]` is read as the window, `effort` as the default; `hidden` is gone.
     expect(provider.models).toEqual([
       { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true },
+      { id: 'glm-5.2' },
+      {
+        id: 'glm-5.1',
+        contextWindow: 1_000_000,
+        efforts: ['max'],
+        defaultEffort: 'high',
+      },
     ]);
     expect(provider.presetId).toBeUndefined();
     expect(provider.lastTest).toBeUndefined();
@@ -236,18 +254,15 @@ describe('editing a list', () => {
     ).toEqual([{ id: 'glm-5.2' }, { id: 'glm-5.3' }]);
   });
 
-  test('a new list replaces the old one; the default is shown even if sent hidden', () => {
+  test('a new list replaces the old one; the connection model stays in it', () => {
     const { id } = createThirdParty({
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
     });
     const updated = runtimeConfig.updateProvider(id, {
-      models: [
-        { id: 'glm-5.3', hidden: true, effort: 'low' },
-        { id: 'glm-5.1' },
-      ],
+      models: [{ id: 'glm-5.3', defaultEffort: 'low' }, { id: 'glm-5.1' }],
     });
     expect(updated.models).toEqual([
-      { id: 'glm-5.3', effort: 'low' },
+      { id: 'glm-5.3', defaultEffort: 'low' },
       { id: 'glm-5.1' },
     ]);
     // A list without the default gets it back in front.
@@ -422,12 +437,11 @@ describe('what a test describes', () => {
       }).lastTest,
     ).toBeUndefined();
 
+    // The background model is probed too, so changing it is a new test.
     const beforeHaiku = runtimeConfig.getProviderById(created.id)!;
     runtimeConfig.updateProvider(created.id, {
-      customEnv: {
-        ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: b',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash',
-      },
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.3-flash' }],
+      roles: { smallFast: 'glm-5.3-flash' },
     });
     expect(
       runtimeConfig.recordProviderTest(created.id, beforeHaiku, PASSED),
@@ -479,5 +493,120 @@ describe('what a test describes', () => {
         ),
       }),
     ).toThrow('最多 100 个模型');
+  });
+});
+
+describe('reading a connection saved before models carried their settings', () => {
+  /** Writes the file an earlier release left: env keys, `[1m]`, no marker. */
+  function legacy(patch: Record<string, unknown>): void {
+    createThirdParty();
+    const file = readFile();
+    const [stored] = file.providers;
+    delete stored.envPrefill;
+    Object.assign(stored, patch);
+    writeFile(file);
+  }
+
+  test('moves model env keys into the list and roles, and prefills the env once', () => {
+    legacy({
+      anthropicModel: 'glm-5.3[1m]',
+      models: [{ id: 'glm-5.3[1m]' }, { id: 'glm-5.3-flash', hidden: true }],
+      customEnv: {
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash',
+        CLAUDE_CODE_SUBAGENT_MODEL: 'glm-5.3[1m]',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'not-a-model-of-it',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: '',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        API_TIMEOUT_MS: '600000',
+        CUSTOM_FLAG: 'kept',
+      },
+    });
+
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.anthropicModel).toBe('glm-5.3');
+    // `[1m]` made it 1M; the compact window does not replace a window.
+    expect(provider.models).toEqual([
+      { id: 'glm-5.3', contextWindow: 1_000_000, defaultEffort: 'high' },
+      { id: 'glm-5.3-flash' },
+    ]);
+    // The sub-agent key named the connection's own model: dropped.
+    expect(provider.roles).toEqual({ smallFast: 'glm-5.3-flash' });
+    expect(provider.customEnv).toEqual({
+      API_TIMEOUT_MS: '600000',
+      CUSTOM_FLAG: 'kept',
+      CLAUDE_CODE_NO_FLICKER: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    });
+    expect(provider.envPrefill).toBe(1);
+
+    // Written back once; reading again changes nothing.
+    const migrated = fs.readFileSync(configFile, 'utf-8');
+    expect(JSON.parse(migrated).version).toBe(5);
+    expect(migrated).not.toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL');
+    expect(runtimeConfig.getProviders()[0]).toEqual(provider);
+    expect(fs.readFileSync(configFile, 'utf-8')).toBe(migrated);
+  });
+
+  test('the compact window and effort apply to a model without a window', () => {
+    legacy({
+      anthropicModel: 'k3',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'max',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toEqual([
+      { id: 'k3', contextWindow: 256_000, defaultEffort: 'max' },
+    ]);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_MODEL=k3[1m]');
+    expect(env).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=256000');
+    expect(env).toContain('API_TIMEOUT_MS=3000000');
+    expect(
+      env.some((line) => line.startsWith('CLAUDE_CODE_EFFORT_LEVEL=')),
+    ).toBe(false);
+    expect(runtimeConfig.providerEffortLevel(provider)).toBe('max');
+  });
+
+  test('a key the user deleted after the prefill stays deleted', () => {
+    const created = createThirdParty();
+    runtimeConfig.updateProvider(created.id, { customEnv: {} });
+    expect(runtimeConfig.getProviderById(created.id)!.customEnv).toEqual({});
+    expect(readFile().providers[0].envPrefill).toBe(1);
+  });
+
+  test('an official connection gets no prefill, only the marker', () => {
+    runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      anthropicApiKey: 'sk-ant-api03-abcdefghijklmnop',
+      anthropicModel: 'claude-sonnet-5[1m]',
+    });
+    const file = readFile();
+    delete file.providers[0].envPrefill;
+    writeFile(file);
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.customEnv).toEqual({});
+    expect(provider.anthropicModel).toBe('claude-sonnet-5');
+    expect(provider.models).toEqual([
+      { id: 'claude-sonnet-5', contextWindow: 1_000_000 },
+    ]);
+    // The declared window keeps the billed 1M opt-in it had.
+    expect(
+      runtimeConfig.buildClaudeEnvLines(
+        runtimeConfig.providerToConfig(provider),
+        provider.customEnv,
+      ),
+    ).toContain('ANTHROPIC_MODEL=claude-sonnet-5[1m]');
+  });
+
+  test('without a declared default effort a connection implies none', () => {
+    const created = createThirdParty({ anthropicModel: 'k3' });
+    expect(runtimeConfig.providerEffortLevel(created)).toBeNull();
   });
 });
