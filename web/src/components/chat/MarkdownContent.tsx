@@ -29,6 +29,12 @@ import { cn } from '@/lib/utils';
 import { REMARK_REHYPE_OPTIONS } from '../../lib/markdown/pipeline';
 import { useCopyFeedback } from '../../lib/markdown/use-copy-feedback';
 import {
+  csvFileName,
+  readTable,
+  toCsv,
+  toTsv,
+} from '../../lib/markdown/table-data';
+import {
   RENDERED_CACHE_MAX_CHARS,
   rememberRendered,
   renderedCost,
@@ -216,6 +222,80 @@ function extractText(node: React.ReactNode): string {
     return extractText((node.props as { children?: React.ReactNode }).children);
   }
   return '';
+}
+
+/**
+ * On a phone a wide table scrolls sideways under its first column, so the
+ * row it is reading stays named. Not in a shared image, which does not scroll.
+ */
+const STICKY_FIRST_CELL =
+  'max-sm:first:sticky max-sm:first:left-0 max-sm:first:z-1 max-sm:first:shadow-[inset_-1px_0_0_var(--surface-border)] [.share-card-content_&]:static';
+
+/**
+ * A reply's table, with 复制 (tab-separated, so a spreadsheet paste splits it
+ * into cells) and 下载 CSV under it, usable once the reply has settled.
+ */
+function MarkdownTable({ children }: { children: React.ReactNode }) {
+  const streaming = useContext(MarkdownStreamingContext);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const { copied, copy } = useCopyFeedback();
+  const rows = () => (tableRef.current ? readTable(tableRef.current) : []);
+  const download = () => {
+    const url = URL.createObjectURL(
+      new Blob([toCsv(rows())], { type: 'text/csv;charset=utf-8' }),
+    );
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = csvFileName();
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+  const tool =
+    'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5';
+  return (
+    <div data-md-table="" className="group/table my-4">
+      <HorizontalScroll
+        as="div"
+        className="max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-lg border border-surface-border [-webkit-overflow-scrolling:touch] [touch-action:pan-x_pan-y]"
+      >
+        <table
+          ref={tableRef}
+          className="min-w-full border-separate border-spacing-0 font-sans"
+        >
+          {children}
+        </table>
+      </HorizontalScroll>
+      {/* Held, not left out, while the reply streams: the text under the
+          table does not move down when the tools appear. */}
+      <div
+        data-md-table-tools=""
+        inert={streaming}
+        className={cn(
+          'mt-1 flex justify-end gap-0.5 font-sans text-caption text-muted-foreground opacity-0 transition-opacity select-none group-hover/table:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 [.share-card-content_&]:hidden',
+          streaming && 'invisible',
+        )}
+      >
+        <button
+          type="button"
+          onClick={() => copy(toTsv(rows()))}
+          aria-label={copied ? '已复制表格' : '复制表格，可直接粘贴到表格软件'}
+          className={tool}
+        >
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          {copied ? '已复制' : '复制'}
+        </button>
+        <button
+          type="button"
+          onClick={download}
+          aria-label="下载为 CSV"
+          className={tool}
+        >
+          <Download size={13} />
+          CSV
+        </button>
+      </div>
+    </div>
+  );
 }
 
 type ScrollFade = 'none' | 'start' | 'end' | 'both';
@@ -574,16 +654,7 @@ function markdownComponents(
         {children}
       </MarkdownLink>
     ),
-    table: ({ children }) => (
-      <HorizontalScroll
-        as="div"
-        className="my-4 max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-lg border border-surface-border [-webkit-overflow-scrolling:touch] [touch-action:pan-x_pan-y]"
-      >
-        <table className="min-w-full border-separate border-spacing-0 font-sans">
-          {children}
-        </table>
-      </HorizontalScroll>
-    ),
+    table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
     thead: ({ children }) => <thead className="bg-muted/60">{children}</thead>,
     tbody: ({ children }) => <tbody>{children}</tbody>,
     tr: ({ children }) => (
@@ -595,7 +666,11 @@ function markdownComponents(
     th: ({ children, style }) => (
       <th
         style={style}
-        className="border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75"
+        className={cn(
+          'border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75',
+          STICKY_FIRST_CELL,
+          'max-sm:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--background))]',
+        )}
       >
         {children}
       </th>
@@ -606,6 +681,8 @@ function markdownComponents(
         className={cn(
           'min-w-[6rem] max-w-[28rem] px-3 py-2 text-start align-top whitespace-normal text-foreground [overflow-wrap:anywhere]',
           tableTextClass,
+          STICKY_FIRST_CELL,
+          'max-sm:first:bg-background',
         )}
       >
         {children}
