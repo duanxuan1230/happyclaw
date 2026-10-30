@@ -17,13 +17,12 @@ interface Selection {
 function payload(selection: Selection) {
   return {
     ...selection,
-    default: { source: 'pool', modelConfigId: null, enabledCount: 2 },
+    default: { source: 'none', modelConfigId: null },
     options: [
       {
         id: 'official',
         name: 'Claude 官方',
         kind: 'official',
-        enabled: true,
         model: 'opus',
         usable: true,
       },
@@ -31,7 +30,6 @@ function payload(selection: Selection) {
         id: 'chatgpt',
         name: 'ChatGPT 订阅 (someone@example.com)',
         kind: 'codex',
-        enabled: true,
         model: 'gpt-6.1-sol',
         usable: true,
         codex: {
@@ -531,7 +529,7 @@ test.describe('model picker', () => {
     ).toBeVisible();
     // Models are listed by name; whatever commentary the catalog carries stays out.
     await expect(panel).not.toContainText(/主力编码|旗舰|遗留|配置默认/);
-    // Nothing to set an effort on while the pool chooses the configuration.
+    // Nothing to set an effort on while no connection is chosen.
     await expect(effortButton(page)).toHaveCount(0);
     await modelRow(page, 'gpt-6-astra').click();
     await expect.poll(() => puts.length).toBe(1);
