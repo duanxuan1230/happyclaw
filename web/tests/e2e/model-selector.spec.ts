@@ -17,13 +17,12 @@ interface Selection {
 function payload(selection: Selection) {
   return {
     ...selection,
-    default: { source: 'pool', modelConfigId: null, enabledCount: 2 },
+    default: { source: 'none', modelConfigId: null },
     options: [
       {
         id: 'official',
         name: 'Claude 官方',
         kind: 'official',
-        enabled: true,
         model: 'opus',
         usable: true,
       },
@@ -31,7 +30,6 @@ function payload(selection: Selection) {
         id: 'chatgpt',
         name: 'ChatGPT 订阅 (someone@example.com)',
         kind: 'codex',
-        enabled: true,
         model: 'gpt-6.1-sol',
         usable: true,
         codex: {
@@ -531,7 +529,7 @@ test.describe('model picker', () => {
     ).toBeVisible();
     // Models are listed by name; whatever commentary the catalog carries stays out.
     await expect(panel).not.toContainText(/主力编码|旗舰|遗留|配置默认/);
-    // Nothing to set an effort on while the pool chooses the configuration.
+    // Nothing to set an effort on while no connection is chosen.
     await expect(effortButton(page)).toHaveCount(0);
     await modelRow(page, 'gpt-6-astra').click();
     await expect.poll(() => puts.length).toBe(1);
@@ -606,6 +604,37 @@ test.describe('model picker', () => {
       expect(box!.y).toBeGreaterThanOrEqual(0);
       await page.keyboard.press('Escape');
       await expect(panel).toBeHidden();
+    }
+  });
+});
+
+test.describe('phone model sheet at 390px', () => {
+  test('the levels and the rail fit, every level reachable', async ({
+    page,
+    isMobile,
+  }) => {
+    test.skip(!isMobile, 'the levels sit in the sheet on a phone');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openHarness(page, {
+      selectedModelConfigId: 'chatgpt',
+      selectedModel: 'gpt-6-astra',
+    });
+    await modelButton(page).click();
+    const sheet = page.getByRole('dialog');
+    await expect(sheet).toBeVisible();
+    await expect(
+      sheet.getByRole('button', { name: '最近', exact: true }),
+    ).toBeVisible();
+    const row = await page.locator('[data-effort-segments]').boundingBox();
+    expect(row!.x).toBeGreaterThanOrEqual(0);
+    expect(row!.x + row!.width).toBeLessThanOrEqual(390.5);
+    // 默认 and all five levels fit, or scroll inside the row.
+    for (const label of ['默认', '低', '中', '高', '超高', '最高']) {
+      const segment = effortSegment(page, label);
+      await segment.scrollIntoViewIfNeeded();
+      const box = await segment.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390.5);
     }
   });
 });

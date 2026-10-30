@@ -230,8 +230,8 @@ describe('Agent prompt and capability frontend contract', () => {
 
   test('allows every saved model configuration to be selected by an Agent', () => {
     const form = read('web/src/components/agents/AgentCapabilityForm.tsx');
-    expect(form).not.toContain('disabled={!config.enabled}');
-    expect(form).toContain("!config.enabled ? '（仅显式使用）' : ''");
+    // `enabled` no longer exists: every connection is offered as is.
+    expect(form).not.toContain('config.enabled');
   });
 
   test('reads and saves the reasoning effort through the shared form', () => {
@@ -255,12 +255,9 @@ describe('Agent prompt and capability frontend contract', () => {
       mcp: { mode: 'custom', ids: ['user:github'] },
     });
     const form = read('web/src/components/agents/AgentCapabilityForm.tsx');
-    expect(form).toContain('aria-label={`${labelPrefix}推理努力档位`}');
-    expect(form).toContain('AGENT_EFFORT_OPTIONS.map');
-    const policy = read('web/src/utils/agent-runtime-policy.ts');
-    for (const effort of ['inherit', 'low', 'medium', 'high', 'xhigh', 'max']) {
-      expect(policy).toContain(`value: '${effort}'`);
-    }
+    expect(form).toContain('aria-label={`${labelPrefix}推理等级`}');
+    // Only the efforts the bound model takes are offered.
+    expect(form).toContain('entry.efforts.includes(effort)');
   });
 
   test('a profile from an older server without host Skills follows its effective context', () => {
