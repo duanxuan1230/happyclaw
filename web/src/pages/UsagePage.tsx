@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
@@ -36,7 +37,6 @@ import {
 import {
   DataTable,
   EmptyState,
-  IconButton,
   PageContainer,
   PageHeader,
   SegmentedControl,
@@ -630,7 +630,7 @@ export function UsagePage() {
       <PhonePageHeader
         title="用量分析"
         action={
-          <IconButton
+          <PhoneBarButton
             label={visibleLoading ? '正在刷新用量数据' : '刷新用量数据'}
             icon={
               <RefreshCw
@@ -640,11 +640,8 @@ export function UsagePage() {
                 )}
               />
             }
-            size="icon"
-            hideTooltip
             onClick={refresh}
             disabled={visibleLoading}
-            className="size-11 rounded-full text-foreground"
           />
         }
         menu={{

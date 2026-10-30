@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import { useEffect, useState, useMemo } from 'react';
 import { Plus, RefreshCw, Server, Download } from 'lucide-react';
 import { SearchInput } from '@/components/common';
@@ -167,13 +168,10 @@ export function McpServersPage() {
     <div className="space-y-4">
       <CapabilitySectionActions
         phoneAction={
-          <IconButton
+          <PhoneBarButton
             label="添加 MCP 服务器"
             icon={<Plus className="size-5" />}
-            size="icon"
-            hideTooltip
             onClick={() => setShowAddDialog(true)}
-            className="size-11 rounded-full text-foreground"
           />
         }
         phoneMenu={[

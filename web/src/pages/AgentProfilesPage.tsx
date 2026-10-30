@@ -75,7 +75,10 @@ import {
 } from '../components/agents/ImportAgentDialog';
 import { EmojiAvatar } from '../components/common/EmojiAvatar';
 import { ListGroup, ListRow } from '../components/common/ListRow';
-import { PhonePageHeader } from '../components/layout/PhonePageHeader';
+import {
+  PhonePageHeader,
+  PhoneBarButton,
+} from '../components/layout/PhonePageHeader';
 import { useIsPhone } from '../components/layout/phone';
 import { EmojiPicker } from '../components/common/EmojiPicker';
 import { ColorPicker } from '../components/common/ColorPicker';
@@ -829,19 +832,15 @@ export function AgentProfilesPage() {
     governance?.workspaces,
   );
 
-  const phoneTopBarButton = 'size-11 rounded-full text-foreground';
   const phoneList = isPhone && !requestedProfileId && (
     <PageContainer className="space-y-3 pt-1">
       <PhonePageHeader
         title="智能体"
         action={
-          <IconButton
+          <PhoneBarButton
             label="新建智能体"
             icon={<Plus className="size-5" />}
-            size="icon"
-            hideTooltip
             onClick={handleOpenCreate}
-            className={phoneTopBarButton}
           />
         }
         menu={{

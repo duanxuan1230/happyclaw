@@ -13,8 +13,10 @@ import { useAutomationsStore } from '../stores/automations';
 import { AutomationList } from '../components/automations/AutomationList';
 import { AutomationDetail } from '../components/automations/AutomationDetail';
 import { automationHref } from '../components/automations/automation-actions';
-import { IconButton } from '../components/common/IconButton';
-import { PhonePageHeader } from '../components/layout/PhonePageHeader';
+import {
+  PhonePageHeader,
+  PhoneBarButton,
+} from '../components/layout/PhonePageHeader';
 
 /**
  * 自动化: the list on the left and the selected automation's detail on the
@@ -112,13 +114,10 @@ export function AutomationsPage() {
         <PhonePageHeader
           title="自动化"
           action={
-            <IconButton
+            <PhoneBarButton
               label="新建自动化"
               icon={<Plus className="size-5" />}
-              size="icon"
-              hideTooltip
               onClick={create}
-              className="size-11 rounded-full text-foreground"
             />
           }
         />

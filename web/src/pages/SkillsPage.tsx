@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import { useEffect, useState, useMemo } from 'react';
 import { Plus, RefreshCw, Puzzle, Trash2 } from 'lucide-react';
 import { SearchInput } from '@/components/common';
@@ -118,13 +119,10 @@ export function SkillsPage() {
     <div className="space-y-4">
       <CapabilitySectionActions
         phoneAction={
-          <IconButton
+          <PhoneBarButton
             label="安装技能"
             icon={<Plus className="size-5" />}
-            size="icon"
-            hideTooltip
             onClick={() => setShowInstallDialog(true)}
-            className="size-11 rounded-full text-foreground"
           />
         }
         phoneMenu={[

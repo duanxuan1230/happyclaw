@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import {
   lazy,
   Suspense,
@@ -361,13 +362,10 @@ export function SettingsPage() {
           mustChangePassword ? (
             <NavDrawerButton />
           ) : (
-            <IconButton
+            <PhoneBarButton
               label="返回"
               icon={<ChevronLeft className="size-6" />}
-              size="icon"
-              hideTooltip
               onClick={backToSectionList}
-              className="size-11 rounded-full text-foreground"
             />
           ),
           activeTab === 'monitor' && <MonitorRefreshButton compact />,

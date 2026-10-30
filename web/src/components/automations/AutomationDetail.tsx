@@ -40,7 +40,7 @@ import {
   setAutomationEnabled,
 } from './automation-actions';
 import { AutomationRunGroup } from './AutomationRunCard';
-import { PhonePageHeader } from '../layout/PhonePageHeader';
+import { PhonePageHeader, PhoneBarButton } from '../layout/PhonePageHeader';
 import { useIsPhone } from '../layout/phone';
 
 /** A session JID as the user knows it: its name, or the main conversation. */
@@ -162,14 +162,11 @@ export function AutomationDetail({
         title={automation.name}
         onBack={onBack}
         action={
-          <IconButton
+          <PhoneBarButton
             label="立即运行"
             icon={busy ? <Loader2 className="animate-spin" /> : <Play />}
-            size="icon"
-            hideTooltip
             disabled={busy}
             onClick={runNow}
-            className="size-11 rounded-full text-foreground"
           />
         }
         menu={{ title: automation.name, groups: menuGroups }}

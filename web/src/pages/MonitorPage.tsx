@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import { useEffect, useRef, useState } from 'react';
 import { useMonitorStore } from '../stores/monitor';
 import { useAuthStore } from '../stores/auth';
@@ -20,7 +21,6 @@ import {
 } from 'lucide-react';
 import {
   DataTable,
-  IconButton,
   ListGroup,
   PageContainer,
   PageHeader,
@@ -62,14 +62,11 @@ export function MonitorRefreshButton({
   const loadStatus = useMonitorStore((s) => s.loadStatus);
   if (compact) {
     return (
-      <IconButton
+      <PhoneBarButton
         label="刷新"
         icon={<RefreshCw className={cn('size-5', loading && 'animate-spin')} />}
-        size="icon"
-        hideTooltip
         onClick={loadStatus}
         disabled={loading}
-        className="size-11 rounded-full text-foreground"
       />
     );
   }

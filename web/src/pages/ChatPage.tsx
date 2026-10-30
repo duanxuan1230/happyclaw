@@ -1,3 +1,4 @@
+import { PhoneBarButton } from '../components/layout/PhonePageHeader';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { FolderPlus, Plus, SquarePen } from 'lucide-react';
@@ -271,13 +272,10 @@ export function ChatPage() {
             <div className="flex min-w-0 flex-1 items-center gap-2 px-1">
               {brand}
             </div>
-            <IconButton
+            <PhoneBarButton
               label="新建工作区"
               icon={<FolderPlus className="size-5" />}
-              size="icon"
-              hideTooltip
               onClick={() => setCreateOpen(true)}
-              className="size-11 rounded-full text-foreground"
             />
           </header>
           {hasAnyGroup ? (

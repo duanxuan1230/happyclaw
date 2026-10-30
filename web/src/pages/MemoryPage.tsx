@@ -63,7 +63,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { PhonePageHeader } from '@/components/layout/PhonePageHeader';
+import {
+  PhoneBarButton,
+  PhonePageHeader,
+} from '@/components/layout/PhonePageHeader';
 import { useIsPhone } from '@/components/layout/phone';
 import {
   KIND_META,
@@ -1268,7 +1271,6 @@ export function MemoryPage() {
     </Select>
   );
 
-  const phoneTopBarButton = 'size-11 rounded-full text-foreground';
   const canEditShown = canModify && !!shownItem;
   // A phone's top bar: 新建 on the list; on an item 保存, the rest behind ⋯.
   const phoneHeader = !isPhone ? null : showDetail ? (
@@ -1331,14 +1333,11 @@ export function MemoryPage() {
     <PhonePageHeader
       title="记忆"
       action={
-        <IconButton
+        <PhoneBarButton
           label="新建记忆"
           icon={<Plus className="size-5" />}
-          size="icon"
-          hideTooltip
           onClick={openCreate}
           disabled={!selectedWorkspaceJid || !canModify}
-          className={phoneTopBarButton}
         />
       }
       menu={{

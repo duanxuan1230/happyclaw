@@ -1,7 +1,8 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, type ComponentProps, type ReactNode } from 'react';
 import { ChevronLeft, Ellipsis } from 'lucide-react';
 import { create } from 'zustand';
 
+import { cn } from '@/lib/utils';
 import { IconButton } from '../common/IconButton';
 import { ResponsiveMenu, type MenuAction } from '../common/ResponsiveMenu';
 import { NavDrawerButton } from './NavDrawer';
@@ -15,6 +16,20 @@ export interface PhonePageHeaderProps {
   action?: ReactNode;
   /** Secondary actions, behind ⋯ in a bottom sheet. */
   menu?: { title: string; groups: MenuAction[][] };
+}
+
+/** A 44px round icon button sized for the phone top bar. */
+export function PhoneBarButton(
+  props: Omit<ComponentProps<typeof IconButton>, 'size' | 'hideTooltip'>,
+) {
+  return (
+    <IconButton
+      {...props}
+      size="icon"
+      hideTooltip
+      className={cn('size-11 rounded-full text-foreground', props.className)}
+    />
+  );
 }
 
 const usePhoneHeaderStore = create<{
@@ -52,13 +67,10 @@ export function PhoneTopBar() {
       className="flex h-13 shrink-0 items-center gap-1 px-2"
     >
       {header?.onBack ? (
-        <IconButton
+        <PhoneBarButton
           label="返回"
           icon={<ChevronLeft className="size-6" />}
-          size="icon"
-          hideTooltip
           onClick={header.onBack}
-          className="size-11 rounded-full text-foreground"
         />
       ) : (
         <NavDrawerButton />
@@ -74,12 +86,9 @@ export function PhoneTopBar() {
               title={header.menu.title}
               groups={groups}
               trigger={
-                <IconButton
+                <PhoneBarButton
                   label="更多操作"
                   icon={<Ellipsis className="size-5" />}
-                  size="icon"
-                  hideTooltip
-                  className="size-11 rounded-full text-foreground"
                 />
               }
             />
