@@ -127,7 +127,6 @@ import {
   resolveModelBinding,
   summarizeModelBinding,
 } from '../container-runner.js';
-import { splitOneMillionSuffix } from '../model-providers.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { notifyConversationContextCleared } from '../context-usage-events.js';
 import { readSessionContextUsage } from '../session-context-usage.js';
@@ -2516,7 +2515,7 @@ function buildSessionModelSelectionPayload(
       id: provider.id,
       name: provider.name,
       kind: provider.codexOAuthCredentials ? ('codex' as const) : provider.type,
-      model: splitOneMillionSuffix(provider.anthropicModel).model,
+      model: provider.anthropicModel,
       // A configuration without a credential (e.g. an old copy that lost its
       // key) would fail every turn; the picker shows it but cannot pick it.
       usable: providerHasCredentials(provider),
@@ -2572,7 +2571,7 @@ function buildSessionModelSelectionPayload(
     selectedEffort: selected.effort,
     default: {
       source: summary.source,
-      modelConfigId: summary.modelConfigId,
+      modelConfigId: summary.provider?.id ?? null,
       model: summary.model,
       effort: defaultCodexView
         ? (defaultCodexView.models.find(
@@ -2620,8 +2619,7 @@ function applySessionChoiceChange(
       ? ''
       : provider.codexOAuthCredentials
         ? (choice.model ?? chatGptDefaultModel(provider))
-        : // A window (`[1m]`) is not a model.
-          splitOneMillionSuffix(choice.model ?? provider.anthropicModel).model;
+        : (choice.model ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
   const jids = agentId

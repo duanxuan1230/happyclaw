@@ -79,10 +79,7 @@ vi.mock('../src/runtime-config.js', async () => {
 const db = await import('../src/db.ts');
 const runner = await import('../src/container-runner.ts');
 
-function provider(
-  id: string,
-  patch: Partial<MockProvider> = {},
-): MockProvider {
+function provider(id: string, patch: Partial<MockProvider> = {}): MockProvider {
   return {
     id,
     type: 'third_party',
@@ -215,7 +212,10 @@ describe('resolveModelBinding', () => {
     bind('member', 'B', 'B-other', 'high');
     mocks.providers = [
       provider('B', {
-        models: [{ id: 'B-model' }, { id: 'B-other', efforts: ['low', 'high'] }],
+        models: [
+          { id: 'B-model' },
+          { id: 'B-other', efforts: ['low', 'high'] },
+        ],
       }),
     ];
     const binding = runner.resolveModelBinding({}, session);
@@ -308,7 +308,6 @@ describe('launch effort', () => {
       effort: 'low',
     });
     const selection = runner.trySelectPoolProvider('grp', null, null)!;
-    expect(selection.source).toBe('session');
     expect(selection.chosenModel).toBe('gpt-6-sol');
     expect(selection.resolved.config.anthropicModel).toBe('gpt-6-sol');
     expect(selection.resolved.launchEffort).toBe('low');

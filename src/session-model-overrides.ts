@@ -57,7 +57,7 @@ type ModelConfiguration = ChatGptProvider &
  * window and efforts), else the registry, else its family. A model nothing is
  * known about, and a pass-through relay (no model), take no effort.
  */
-export function connectionModelCapabilities(
+function connectionModelCapabilities(
   provider: Pick<
     UnifiedProvider,
     'anthropicBaseUrl' | 'anthropicModel' | 'models'

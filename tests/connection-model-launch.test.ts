@@ -205,7 +205,6 @@ describe('a conversation runs the model it picked within its configuration', () 
     const selection = select();
     expect(selection).toMatchObject({
       profileId: glm.id,
-      source: 'session',
       chosenModel: 'glm-5-long',
       sessionModel: 'glm-5-long',
       resolved: { config: { anthropicModel: 'glm-5-long' } },
@@ -241,7 +240,6 @@ describe('an Agent runs the model it is bound to', () => {
     const selection = select({ modelConfigId: glm.id, model: 'glm-5-air' });
     expect(selection).toMatchObject({
       profileId: glm.id,
-      source: 'agent',
       chosenModel: 'glm-5-air',
       resolved: { config: { anthropicModel: 'glm-5-air' } },
     });

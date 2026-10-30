@@ -69,9 +69,10 @@ import {
   stripHostGrants,
 } from '../agent-profile-transfer.js';
 import {
+  bindingFromMainProfile,
   resolveModelBinding,
   summarizeModelBinding,
-  type ModelBinding,
+  usableProvider,
 } from '../container-runner.js';
 import { resolveAgentSdkEffort } from '../agent-effort.js';
 import {
@@ -97,10 +98,7 @@ import {
 } from '../run-context-snapshot.js';
 import { getProviders, providerHasCredentials } from '../runtime-config.js';
 import { splitOneMillionSuffix } from '../model-providers.js';
-import {
-  connectionModelCapabilities,
-  listConnectionModels,
-} from '../session-model-overrides.js';
+import { listConnectionModels } from '../session-model-overrides.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
@@ -162,7 +160,7 @@ agentProfileRoutes.get('/', authMiddleware, (c) => {
       id: provider.id,
       name: provider.name,
       type: provider.type,
-      model: splitOneMillionSuffix(provider.anthropicModel).model,
+      model: provider.anthropicModel,
       usable: providerHasCredentials(provider),
       models: listConnectionModels(provider),
     })),
@@ -189,20 +187,11 @@ function inheritedModelOf(
   model: string | null;
   effort: string | null;
 } | null {
-  const provider = getProviders().find(
-    (item) => item.id === profile?.model_config_id,
-  );
-  if (!profile || !provider || !providerHasCredentials(provider)) return null;
-  const inheritedEffort = resolveAgentSdkEffort(profile.runtime_policy);
-  const binding: ModelBinding = {
-    source,
-    provider,
-    model: profile.model,
-    ...(inheritedEffort ? { inheritedEffort } : {}),
-  };
+  const binding = bindingFromMainProfile(source, profile);
+  if (!binding?.provider) return null;
   const summary = summarizeModelBinding(binding, '', null, undefined);
   return {
-    model_config_id: provider.id,
+    model_config_id: binding.provider.id,
     model: summary.model,
     effort: summary.effort,
   };
@@ -222,13 +211,10 @@ function agentEffortRejection(
   const provider = getProviders().find((item) => item.id === modelConfigId);
   if (!provider) return null;
   const runs = model || provider.anthropicModel;
-  const efforts = provider.codexOAuthCredentials
-    ? (listConnectionModels(provider).find((entry) => entry.id === runs)
-        ?.efforts ?? [])
-    : runs
-      ? connectionModelCapabilities(provider, runs).efforts
-      : [];
-  return (efforts as readonly string[]).includes(effort)
+  const efforts: readonly string[] =
+    listConnectionModels(provider).find((entry) => entry.id === runs)
+      ?.efforts ?? [];
+  return efforts.includes(effort)
     ? null
     : {
         error: runs
@@ -658,18 +644,14 @@ function resolveAgentModelResolution(
   );
   return {
     source: summary.source,
-    model_config_id: summary.modelConfigId,
+    model_config_id: summary.provider?.id ?? null,
     model_config_name: summary.provider?.name ?? null,
     model: summary.model,
     effort: summary.effort,
     // The Agent's own binding names a connection that is gone or has no
     // credential, so the order skipped it.
     connection_missing:
-      !!profile.model_config_id &&
-      !getProviders().some(
-        (item) =>
-          item.id === profile.model_config_id && providerHasCredentials(item),
-      ),
+      !!profile.model_config_id && !usableProvider(profile.model_config_id),
   };
 }
 

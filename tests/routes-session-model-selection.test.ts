@@ -115,10 +115,10 @@ function savedProviders() {
       type: 'third_party',
       enabled: false,
       anthropicBaseUrl: 'https://glm.example.test',
-      anthropicModel: 'glm-5.3[1m]',
+      anthropicModel: 'glm-5.3',
       anthropicAuthToken: 'glm-token',
       models: [
-        { id: 'glm-5.3[1m]' },
+        { id: 'glm-5.3', contextWindow: 1_000_000 },
         { id: 'glm-5.3-air', effort: 'low' },
         { id: 'glm-5.3-legacy', hidden: true },
       ],
@@ -293,7 +293,6 @@ describe('GET /:jid/model-selection', () => {
         id: 'glm',
         name: 'GLM',
         kind: 'third_party',
-        // Stored as `[1m]` before the window was a field: read as a window.
         model: 'glm-5.3',
         usable: true,
         models: [

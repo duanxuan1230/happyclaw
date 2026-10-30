@@ -162,6 +162,7 @@ import {
 import { getSessionWorktree } from './session-worktree-store.js';
 import { RegisteredGroup } from './types.js';
 import type {
+  AgentProfile,
   AgentProfileRuntimePolicy,
   ChannelTurnContext,
   InteractionMode,
@@ -909,7 +910,7 @@ function applyKnownProviderFailureDisposition(
   terminal: boolean,
 ): void {
   // Provider failures are control-plane signals. Chat/task callers synthesize
-  // their own terminal projection only after the pool is exhausted.
+  // their own terminal projection only once the failure is terminal.
   output.result = null;
   output.providerFailureTerminal = terminal;
   output.inputTurnCompleted = terminal;
@@ -1262,10 +1263,33 @@ export interface ModelBinding {
 }
 
 /** A saved connection that can serve a launch now, or null. */
-function usableProvider(id: string | null | undefined): UnifiedProvider | null {
+export function usableProvider(
+  id: string | null | undefined,
+  providers: readonly UnifiedProvider[] = getProviders(),
+): UnifiedProvider | null {
   if (!id) return null;
-  const provider = getProviders().find((item) => item.id === id);
+  const provider = providers.find((item) => item.id === id);
   return provider && providerHasCredentials(provider) ? provider : null;
+}
+
+/**
+ * The binding a main Agent hands down to Agents without their own: its
+ * connection if usable, its model, its explicit effort.
+ */
+export function bindingFromMainProfile(
+  source: 'owner_main' | 'system_main',
+  profile: AgentProfile | undefined,
+  providers: readonly UnifiedProvider[] = getProviders(),
+): ModelBinding | null {
+  const provider = usableProvider(profile?.model_config_id, providers);
+  if (!profile || !provider) return null;
+  const inheritedEffort = resolveAgentSdkEffort(profile.runtime_policy);
+  return {
+    source,
+    provider,
+    model: profile.model,
+    ...(inheritedEffort ? { inheritedEffort } : {}),
+  };
 }
 
 /**
@@ -1285,13 +1309,15 @@ export function resolveModelBinding(
   session?: { groupFolder: string; agentId?: string | null } | null,
   options: { includeSession?: boolean; ownerUserId?: string | null } = {},
 ): ModelBinding {
+  const providers = getProviders();
   if (session && options.includeSession !== false) {
     const picked = usableProvider(
-      resolveSessionModelSelection(session.groupFolder, session.agentId),
+      getSessionModelSelection(session.groupFolder, session.agentId),
+      providers,
     );
     if (picked) return { source: 'session', provider: picked, model: null };
   }
-  const own = usableProvider(agent?.modelConfigId);
+  const own = usableProvider(agent?.modelConfigId, providers);
   if (own)
     return { source: 'agent', provider: own, model: agent?.model ?? null };
   if (session && workspaceHasProviderEnv(session.groupFolder)) {
@@ -1303,20 +1329,14 @@ export function resolveModelBinding(
       : session
         ? peekWorkspaceOwnerMainAgentProfile(session.groupFolder)
         : undefined;
-    for (const [source, profile] of [
-      ['owner_main', ownerMain],
-      ['system_main', peekSystemMainAgentProfile()],
-    ] as const) {
-      const provider = usableProvider(profile?.model_config_id);
-      if (!profile || !provider) continue;
-      const inheritedEffort = resolveAgentSdkEffort(profile.runtime_policy);
-      return {
-        source,
-        provider,
-        model: profile.model,
-        ...(inheritedEffort ? { inheritedEffort } : {}),
-      };
-    }
+    const inherited =
+      bindingFromMainProfile('owner_main', ownerMain, providers) ??
+      bindingFromMainProfile(
+        'system_main',
+        peekSystemMainAgentProfile(),
+        providers,
+      );
+    if (inherited) return inherited;
   }
   return { source: 'none', provider: null, model: null };
 }
@@ -1411,7 +1431,6 @@ export function resolveModelLaunch(
 /** A binding and what it runs, as the picker and the Agent page show it. */
 export interface ModelBindingSummary {
   source: ModelBindingSource;
-  modelConfigId: string | null;
   provider: UnifiedProvider | null;
   /** The model a launch runs; null for a pass-through relay or no connection. */
   model: string | null;
@@ -1427,7 +1446,7 @@ export function summarizeModelBinding(
 ): ModelBindingSummary {
   const { provider, source } = binding;
   if (!provider) {
-    return { source, modelConfigId: null, provider, model: null, effort: null };
+    return { source, provider, model: null, effort: null };
   }
   const launch = resolveModelLaunch(
     { ...binding, provider },
@@ -1438,13 +1457,10 @@ export function summarizeModelBinding(
   );
   return {
     source,
-    modelConfigId: provider.id,
     provider,
     model: provider.codexOAuthCredentials
       ? chatGptLaunchModel(launch.model, provider)
-      : launch.model ||
-        splitOneMillionSuffix(provider.anthropicModel).model ||
-        null,
+      : launch.model || provider.anthropicModel || null,
     effort: launch.effort,
   };
 }
@@ -1635,7 +1651,6 @@ export function trySelectPoolProvider(
   return withSessionModel(
     {
       profileId: provider.id,
-      source: binding.source,
       resolved: {
         config: launch.model
           ? { ...resolved.config, anthropicModel: launch.model }
@@ -1659,7 +1674,6 @@ export function trySelectPoolProvider(
 
 export interface PoolProviderSelection {
   profileId: string;
-  source: ModelBindingSource;
   resolved: ResolvedProvider;
   previousProviderId?: string;
   resetSession?: boolean;
@@ -2844,7 +2858,7 @@ export async function runContainerAgent(
     input.agentProfile?.modelConfigId,
   );
 
-  // ─── Provider Pool selection ───
+  // ─── Model connection selection ───
   const poolResult = trySelectPoolProvider(
     group.folder,
     sessionAgentId,
@@ -3945,7 +3959,7 @@ export async function runHostAgent(
   // on non-macOS hosts (the var does not exist there).
   delete hostEnv['XPC_FLAGS'];
 
-  // ─── Provider Pool selection (host mode) ───
+  // ─── Model connection selection (host mode) ───
   await refreshLaunchOAuthCredentials(
     group.folder,
     sessionAgentId,
