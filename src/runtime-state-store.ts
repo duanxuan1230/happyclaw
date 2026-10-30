@@ -414,6 +414,10 @@ export function getWebMessageDedup(
   }
 }
 
+/** Expired rows are pruned at startup and at most this often on writes. */
+const WEB_MESSAGE_DEDUP_PRUNE_INTERVAL_MS = 60_000;
+let lastWebMessageDedupPruneAt = Number.NEGATIVE_INFINITY;
+
 /** Remember an accepted send; expired rows are pruned on the way. */
 export function recordWebMessageDedup(input: {
   userId: string;
@@ -424,7 +428,9 @@ export function recordWebMessageDedup(input: {
   now?: number;
 }): void {
   const now = input.now ?? Date.now();
-  pruneWebMessageDedup(now);
+  if (now - lastWebMessageDedupPruneAt >= WEB_MESSAGE_DEDUP_PRUNE_INTERVAL_MS) {
+    pruneWebMessageDedup(now);
+  }
   stmt(
     `INSERT OR REPLACE INTO web_message_dedup
        (user_id, chat_jid, client_message_id, fingerprint, response_json, created_at)
@@ -440,6 +446,7 @@ export function recordWebMessageDedup(input: {
 }
 
 export function pruneWebMessageDedup(now = Date.now()): number {
+  lastWebMessageDedupPruneAt = now;
   return stmt('DELETE FROM web_message_dedup WHERE created_at <= ?').run(
     new Date(now - WEB_MESSAGE_DEDUP_TTL_MS).toISOString(),
   ).changes;

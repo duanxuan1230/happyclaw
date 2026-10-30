@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { apiGetMock, apiPostMock, showToastMock, notifyMock, emitNoticeMock } =
   vi.hoisted(() => ({
-    apiGetMock: vi.fn(async () => ({ items: [] })),
+    apiGetMock: vi.fn(
+      async (_url: string): Promise<unknown> => ({ items: [], messages: [] }),
+    ),
     apiPostMock: vi.fn(),
     showToastMock: vi.fn(),
     notifyMock: vi.fn(),
@@ -64,6 +66,8 @@ function sentIds(): string[] {
 }
 
 beforeEach(() => {
+  apiGetMock.mockReset();
+  apiGetMock.mockResolvedValue({ items: [], messages: [] });
   apiPostMock.mockReset();
   showToastMock.mockReset();
   useChatStore.setState({
@@ -261,6 +265,97 @@ describe('a replayed answer', () => {
     const state = useChatStore.getState();
     expect(state.activeRuns[`${JID}#agent:agent-9`]).toBeUndefined();
     expect(state.agentWaiting['agent-9']).toBeUndefined();
+  });
+
+  it('in a session reads the conversation again when the message is missing', async () => {
+    const sessionMessages = () =>
+      apiGetMock.mock.calls.filter(([url]) =>
+        String(url).includes('agentId=agent-8'),
+      );
+    useChatStore.setState({ agentMessages: { 'agent-8': [] } });
+    apiGetMock.mockResolvedValueOnce({ messages: [] });
+    apiPostMock.mockResolvedValueOnce(replay);
+    await useChatStore.getState().sendAgentMessage(JID, 'agent-8', 'gone');
+    expect(sessionMessages()).toHaveLength(1);
+
+    useChatStore.setState({
+      agentMessages: {
+        'agent-8': [
+          {
+            id: 'm-first',
+            chat_jid: `${JID}#agent:agent-8`,
+            sender: 'u',
+            sender_name: 'U',
+            content: 'here',
+            timestamp: accepted.timestamp,
+            is_from_me: false,
+          },
+        ],
+      },
+    });
+    apiPostMock.mockResolvedValueOnce(replay);
+    await useChatStore.getState().sendAgentMessage(JID, 'agent-8', 'here');
+    expect(sessionMessages()).toHaveLength(1);
+    expect(useChatStore.getState().agentWaiting['agent-8']).toBeUndefined();
+  });
+});
+
+describe('a history fetch that returns the message', () => {
+  const own = (content: string, timestamp: string) => ({
+    id: `own-${content}`,
+    chat_jid: JID,
+    sender: 'web-user',
+    sender_name: 'Web',
+    content,
+    timestamp,
+    is_from_me: false,
+  });
+
+  it('ends the key when the message is newer than the send', async () => {
+    const send = useChatStore.getState().sendMessage;
+    apiPostMock.mockRejectedValueOnce(timeout);
+    await send(JID, ' fetched ');
+    apiGetMock.mockResolvedValueOnce({
+      messages: [own('fetched', new Date().toISOString())],
+    });
+    await useChatStore.getState().refreshMessages(JID);
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await send(JID, ' fetched ');
+    const [first, second] = sentIds();
+    expect(second).not.toBe(first);
+  });
+
+  it('keeps it for the same text sent long before', async () => {
+    const send = useChatStore.getState().sendMessage;
+    apiPostMock.mockRejectedValueOnce(timeout);
+    await send(JID, 'said before');
+    apiGetMock.mockResolvedValueOnce({
+      messages: [own('said before', '2020-01-01T00:00:00.000Z')],
+    });
+    await useChatStore.getState().refreshMessages(JID);
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await send(JID, 'said before');
+    const [first, second] = sentIds();
+    expect(second).toBe(first);
+  });
+
+  it('in a session too', async () => {
+    const sendAgent = useChatStore.getState().sendAgentMessage;
+    apiPostMock.mockRejectedValueOnce(timeout);
+    await sendAgent(JID, 'agent-6', 'session fetched');
+    apiGetMock.mockResolvedValueOnce({
+      messages: [
+        {
+          ...own('session fetched', new Date().toISOString()),
+          chat_jid: `${JID}#agent:agent-6`,
+        },
+      ],
+    });
+    await useChatStore.getState().refreshAgentMessages(JID, 'agent-6');
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await sendAgent(JID, 'agent-6', 'session fetched');
+    const [first, second] = sentIds();
+    expect(second).not.toBe(first);
   });
 });
 

@@ -373,8 +373,9 @@ type SendAttachment = { data: string; mimeType: string };
  * Each conversation's last unconfirmed send. Resending the same message
  * reuses its idempotency key, so the server answers from the first attempt.
  * The key is kept until the server accepts the send (HTTP 200), announces
- * its message with the key, or a send with another target, text, images or
- * mode takes its place.
+ * its message with the key, a history fetch returns the message (the
+ * announcement can be lost while the socket is down), or a send with another
+ * target, text, images or mode takes its place.
  */
 const unconfirmedSends = new Map<
   string,
@@ -383,8 +384,12 @@ const unconfirmedSends = new Map<
     attachments: SendAttachment[];
     mode: FollowUpMode;
     id: string;
+    /** When the first attempt started, by this device's clock. */
+    startedAt: number;
   }
 >();
+// Server timestamps are compared with this device's clock.
+const SEND_CLOCK_SKEW_MS = 5_000;
 
 function clientMessageIdFor(
   target: string,
@@ -407,7 +412,13 @@ function clientMessageIdFor(
     return previous.id;
   }
   const id = randomUuid();
-  unconfirmedSends.set(target, { content, attachments, mode, id });
+  unconfirmedSends.set(target, {
+    content,
+    attachments,
+    mode,
+    id,
+    startedAt: Date.now(),
+  });
   return id;
 }
 
@@ -415,6 +426,27 @@ function clientMessageIdFor(
 function forgetConfirmedSend(clientMessageId: string): void {
   for (const [target, send] of unconfirmedSends) {
     if (send.id === clientMessageId) unconfirmedSends.delete(target);
+  }
+}
+
+/** `messages` came over HTTP: an unconfirmed send among them was stored. */
+function forgetSendsSeenIn(target: string, messages: Message[]): void {
+  const send = unconfirmedSends.get(target);
+  if (!send) return;
+  const me = useAuthStore.getState().user?.id;
+  // The server stores the text trimmed.
+  const content = send.content.trim();
+  const earliest = send.startedAt - SEND_CLOCK_SKEW_MS;
+  if (
+    messages.some(
+      (m) =>
+        !m.is_from_me &&
+        (!me || m.sender === me) &&
+        m.content === content &&
+        Date.parse(m.timestamp) >= earliest,
+    )
+  ) {
+    unconfirmedSends.delete(target);
   }
 }
 
@@ -3558,6 +3590,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 : { limit: '50' },
           )}`,
         );
+        forgetSendsSeenIn(jid, data.messages);
         // Messages come in DESC order from API, reverse to chronological for display
         const sorted = [...data.messages].reverse();
         set((s) => {
@@ -3619,6 +3652,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[] }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(jid, data.messages);
 
       // Re-check clearing lock after async fetch — clearHistory may have started mid-request
       if (get().clearing[jid]) return;
@@ -6190,6 +6224,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[]; hasMore: boolean }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(sessionJidOf(jid, agentId), data.messages);
       const sorted = [...data.messages].reverse();
       let snapshotMessages = sorted;
       set((s) => {
@@ -6298,6 +6333,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // A resend answered from the first attempt: that run may be long over.
       if (data.deduplicated) {
         showAlreadySent();
+        // Its announcement was missed: read the session again. Its run and
+        // waiting state are not this old answer's to set.
+        if (
+          !get().agentMessages[agentId]?.some((m) => m.id === data.messageId)
+        ) {
+          void get().refreshAgentMessages(jid, agentId);
+        }
         return true;
       }
       if (data.disposition === 'started' && data.runId) {
@@ -6342,6 +6384,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<{ messages: Message[] }>(
         `/api/groups/${encodeURIComponent(jid)}/messages?${params}`,
       );
+      forgetSendsSeenIn(sessionJidOf(jid, agentId), data.messages);
 
       if (data.messages.length > 0) {
         let snapshotMessages: Message[] | null = null;
