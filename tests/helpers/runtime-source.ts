@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
+import { isAutomationTurnInput } from '../../src/agent-builder-turn-auth.js';
+import * as automationLedger from '../../src/automation-run-ledger.js';
+import { canDeleteAcknowledgedIpcSource } from '../../src/host-ipc-output-router.js';
+
 // Execute whole production functions with explicit dependencies, without
 // importing index.ts (which starts the server). No routing/cursor algorithm is
 // copied into the harness. Missing globals fail normally instead of becoming
@@ -53,11 +57,45 @@ function named(
   );
 }
 
+/**
+ * Automation bookkeeping every turn path touches. A test that is not about
+ * automations runs with no automation inputs, so these stay inert; a test
+ * may override any of them.
+ */
+function automationDefaults(): Record<string, unknown> {
+  return {
+    ...automationLedger,
+    isAutomationTurnInput,
+    canDeleteAcknowledgedIpcSource,
+    automationTurns: new automationLedger.AutomationTurnTracker(),
+    coldImRouteHeld: false,
+    rememberAutomationRuns: () => {},
+    settleCurrentAutomationRun: () => {},
+    UNSETTLED_RUN_OUTCOME: { status: 'interrupted', error: 'unsettled' },
+  };
+}
+
+/** index.ts helpers for automation inputs, installed unless a test provides them. */
+const AUTOMATION_SOURCE_HELPERS = [
+  'isUnattendedInput',
+  'dropNonReplayableInputs',
+  'withdrawQueuedInput',
+  'withdrawQueuedInputsOfEndedRuns',
+  'automationRunIdForInput',
+  'createReplyStreamingSession',
+];
+
+const HOST_INDEX = new URL('../../src/index.ts', import.meta.url);
+
 export function createRuntimeSourceHarness(
   globals: Record<string, unknown>,
-  location = new URL('../../src/index.ts', import.meta.url),
+  location = HOST_INDEX,
 ) {
   const source = readSource(location);
+  const provided = new Set(Object.keys(globals));
+  for (const [name, value] of Object.entries(automationDefaults())) {
+    if (!provided.has(name)) globals[name] = value;
+  }
   const context = vm.createContext(globals);
   function installNode(
     name: string,
@@ -78,6 +116,11 @@ export function createRuntimeSourceHarness(
       compiled.set(key, script);
     }
     script.runInContext(context);
+  }
+  if (location.href === HOST_INDEX.href) {
+    for (const name of AUTOMATION_SOURCE_HELPERS) {
+      if (!provided.has(name)) installNode(name, named(name, source));
+    }
   }
   return {
     globals,
@@ -129,11 +172,10 @@ export function createRuntimeSourceHarness(
       const tail = statements.slice(
         statements.indexOf(statement as ts.Statement),
       );
-      installNode(
-        name,
-        statement,
-        () => `() => {\n${tail.map((s) => s.getText(source)).join('\n')}\n}`,
-      );
+      const body = tail.map((s) => s.getText(source)).join('\n');
+      // A tail that awaits installs as an async function.
+      const arrow = /\bawait\b/.test(body) ? 'async () =>' : '() =>';
+      installNode(name, statement, () => `${arrow} {\n${body}\n}`);
     },
     /**
      * Install the `finally` block of `owner`'s top-level try statement as an

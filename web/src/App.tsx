@@ -65,7 +65,7 @@ const loadAppLayout = appLayoutRoute.preload;
 const AppLayout = appLayoutRoute.Component;
 
 // Start the expensive chat split as soon as the entry executes, but only for
-// the default/chat routes. Static HTML modulepreloads made login, setup, tasks,
+// the default/chat routes. Static HTML modulepreloads made login, setup, automations,
 // and memory download ChatPage + MarkdownRenderer even when never used.
 if (
   typeof window !== 'undefined' &&
@@ -87,8 +87,10 @@ if (
 ) {
   void loadAppLayout();
 }
-const TasksPage = lazy(() =>
-  import('./pages/TasksPage').then((m) => ({ default: m.TasksPage })),
+const AutomationsPage = lazy(() =>
+  import('./pages/AutomationsPage').then((m) => ({
+    default: m.AutomationsPage,
+  })),
 );
 const SettingsPage = lazy(() =>
   import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })),
@@ -235,13 +237,14 @@ const appRoutes = createRoutesFromElements(
         }
       />
       <Route
-        path="/tasks"
+        path="/automations/:automationId?"
         element={
           <Suspense fallback={null}>
-            <TasksPage />
+            <AutomationsPage />
           </Suspense>
         }
       />
+      <Route path="/tasks" element={<Navigate to="/automations" replace />} />
       <Route
         path="/monitor"
         element={

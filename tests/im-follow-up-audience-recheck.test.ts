@@ -88,6 +88,7 @@ function hostHarness(registeredGroups: Record<string, Group>) {
     registeredGroups,
     listQueuedFollowUps: vi.fn(db.listQueuedFollowUps),
     listQueuedChannelFollowUps: vi.fn(db.listQueuedChannelFollowUps),
+    listQueuedAutomationFollowUps: db.listQueuedAutomationFollowUps,
     getQueuedFollowUp: db.getQueuedFollowUp,
     getQueuedFollowUpChatJids: db.getQueuedFollowUpChatJids,
     setMessageFollowUp: db.setMessageFollowUp,

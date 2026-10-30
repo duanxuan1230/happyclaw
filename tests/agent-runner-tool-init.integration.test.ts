@@ -38,11 +38,7 @@ function cleanEnv(): Record<string, string> {
 
 function toolNames(
   isHome: boolean,
-  options: {
-    isScheduledTask?: boolean;
-    currentTaskId?: string | null;
-    agentBuilderEnabled?: boolean;
-  } = {},
+  options: { agentBuilderEnabled?: boolean } = {},
 ): string[] {
   return createMcpTools({
     chatJid: 'web:tool-init',
@@ -50,8 +46,6 @@ function toolNames(
     isHome,
     isAdminHome: true,
     agentBuilderEnabled: options.agentBuilderEnabled ?? isHome,
-    isScheduledTask: options.isScheduledTask ?? false,
-    currentTaskId: options.currentTaskId ?? null,
     currentInputTurnId: 'turn-1',
     workspaceIpc: '/tmp/tool-init-ipc',
     workspaceGroup: '/tmp/tool-init-group',
@@ -125,7 +119,7 @@ describe('HappyClaw tool initialization', () => {
     const names = toolNames(true);
     expect(names).toEqual(
       expect.arrayContaining([
-        'schedule_task',
+        'automation_create',
         'install_skill',
         'workspace_memory_search',
         'workspace_memory_get',
@@ -151,7 +145,7 @@ describe('HappyClaw tool initialization', () => {
 
   test('custom Agent runtime keeps ordinary tools but does not advertise Agent Builder', () => {
     const names = toolNames(false, { agentBuilderEnabled: false });
-    expect(names).toContain('schedule_task');
+    expect(names).toContain('automation_create');
     expect(names).toEqual(
       expect.arrayContaining([
         'workspace_memory_search',
@@ -165,33 +159,6 @@ describe('HappyClaw tool initialization', () => {
     expect(names).not.toContain('agent_profile_prepare');
   });
 
-  test('home tool registration stays stable across scheduled and human turns', () => {
-    expect(toolNames(true, { isScheduledTask: true })).toContain(
-      'agent_profile_prepare',
-    );
-    expect(
-      toolNames(true, { currentTaskId: 'scheduled-group-task' }),
-    ).toContain('agent_profile_publish');
-  });
-
-  test('scheduled and task-triggered turns may propose Workspace Memory', () => {
-    // The host saves their writes as proposals the owner confirms.
-    for (const names of [
-      toolNames(false, { isScheduledTask: true }),
-      toolNames(false, { currentTaskId: 'scheduled-group-task' }),
-    ]) {
-      expect(names).toEqual(
-        expect.arrayContaining([
-          'workspace_memory_search',
-          'workspace_memory_get',
-          'workspace_memory_remember',
-          'workspace_memory_update',
-          'workspace_memory_forget',
-        ]),
-      );
-    }
-  });
-
   test('real Claude CLI initializes unrestricted builtins and Agent Builder tools', async () => {
     const tools = createMcpTools({
       chatJid: 'web:tool-init-real',
@@ -199,8 +166,6 @@ describe('HappyClaw tool initialization', () => {
       isHome: true,
       isAdminHome: true,
       agentBuilderEnabled: true,
-      isScheduledTask: false,
-      currentTaskId: null,
       currentInputTurnId: 'turn-real',
       workspaceIpc: path.join(cwd, 'ipc'),
       workspaceGroup: cwd,
@@ -247,6 +212,10 @@ describe('HappyClaw tool initialization', () => {
         'Task',
         'mcp__happyclaw__agent_profile_prepare',
         'mcp__happyclaw__agent_profile_publish',
+        // Strict object schemas are accepted by the real CLI.
+        'mcp__happyclaw__automation_create',
+        'mcp__happyclaw__automation_update',
+        'mcp__happyclaw__automation_list',
       ]),
     );
   }, 20_000);

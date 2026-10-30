@@ -159,20 +159,13 @@ describe('resume time policy', () => {
     ).toBe('10月30日 17:05');
   });
 
-  test('a lane is its queue: main chat, Runtime Session or scheduled run', () => {
+  test('a lane is its queue: main chat or Runtime Session', () => {
     expect(wait.usageLimitWaitScopeKey({ chatJid: 'feishu:oc_1' })).toBe(
       'feishu:oc_1',
     );
     expect(
       wait.usageLimitWaitScopeKey({ chatJid: 'web:w', agentId: 's1' }),
     ).toBe('web:w#agent:s1');
-    expect(
-      wait.usageLimitWaitScopeKey({
-        chatJid: 'web:w',
-        taskRunId: 'task-run-r1-attempt-1',
-        isScheduledTask: true,
-      }),
-    ).toBe('task-run:task-run-r1-attempt-1');
   });
 });
 
@@ -245,7 +238,7 @@ describe('a usage wall on every usable connection waits for the reset', () => {
     expect(codexReauth.providerUsageLimitResumeAt).toBeUndefined();
   });
 
-  test('deleting tasks, agents, or workspaces cleans up runtime state rows', () => {
+  test('deleting agents or workspaces cleans up runtime state rows', () => {
     const now = new Date().toISOString();
     const folder = 'cleanup-folder';
     const jid = 'web:cleanup-folder';
@@ -284,39 +277,6 @@ describe('a usage wall on every usable connection waits for the reset', () => {
     expect(
       store.takeSessionHistoryReinjection(folder, 'agent-del-1', false),
     ).toBe(false);
-
-    db.createTask({
-      id: 'task-del-1',
-      group_folder: folder,
-      chat_jid: jid,
-      prompt: 'check',
-      schedule_type: 'cron',
-      schedule_value: '0 9 * * *',
-      context_mode: 'isolated',
-      execution_type: 'agent',
-      execution_mode: 'container',
-      script_command: null,
-      next_run: now,
-      status: 'active',
-      created_at: now,
-      notify_channels: null,
-    });
-    const { run } = db.createTaskRun({
-      task: db.getTaskById('task-del-1')!,
-      triggerType: 'scheduled',
-      scheduledFor: now,
-    });
-    store.recordTaskFailure('task-del-1', 'key-1', 'boom');
-    store.reserveUsageLimitWait({
-      scopeKey: `task-run:${run.id}`,
-      inputKey: run.id,
-      resetAt: now,
-      resumeAt: now,
-      maxWaits: 3,
-    });
-    db.deleteTask('task-del-1');
-    expect(store.getUsageLimitWait(`task-run:${run.id}`)).toBeNull();
-    expect(store.clearTaskFailure('task-del-1')).toBeNull();
 
     // Workspace deletion cleans up folder runtime state
     store.markSessionForHistoryReinjection(folder, null);

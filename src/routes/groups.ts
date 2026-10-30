@@ -18,6 +18,7 @@ import type {
   RegisteredGroup,
   ExecutionMode,
   InteractionMode,
+  NewMessage,
   ProcessVisibility,
 } from '../types.js';
 import { checkGroupLimit } from '../billing.js';
@@ -56,9 +57,7 @@ import {
   deleteSession,
   deleteWorkspaceSessions,
   deleteChatHistory,
-  pauseWorkspaceTasksForRebuild,
   rebuildWorkspacePersistentState,
-  restoreWorkspaceTasksAfterFailedRebuild,
   deleteGroupData,
   deleteImGroupRecord,
   ensureChatExists,
@@ -539,6 +538,10 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
 }
 
 import { removeFlowArtifacts } from '../file-manager.js';
+import {
+  getAutomationService,
+  presentAutomationMessage,
+} from '../automation-run-ledger.js';
 import { clearSessionFiles } from '../session-files.js';
 export { removeFlowArtifacts };
 
@@ -2003,7 +2006,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
 
   // IM-prefixed groups (feishu:, telegram:, qq:, etc.) follow a separate
   // cleanup path. They share their folder with the owner's home workspace,
-  // so we must NOT touch folder-scoped data (sessions, scheduled_tasks) or
+  // so we must NOT touch folder-scoped data (sessions, automations) or
   // the workspace directory.
   if (!jid.startsWith('web:')) {
     if (!getChannelType(jid)) {
@@ -2051,8 +2054,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
 
   // Wait for container to fully stop before cleaning up its files.
   // Must include sibling JIDs (same folder) AND descendant virtual JIDs —
-  // sub-agents (`{jid}#agent:{id}`) and scheduled tasks (`{jid}#task:{id}`) —
-  // mirroring clear-history. Otherwise those runners keep executing with their
+  // sessions (`{jid}#agent:{id}`) — mirroring clear-history. Otherwise those runners keep executing with their
   // cwd/session dirs deleted out from under them (container/process leak + ENOENT).
   const deleteSiblingJids = getJidsByFolder(existing.folder);
   const deleteDescendantJids = Array.from(
@@ -2132,6 +2134,14 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
       },
     });
     deleteCommitted = true;
+    try {
+      getAutomationService()?.onWorkspaceDeleted(jid);
+    } catch (error) {
+      logger.error(
+        { jid, error },
+        'Failed to drop the automations of a deleted workspace',
+      );
+    }
 
     const registeredGroups = deps.getRegisteredGroups();
     for (const update of channelUpdates) {
@@ -2842,45 +2852,23 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     new Set([jid, ...siblingJids, ...descendantJids]),
   );
   const pauseToken = deps.queue.pauseGroupsForMutation(stopJids);
-  let taskPause: ReturnType<typeof pauseWorkspaceTasksForRebuild> | null = null;
+  const automations = getAutomationService();
+  let suspendedAutomationIds: string[] | null = null;
   let stagedReset: StagedWorkspaceReset | null = null;
   let databaseCommitted = false;
   try {
-    // Pause definitions synchronously so the scheduler cannot admit another
-    // occurrence while active task processes are being cancelled.
-    taskPause = pauseWorkspaceTasksForRebuild(group.folder);
-    if (taskPause.activeRunIds.length > 0 && !deps.cancelTaskRun) {
-      throw new Error(
-        'Scheduler is unavailable while task runs are active; workspace not rebuilt',
-      );
-    }
-    for (const runId of taskPause.activeRunIds) {
-      const cancelled = deps.cancelTaskRun!(runId);
-      if (!cancelled.success) {
-        throw new Error(
-          cancelled.error ||
-            `Failed to cancel scheduled task run during rebuild: ${runId}`,
-        );
-      }
-    }
+    // Automations pause first, so none fires into the workspace while it is
+    // rebuilt; their queued and running runs end as cancelled before the
+    // runners stop and the input rows are wiped. They resume either way.
+    suspendedAutomationIds = automations
+      ? workspaceJids.flatMap((workspaceJid) =>
+          automations.suspendWorkspace(workspaceJid),
+        )
+      : [];
 
-    // Stop every current Main/Session/Task/Spawn runner before moving files,
+    // Stop every current Main/Session/Spawn runner before moving files,
     // keeping their queued work until the worktree check below passes.
     await stopFamilyKeepingWork(deps.queue, stopJids);
-    if (
-      taskPause.activeRunIds.length > 0 &&
-      deps.waitForTaskRunsToStop &&
-      !(await deps.waitForTaskRunsToStop(taskPause.activeRunIds))
-    ) {
-      throw new Error(
-        'Timed out waiting for scheduled task processes to stop; workspace not rebuilt',
-      );
-    }
-    if (taskPause.activeRunIds.length > 0 && !deps.waitForTaskRunsToStop) {
-      throw new Error(
-        'Scheduler cannot confirm task process shutdown; workspace not rebuilt',
-      );
-    }
     // Runners were still writing during the first check.
     const dirty = await unconfirmedDirtyWorktrees(
       group.folder,
@@ -2911,6 +2899,11 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       );
     }
     await releaseWorkspaceWorktrees(group.folder);
+    for (const agentId of result.deletedAgentIds) {
+      for (const workspaceJid of workspaceJids) {
+        automations?.onSessionDeleted(`${workspaceJid}#agent:${agentId}`);
+      }
+    }
 
     // Refresh process-local projections only after the durable commit. A cache
     // refresh failure must not turn a successfully committed rebuild into a
@@ -2949,9 +2942,8 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
         folder: group.folder,
         siblingJids,
         deletedAgentCount: result.deletedAgentIds.length,
-        recycledTaskCount: result.recycledTaskIds.length,
       },
-      'Rebuilt workspace files, Memory, tasks, context and chat history',
+      'Rebuilt workspace files, Memory, context and chat history',
     );
     return c.json({ success: true });
   } catch (err) {
@@ -2965,26 +2957,6 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
         rollbackError = error;
       }
     }
-    let taskRestore:
-      | ReturnType<typeof restoreWorkspaceTasksAfterFailedRebuild>
-      | undefined;
-    if (!databaseCommitted && taskPause) {
-      try {
-        taskRestore = restoreWorkspaceTasksAfterFailedRebuild(taskPause);
-        if (taskRestore.conflicts.length > 0) {
-          const conflictError = new Error(
-            `Task rollback conflicted for: ${taskRestore.conflicts.join(', ')}`,
-          );
-          rollbackError = rollbackError
-            ? new AggregateError([rollbackError, conflictError])
-            : conflictError;
-        }
-      } catch (error) {
-        rollbackError = rollbackError
-          ? new AggregateError([rollbackError, error])
-          : error;
-      }
-    }
     if (err instanceof DirtyWorktreesError && !rollbackError) {
       return c.json(dirtyWorktreesConflict(err.dirty), 409);
     }
@@ -2995,7 +2967,6 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
         stopJids,
         err,
         rollbackError,
-        taskRestore,
       },
       'Workspace rebuild failed',
     );
@@ -3008,9 +2979,24 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
       500,
     );
   } finally {
+    if (suspendedAutomationIds?.length) {
+      try {
+        automations?.restoreWorkspace(suspendedAutomationIds);
+      } catch (error) {
+        logger.error(
+          { jid, folder: group.folder, error },
+          'Failed to resume automations after workspace rebuild',
+        );
+      }
+    }
     deps.queue.resumeGroupsAfterMutation(pauseToken);
   }
 });
+
+/** Thumbnails, and automation inputs without their hidden run context. */
+function presentWebMessages<T extends NewMessage>(rows: T[]): Promise<T[]> {
+  return presentMessagesForWeb(rows.map(presentAutomationMessage));
+}
 
 // GET /api/groups/:jid/messages - 获取消息历史
 groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
@@ -3064,7 +3050,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
       agentKind: agent.kind,
     });
     if (afterSequence !== undefined || after) {
-      const messages = await presentMessagesForWeb(
+      const messages = await presentWebMessages(
         markMessagesWithTrace(
           attachSessionWorkflowRuns(
             getMessagesAfter(virtualJid, after, limit, afterSequence),
@@ -3077,7 +3063,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     }
     const rows = getMessagesPage(virtualJid, before, limit + 1, beforeSequence);
     const hasMore = rows.length > limit;
-    const messages = await presentMessagesForWeb(
+    const messages = await presentWebMessages(
       markMessagesWithTrace(
         attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
           groupFolder: group.folder,
@@ -3100,7 +3086,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   if (queryJids.length === 1) {
     // 单 JID 走原路径
     if (afterSequence !== undefined || after) {
-      const messages = await presentMessagesForWeb(
+      const messages = await presentWebMessages(
         markMessagesWithTrace(
           attachSessionWorkflowRuns(
             getMessagesAfter(jid, after, limit, afterSequence),
@@ -3113,7 +3099,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     }
     const rows = getMessagesPage(jid, before, limit + 1, beforeSequence);
     const hasMore = rows.length > limit;
-    const messages = await presentMessagesForWeb(
+    const messages = await presentWebMessages(
       markMessagesWithTrace(
         attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
           groupFolder: group.folder,
@@ -3127,7 +3113,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
 
   // 多 JID 合并查询
   if (afterSequence !== undefined || after) {
-    const messages = await presentMessagesForWeb(
+    const messages = await presentWebMessages(
       markMessagesWithTrace(
         attachSessionWorkflowRuns(
           getMessagesAfterMulti(queryJids, after, limit, afterSequence),
@@ -3145,7 +3131,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     beforeSequence,
   );
   const hasMore = rows.length > limit;
-  const messages = await presentMessagesForWeb(
+  const messages = await presentWebMessages(
     markMessagesWithTrace(
       attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
         groupFolder: group.folder,

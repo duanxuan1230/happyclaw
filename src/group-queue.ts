@@ -5,7 +5,6 @@ import { randomUUID } from 'node:crypto';
 
 import { DATA_DIR } from './config.js';
 import { killProcessTree } from './container-runner.js';
-import { getTaskById } from './db.js';
 import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
 import { resolveFeishuCliBoundAccountId } from './feishu-cli-runtime.js';
@@ -111,8 +110,6 @@ interface QueuedTask {
   /** Returning false asks GroupQueue to replay this exact task with the same
    * bounded backoff used by message runs. Void/true remain one-shot success. */
   fn: () => Promise<void | boolean>;
-  /** Manual runs may execute even when the task config is paused. */
-  allowInactive?: boolean;
   /** Release caller-owned reservations when queued work is discarded. */
   onDropped?: () => void;
 }
@@ -215,8 +212,6 @@ interface GroupState {
   displayName: string | null;
   groupFolder: string | null;
   agentId: string | null;
-  /** Isolated task run ID — used for tasks-run/{taskRunId}/ IPC namespace. */
-  taskRunId: string | null;
   retryCount: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
   /** Exact task captured by a retry timer; null means a message-lane retry. */
@@ -386,7 +381,6 @@ export class GroupQueue {
         displayName: null,
         groupFolder: null,
         agentId: null,
-        taskRunId: null,
         retryCount: 0,
         retryTimer: null,
         retryTask: null,
@@ -408,12 +402,8 @@ export class GroupQueue {
   }
 
   private getMutationBaseJid(groupJid: string): string {
-    const taskSep = groupJid.indexOf('#task:');
     const agentSep = groupJid.indexOf('#agent:');
-    const separators = [taskSep, agentSep].filter((index) => index >= 0);
-    return separators.length > 0
-      ? groupJid.slice(0, Math.min(...separators))
-      : groupJid;
+    return agentSep >= 0 ? groupJid.slice(0, agentSep) : groupJid;
   }
 
   private getMutationPauseKey(groupJid: string): string {
@@ -1262,13 +1252,7 @@ export class GroupQueue {
 
   /** No IPC input left on disk and nothing the host reports for the lane. */
   private owesNoWorkOutsideQueue(jid: string, state: GroupState): boolean {
-    if (
-      this.hasRemainingIpcMessages(
-        state.groupFolder!,
-        state.agentId,
-        state.taskRunId,
-      )
-    ) {
+    if (this.hasRemainingIpcMessages(state.groupFolder!, state.agentId)) {
       return false;
     }
     try {
@@ -1412,22 +1396,9 @@ export class GroupQueue {
     return state?.active === true;
   }
 
-  /** Count active task runners whose JID starts with the given base JID + '#task:' */
-  countActiveTaskRunners(baseJid: string): number {
-    const prefix = baseJid + '#task:';
-    let count = 0;
-    for (const [jid, state] of this.groups.entries()) {
-      if (state.active && jid.startsWith(prefix)) {
-        count++;
-      }
-    }
-    return count;
-  }
-
   /**
    * List every virtual-JID runner that belongs to the same folder family as
-   * `baseJid` (i.e. sub-agents `{...}#agent:{id}` and scheduled tasks
-   * `{...}#task:{id}`), excluding the base JID itself — whether it is actively
+   * `baseJid` (i.e. sessions `{...}#agent:{id}`), excluding the base JID itself — whether it is actively
    * running OR merely QUEUED (capacity-blocked: in pendingTasks / waitingGroups,
    * not yet active). Used by workspace-level operations (delete / clear-history)
    * that stop every descendant before wiping the folder's filesystem.
@@ -1569,11 +1540,7 @@ export class GroupQueue {
       const hasPendingReceipts = state.pendingIpcDeliveries?.size > 0;
       const hasPendingFiles = Boolean(
         state.groupFolder &&
-        this.hasRemainingIpcMessages(
-          state.groupFolder,
-          state.agentId,
-          state.taskRunId,
-        ),
+        this.hasRemainingIpcMessages(state.groupFolder, state.agentId),
       );
       if (hasPendingReceipts || hasPendingFiles) return;
     }
@@ -1936,7 +1903,7 @@ export class GroupQueue {
     groupJid: string,
     taskId: string,
     fn: () => Promise<void | boolean>,
-    options?: { allowInactive?: boolean; onDropped?: () => void },
+    options?: { onDropped?: () => void },
   ): boolean {
     if (this.shuttingDown) return false;
 
@@ -1970,7 +1937,6 @@ export class GroupQueue {
         id: taskId,
         groupJid,
         fn,
-        allowInactive: options?.allowInactive,
         onDropped: options?.onDropped,
       });
       this.waitingGroups.add(groupJid);
@@ -1984,7 +1950,6 @@ export class GroupQueue {
         id: taskId,
         groupJid,
         fn,
-        allowInactive: options?.allowInactive,
         onDropped: options?.onDropped,
       });
       this.waitingGroups.add(groupJid);
@@ -2001,7 +1966,6 @@ export class GroupQueue {
         id: taskId,
         groupJid,
         fn,
-        allowInactive: options?.allowInactive,
         onDropped: options?.onDropped,
       });
       this.waitingGroups.add(groupJid);
@@ -2025,7 +1989,6 @@ export class GroupQueue {
       id: taskId,
       groupJid,
       fn,
-      allowInactive: options?.allowInactive,
       onDropped: options?.onDropped,
     });
     return true;
@@ -2039,7 +2002,6 @@ export class GroupQueue {
       groupFolder?: string;
       displayName?: string;
       agentId?: string;
-      taskRunId?: string;
       selectedProviderId?: string | null;
       feishuCliAccountId?: string | null;
       interactionMode?: InteractionMode;
@@ -2053,7 +2015,6 @@ export class GroupQueue {
     state.displayName = opts.displayName || null;
     if (opts.groupFolder) state.groupFolder = opts.groupFolder;
     state.agentId = opts.agentId || null;
-    state.taskRunId = opts.taskRunId || null;
     state.selectedProviderId = opts.selectedProviderId ?? null;
     state.feishuCliAccountId = opts.feishuCliAccountId ?? null;
     state.interactionMode = opts.interactionMode ?? null;
@@ -2104,16 +2065,6 @@ export class GroupQueue {
    * Sub-agents use a nested path: data/ipc/{folder}/agents/{agentId}/input/
    */
   private resolveIpcInputDir(state: ActiveGroupState): string {
-    if (state.taskRunId) {
-      return path.join(
-        DATA_DIR,
-        'ipc',
-        state.groupFolder,
-        'tasks-run',
-        state.taskRunId,
-        'input',
-      );
-    }
     if (state.agentId) {
       return path.join(
         DATA_DIR,
@@ -2140,7 +2091,6 @@ export class GroupQueue {
     images?: Array<{ data: string; mimeType?: string }>,
     onInjected?: (receipt?: IpcDeliveryReceipt) => void,
     sourceJid?: string,
-    taskId?: string,
     deliveryTarget?: IpcDeliveryTarget,
     channelContext?: ChannelTurnContext,
     beforePublish?: (
@@ -2294,10 +2244,6 @@ export class GroupQueue {
         return 'no_active';
       }
       admission = admissionResult || undefined;
-      // Stamp taskId when this injection carries a scheduled-task prompt so the
-      // agent-runner can attribute the resulting send_message output to the task
-      // (drives notify_channels broadcast on the host). Omitted for regular
-      // user messages, matching the cold-start path's messageTaskId handling.
       fs.writeFileSync(
         tempPath,
         JSON.stringify({
@@ -2307,7 +2253,6 @@ export class GroupQueue {
           queryRunId,
           sourceJid,
           channelContext,
-          taskId,
           receipt,
         }),
       );
@@ -2422,13 +2367,10 @@ export class GroupQueue {
   private cleanupIpcSentinels(
     groupFolder: string,
     agentId?: string | null,
-    taskRunId?: string | null,
   ): void {
-    const inputDir = taskRunId
-      ? path.join(DATA_DIR, 'ipc', groupFolder, 'tasks-run', taskRunId, 'input')
-      : agentId
-        ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
-        : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
+    const inputDir = agentId
+      ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
+      : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
     for (const name of [
       '_drain',
       '_close',
@@ -2470,13 +2412,7 @@ export class GroupQueue {
       return;
     }
     try {
-      if (
-        !this.hasRemainingIpcMessages(
-          state.groupFolder,
-          state.agentId,
-          state.taskRunId,
-        )
-      )
+      if (!this.hasRemainingIpcMessages(state.groupFolder, state.agentId))
         return;
 
       if (state.agentId && this.onUnconsumedAgentIpcFn) {
@@ -2485,7 +2421,7 @@ export class GroupQueue {
           `Unconsumed IPC messages found after ${context}, re-enqueuing`,
         );
         this.onUnconsumedAgentIpcFn(groupJid, state.agentId);
-      } else if (!state.taskRunId) {
+      } else {
         state.pendingMessages = true;
         logger.warn(
           { groupJid },
@@ -2607,13 +2543,10 @@ export class GroupQueue {
   private hasRemainingIpcMessages(
     groupFolder: string,
     agentId?: string | null,
-    taskRunId?: string | null,
   ): boolean {
-    const inputDir = taskRunId
-      ? path.join(DATA_DIR, 'ipc', groupFolder, 'tasks-run', taskRunId, 'input')
-      : agentId
-        ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
-        : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
+    const inputDir = agentId
+      ? path.join(DATA_DIR, 'ipc', groupFolder, 'agents', agentId, 'input')
+      : path.join(DATA_DIR, 'ipc', groupFolder, 'input');
     try {
       const files = fs.readdirSync(inputDir);
       return files.some(isIpcInputPayloadFilename);
@@ -3166,11 +3099,7 @@ export class GroupQueue {
         (exitFolder ? this.isRecentlyStopped(groupJid) : false);
       if (state.groupFolder) {
         try {
-          this.cleanupIpcSentinels(
-            state.groupFolder,
-            state.agentId,
-            state.taskRunId,
-          );
+          this.cleanupIpcSentinels(state.groupFolder, state.agentId);
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
@@ -3242,7 +3171,6 @@ export class GroupQueue {
       state.displayName = null;
       state.groupFolder = null;
       state.agentId = null;
-      state.taskRunId = null;
       state.runnerRuntime = null;
       state.interactionMode = null;
       state.deferredInterruptFailure = undefined;
@@ -3373,11 +3301,7 @@ export class GroupQueue {
       // Clean up stale sentinel files before clearing groupFolder/agentId
       if (state.groupFolder) {
         try {
-          this.cleanupIpcSentinels(
-            state.groupFolder,
-            state.agentId,
-            state.taskRunId,
-          );
+          this.cleanupIpcSentinels(state.groupFolder, state.agentId);
         } catch (err) {
           logger.warn({ groupJid, err }, 'Failed to clean up IPC sentinels');
         }
@@ -3424,7 +3348,6 @@ export class GroupQueue {
       state.displayName = null;
       state.groupFolder = null;
       state.agentId = null;
-      state.taskRunId = null;
       state.runnerRuntime = null;
       state.interactionMode = null;
       state.deferredInterruptFailure = undefined;
@@ -3531,7 +3454,6 @@ export class GroupQueue {
       if (this.canScheduleRetry(state)) {
         if (retryTask) {
           this.enqueueTask(groupJid, retryTask.id, retryTask.fn, {
-            allowInactive: retryTask.allowInactive,
             onDropped: retryTask.onDropped,
           });
         } else {
@@ -3574,21 +3496,8 @@ export class GroupQueue {
     }
 
     // Tasks first (they won't be re-discovered from SQLite like messages)
-    while (state.pendingTasks.length > 0) {
-      const task = state.pendingTasks.shift()!;
-      // Check if scheduled task is still active before occupying a slot.
-      // Only skip tasks that exist in the DB and are no longer active.
-      // Dynamic tasks (agent conversations, etc.) don't have DB entries
-      // and must always be allowed to run.
-      const dbTask = getTaskById(task.id);
-      if (dbTask && dbTask.status !== 'active' && !task.allowInactive) {
-        logger.info(
-          { groupJid, taskId: task.id },
-          'Skipping cancelled/deleted task during drain',
-        );
-        task.onDropped?.();
-        continue;
-      }
+    const task = state.pendingTasks.shift();
+    if (task) {
       this.runTask(groupJid, task);
       return;
     }
@@ -3604,9 +3513,8 @@ export class GroupQueue {
 
     this.waitingGroups.delete(groupJid);
 
-    // GC one-shot virtual JIDs (#task:/#agent:) once fully idle. Each task run
-    // uses a unique taskRunId → a unique JID, so without this the groups Map
-    // grows without bound. Only virtual JIDs are collected; real chat JIDs are
+    // GC virtual session JIDs (#agent:) once fully idle; without this the
+    // groups Map grows with every session ever run. Only virtual JIDs are collected; real chat JIDs are
     // bounded by the number of registered groups and keep useful state. We only
     // reach here when there are no pending tasks and no runnable messages.
     if (this.isVirtualJid(groupJid)) {
@@ -3630,9 +3538,9 @@ export class GroupQueue {
     this.drainWaiting();
   }
 
-  /** Virtual JIDs are one-shot per run (`{jid}#task:{id}` / `{jid}#agent:{id}`). */
+  /** Session JIDs (`{jid}#agent:{id}`). */
   private isVirtualJid(jid: string): boolean {
-    return jid.includes('#task:') || jid.includes('#agent:');
+    return jid.includes('#agent:');
   }
 
   private drainWaiting(): void {
@@ -3658,35 +3566,9 @@ export class GroupQueue {
       const state = this.getGroup(jid);
 
       // Prioritize tasks over messages
-      if (state.pendingTasks.length > 0) {
-        // Skip cancelled/deleted scheduled tasks (but allow dynamic tasks
-        // like agent conversations that have no DB entry).
-        let validTask: QueuedTask | undefined;
-        while (state.pendingTasks.length > 0) {
-          const candidate = state.pendingTasks.shift()!;
-          const dbTask = getTaskById(candidate.id);
-          if (
-            dbTask &&
-            dbTask.status !== 'active' &&
-            !candidate.allowInactive
-          ) {
-            logger.info(
-              { groupJid: jid, taskId: candidate.id },
-              'Skipping cancelled/deleted task during drainWaiting',
-            );
-            candidate.onDropped?.();
-            continue;
-          }
-          validTask = candidate;
-          break;
-        }
-        if (validTask) {
-          this.runTask(jid, validTask);
-        } else if (state.pendingMessages && !state.retryTimer) {
-          // All tasks were stale, fall through to messages
-          // (skip if retry timer is pending to avoid duplicate processing)
-          this.runForGroup(jid, 'drain');
-        }
+      const task = state.pendingTasks.shift();
+      if (task) {
+        this.runTask(jid, task);
       } else if (state.pendingMessages && !state.retryTimer) {
         // Skip if retry timer is pending to avoid duplicate processing
         this.runForGroup(jid, 'drain');
@@ -3781,25 +3663,16 @@ export class GroupQueue {
     // archive 完成。和 closeAllActiveForCredentialRefresh 的策略一致。
     for (const [, state] of this.groups) {
       if (!state.active || !state.groupFolder) continue;
-      const inputDir = state.taskRunId
+      const inputDir = state.agentId
         ? path.join(
             DATA_DIR,
             'ipc',
             state.groupFolder,
-            'tasks-run',
-            state.taskRunId,
+            'agents',
+            state.agentId,
             'input',
           )
-        : state.agentId
-          ? path.join(
-              DATA_DIR,
-              'ipc',
-              state.groupFolder,
-              'agents',
-              state.agentId,
-              'input',
-            )
-          : path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+        : path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
       try {
         fs.mkdirSync(inputDir, { recursive: true });
         fs.writeFileSync(path.join(inputDir, '_close'), '');

@@ -4,7 +4,7 @@
  * When every connection a run may use has hit its usage limit and the
  * upstream named the reset time, the input is not ended: it waits in the
  * durable queue and resumes shortly after the reset. A lane (one Session's
- * queue, or one isolated scheduled run) waits at most USAGE_LIMIT_MAX_WAITS
+ * queue) waits at most USAGE_LIMIT_MAX_WAITS
  * times in a row and never longer than USAGE_LIMIT_MAX_WAIT_MS at once;
  * past either bound the input fails the way it did before waits existed.
  *
@@ -60,13 +60,7 @@ export function resolveUsageLimitResumeAt(
 export function usageLimitWaitScopeKey(input: {
   chatJid: string;
   agentId?: string;
-  taskRunId?: string;
-  isScheduledTask?: boolean;
 }): string {
-  if (input.isScheduledTask && input.taskRunId) {
-    // Resumed by task_runs retry_wait, which marks the wait resumed at once.
-    return `task-run:${input.taskRunId}`;
-  }
   return input.agentId
     ? `${input.chatJid}#agent:${input.agentId}`
     : input.chatJid;

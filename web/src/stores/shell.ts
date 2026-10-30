@@ -11,6 +11,8 @@ const COLLAPSED_KEY = 'happyclaw:sidebar-collapsed';
 // fetched sessions for) their whole history of workspaces on every load.
 const EXPANDED_KEY = 'happyclaw:sidebar-expanded-workspaces:v2';
 const LEGACY_EXPANDED_KEY = 'happyclaw:sidebar-expanded-workspaces';
+// Automation session groups are collapsed unless opened.
+const EXPANDED_AUTOMATIONS_KEY = 'happyclaw:sidebar-expanded-automations';
 
 function read(key: string): string | null {
   try {
@@ -36,10 +38,9 @@ export function clampSidebarWidth(width: number): number {
   );
 }
 
-function readExpanded(): Record<string, boolean> {
-  if (read(LEGACY_EXPANDED_KEY) !== null) write(LEGACY_EXPANDED_KEY, null);
+function readExpanded(key: string): Record<string, boolean> {
   try {
-    const parsed = JSON.parse(read(EXPANDED_KEY) || '{}');
+    const parsed = JSON.parse(read(key) || '{}');
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed
       : {};
@@ -70,6 +71,8 @@ interface ShellState {
    * Without one, only the open workspace is expanded.
    */
   expandedWorkspaces: Record<string, boolean>;
+  /** Automation session groups opened in the session tree, by automation id. */
+  expandedAutomationGroups: Record<string, boolean>;
   paletteOpen: boolean;
   /** The phone navigation drawer (phones have no sidebar or tab bar). */
   navDrawerOpen: boolean;
@@ -89,6 +92,7 @@ interface ShellState {
   setWorkspaceExpanded: (jid: string, expanded: boolean) => void;
   /** Opening a workspace drops an explicit collapse so it shows its sessions. */
   revealWorkspace: (jid: string) => void;
+  setAutomationGroupExpanded: (automationId: string, expanded: boolean) => void;
   setPaletteOpen: (open: boolean) => void;
   setNavDrawerOpen: (open: boolean) => void;
   setCreateWorkspaceOpen: (
@@ -108,7 +112,11 @@ export const useShellStore = create<ShellState>((set, get) => ({
     Number(read(WIDTH_KEY) ?? SIDEBAR_DEFAULT_WIDTH),
   ),
   sidebarCollapsed: read(COLLAPSED_KEY) === '1',
-  expandedWorkspaces: readExpanded(),
+  expandedWorkspaces: (() => {
+    if (read(LEGACY_EXPANDED_KEY) !== null) write(LEGACY_EXPANDED_KEY, null);
+    return readExpanded(EXPANDED_KEY);
+  })(),
+  expandedAutomationGroups: readExpanded(EXPANDED_AUTOMATIONS_KEY),
   paletteOpen: false,
   navDrawerOpen: false,
   createWorkspaceOpen: false,
@@ -140,6 +148,13 @@ export const useShellStore = create<ShellState>((set, get) => ({
     delete next[jid];
     write(EXPANDED_KEY, JSON.stringify(next));
     set({ expandedWorkspaces: next });
+  },
+  setAutomationGroupExpanded: (automationId, expanded) => {
+    const next = { ...get().expandedAutomationGroups };
+    if (expanded) next[automationId] = true;
+    else delete next[automationId];
+    write(EXPANDED_AUTOMATIONS_KEY, JSON.stringify(next));
+    set({ expandedAutomationGroups: next });
   },
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   setNavDrawerOpen: (open) => set({ navDrawerOpen: open }),

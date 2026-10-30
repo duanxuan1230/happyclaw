@@ -179,7 +179,6 @@ describe('buildVolumeMounts — container proxy secret boundary', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       false,
       proxy,
     );
@@ -302,7 +301,6 @@ describe('buildVolumeMounts — Claude triad inheritance', () => {
       'main',
       undefined,
       undefined,
-      undefined,
       {
         id: 'host-context-agent',
         name: 'Host Context Agent',
@@ -408,7 +406,6 @@ describe('buildVolumeMounts — Claude triad inheritance', () => {
       'main',
       undefined,
       undefined,
-      undefined,
       profile('host_claude'),
     );
     expect(inheritedMounts).toContainEqual({
@@ -435,7 +432,6 @@ describe('buildVolumeMounts — Claude triad inheritance', () => {
       true,
       undefined,
       'main',
-      undefined,
       undefined,
       undefined,
       profile('managed'),
@@ -530,7 +526,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       {
         id: 'agent-profile-policy',
         name: 'Policy Agent',
@@ -569,7 +564,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       fakeGroup('grp-policy-skills', USER) as any,
       false,
       true,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -679,14 +673,12 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       profile(1),
     );
     const v2Mounts = buildVolumeMounts(
       fakeGroup('grp-policy-skills-v2', USER) as any,
       false,
       true,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -736,7 +728,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       profile,
     );
     fs.unlinkSync(path.join(skillDir, 'SKILL.md'));
@@ -746,7 +737,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
         fakeGroup('grp-policy-skill-after-delete', USER) as any,
         false,
         true,
-        undefined,
         undefined,
         undefined,
         undefined,
@@ -797,7 +787,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       fakeGroup('grp-policy-mcp', USER) as any,
       false,
       true,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -907,7 +896,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       {
         id: 'host-additive-profile',
         name: 'Host additive',
@@ -1013,7 +1001,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       profile,
     );
     fs.writeFileSync(
@@ -1030,7 +1017,6 @@ describe('buildVolumeMounts — AgentProfile runtime policy', () => {
         fakeGroup('grp-policy-mcp-after-disable', USER) as any,
         false,
         true,
-        undefined,
         undefined,
         undefined,
         undefined,

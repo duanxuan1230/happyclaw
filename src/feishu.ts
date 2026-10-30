@@ -952,7 +952,7 @@ export function resolveFeishuMessageAnchor(input: {
   lastMessageId?: string;
   /**
    * The turn's own input. `null` means the caller named an input that is not
-   * a Feishu message of this chat (e.g. a Web or scheduled-task input): never
+   * a Feishu message of this chat (e.g. a Web or automation input): never
    * guess an anchor then. `undefined` keeps the legacy latest-inbound guess
    * for callers that do not know their input.
    */
@@ -2680,7 +2680,7 @@ export function createFeishuConnection(
     rawTarget: string,
     inputMessageId: string,
   ): Promise<void> {
-    // Never trust the caller: a synthetic input (`scheduled-task-prompt:…`,
+    // Never trust the caller: a synthetic input (`automation-run-…`,
     // a Web uuid) is not a Feishu message and the API would only reject it.
     if (!isFeishuMessageId(inputMessageId)) {
       logger.debug(
@@ -2699,7 +2699,7 @@ export function createFeishuConnection(
 
   /**
    * The input id the host named for this output, when it is a Feishu message
-   * of the target chat. A Web/scheduled input or another chat's message is
+   * of the target chat. A Web/automation input or another chat's message is
    * reported as `null` (do not anchor); an unknown `om_` id after a restart
    * is trusted because the host admitted it for this route.
    */

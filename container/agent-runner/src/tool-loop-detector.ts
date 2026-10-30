@@ -1,7 +1,7 @@
 /**
  * Suspected tool-call loops, for the log only.
  *
- * Agent tools run unrestricted and IM or scheduled turns have nobody
+ * Agent tools run unrestricted and IM or automation turns have nobody
  * watching, so a model that keeps repeating calls burns the turn until
  * CONTAINER_TIMEOUT. This flags the usual loop shapes per scope (the main
  * Agent, and each sub-agent by its parent_tool_use_id). It never interrupts
@@ -46,8 +46,8 @@ const POLLING_TOOLS = new Set([
   // Agent-team members poll the shared task list for work.
   'TaskList',
   'TaskGet',
-  // Status of a scheduled run started with run_task_now.
-  'mcp__happyclaw__list_task_runs',
+  // Status of an automation run started with automation_run_now.
+  'mcp__happyclaw__automation_list_runs',
 ]);
 
 export function isPollingToolCall(name: string, input: unknown): boolean {

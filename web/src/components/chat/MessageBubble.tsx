@@ -53,6 +53,10 @@ import {
   incompleteReplyNote,
 } from '../../lib/message-presentation';
 import { copyToClipboard } from '../../utils/clipboard';
+import {
+  AutomationOriginLink,
+  AutomationPromptText,
+} from '../automations/AutomationOrigin';
 import { toast } from 'sonner';
 import { getMessageDisplayTimestamp } from '../../lib/message-timeline';
 import {
@@ -381,6 +385,11 @@ export const MessageBubble = memo(
       !(traceEvents && traceEvents.length > 0);
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
+    // An automation's input names its automation above the bubble.
+    const automationOrigin =
+      isUser && message.source_kind === 'automation_prompt'
+        ? (message.automation ?? null)
+        : null;
     const completedWorkflowRuns = useMemo(
       () => message.workflow_runs?.filter((run) => run.status !== 'running'),
       [message.workflow_runs],
@@ -711,6 +720,10 @@ export const MessageBubble = memo(
             </div>
           </div>
 
+          {automationOrigin && (
+            <AutomationOriginLink automation={automationOrigin} />
+          )}
+
           {/* Process: the settled card, or the reasoning and the trace */}
           {settledCard}
           {!settledSteps && hasReasoning && (
@@ -751,6 +764,11 @@ export const MessageBubble = memo(
                   groupJid={markdownJid}
                   variant="chat"
                 />
+              ) : automationOrigin ? (
+                <AutomationPromptText
+                  content={presentedContent}
+                  className="text-foreground"
+                />
               ) : (
                 <p className="text-body-lg break-words whitespace-pre-wrap text-foreground">
                   {presentedContent}
@@ -787,13 +805,20 @@ export const MessageBubble = memo(
       return (
         <div className="group mb-5 flex justify-end">
           <div className="flex max-w-[85%] min-w-0 flex-col items-end phone:max-w-[86%]">
+            {automationOrigin && (
+              <AutomationOriginLink automation={automationOrigin} />
+            )}
             <div className="relative flex flex-col items-end">
               {renderImages(cn('justify-end', hasOnlyImages && 'mb-0'))}
               {!hasOnlyImages && (
                 <div className="rounded-[1.25rem] bg-muted px-4 py-2.5 text-foreground phone:rounded-xl phone:border phone:border-surface-border phone:bg-surface-raised phone:p-3">
-                  <p className="text-body-lg break-words whitespace-pre-wrap">
-                    {presentedContent}
-                  </p>
+                  {automationOrigin ? (
+                    <AutomationPromptText content={presentedContent} />
+                  ) : (
+                    <p className="text-body-lg break-words whitespace-pre-wrap">
+                      {presentedContent}
+                    </p>
+                  )}
                 </div>
               )}
               <div className="absolute top-1/2 -left-8 -translate-y-1/2 transition-opacity pointer-coarse:-left-11 lg:opacity-0 lg:group-hover:opacity-100 lg:focus-within:opacity-100 lg:has-[[aria-expanded=true]]:opacity-100 phone:hidden">
@@ -952,6 +977,7 @@ export const MessageBubble = memo(
     prev.message.timestamp === next.message.timestamp &&
     prev.message.delivery_updated_at === next.message.delivery_updated_at &&
     prev.message.delivery_status === next.message.delivery_status &&
+    prev.message.automation?.name === next.message.automation?.name &&
     prev.showTime === next.showTime &&
     prev.thinkingContent === next.thinkingContent &&
     prev.thinkingDurationMs === next.thinkingDurationMs &&

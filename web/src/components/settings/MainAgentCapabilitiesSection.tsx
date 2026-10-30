@@ -151,7 +151,7 @@ export function MainAgentCapabilitiesSection() {
           modelConfigs={modelConfigs}
           hostAvailable
           labelPrefix="主 HappyClaw "
-          modelConfigDescription="Home 工作区、主会话、独立会话与定时任务都会继承该选择。自动选择只使用已启用配置；未启用的配置仍可在这里显式使用。"
+          modelConfigDescription="Home 工作区、主会话、独立会话与自动化都会继承该选择。自动选择只使用已启用配置；未启用的配置仍可在这里显式使用。"
         />
 
         <SettingsFormFooter>

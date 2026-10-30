@@ -46,7 +46,6 @@ function context(root: string, patch: Partial<McpContext> = {}): McpContext {
     isHome: false,
     isAdminHome: false,
     agentBuilderEnabled: false,
-    isScheduledTask: false,
     currentInputTurnId: 'turn-1',
     currentSessionId: 'session-1',
     workspaceIpc: root,
@@ -162,21 +161,6 @@ describe('Workspace Memory runtime boundary', () => {
     revokeWorkspaceMemoryWriteCapability(scope, capability.runnerInstanceId);
   });
 
-  test('scheduled/group-task MCP surfaces may propose memory', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-memory-ro-'));
-    roots.push(root);
-    for (const ctx of [
-      context(root, { isScheduledTask: true }),
-      context(root, { currentTaskId: 'task-1' }),
-    ]) {
-      const names = createMcpTools(ctx).map((tool) => tool.name);
-      expect(names).toContain('workspace_memory_search');
-      expect(names).toContain('workspace_memory_remember');
-      expect(names).toContain('workspace_memory_update');
-      expect(names).toContain('workspace_memory_forget');
-    }
-  });
-
   test('the PreToolUse matcher selects exactly the tools the guard can deny', () => {
     const matcher = new RegExp(WORKSPACE_MEMORY_WRITE_GUARD_MATCHER);
     for (const name of [
@@ -220,8 +204,8 @@ describe('Workspace Memory runtime boundary', () => {
     expect(
       tools.get('send_message')?.annotations?.readOnlyHint,
     ).toBeUndefined();
-    expect(tools.get('list_tasks')?.annotations?.readOnlyHint).toBe(true);
-    expect(tools.get('list_tasks')?._meta).toBeUndefined();
+    expect(tools.get('automation_list')?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.get('automation_list')?._meta).toBeUndefined();
     expect(
       tools.get('workspace_memory_remember')?.annotations?.readOnlyHint,
     ).toBeUndefined();
@@ -256,7 +240,7 @@ describe('Workspace Memory runtime boundary', () => {
     ).resolves.toEqual({});
   });
 
-  test('host admits conversation sessions and scheduled runs, and rejects spawn, task, and unknown turns', () => {
+  test('host admits conversation sessions and automation runs, and rejects spawn, task, and unknown turns', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
@@ -266,12 +250,12 @@ describe('Workspace Memory runtime boundary', () => {
         capabilityValid: true,
       }),
     ).toBeNull();
-    // A scheduled run writes only proposals (workspaceMemoryWriteMode), and
+    // An automation run writes only proposals (workspaceMemoryWriteMode), and
     // only with the runner's signed capability.
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: null,
         runtimeAgentKind: null,
         capabilityValid: true,
@@ -280,7 +264,7 @@ describe('Workspace Memory runtime boundary', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'create',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: null,
         runtimeAgentKind: null,
         capabilityValid: false,
@@ -318,7 +302,7 @@ describe('Workspace Memory runtime boundary', () => {
     expect(
       workspaceMemoryWriteRejection({
         operation: 'search',
-        hostTurnKind: 'scheduled',
+        hostTurnKind: 'automation',
         runtimeAgentId: 'agent-1',
         runtimeAgentKind: 'task',
         capabilityValid: false,
@@ -792,10 +776,7 @@ describe('Workspace Memory runtime boundary', () => {
     );
     roots.push(root);
     const tools = new Map(
-      createMcpTools(context(root, { isScheduledTask: true })).map((tool) => [
-        tool.name,
-        tool,
-      ]),
+      createMcpTools(context(root)).map((tool) => [tool.name, tool]),
     );
     const pending = tools
       .get('workspace_memory_remember')!
@@ -896,7 +877,7 @@ describe('Workspace Memory runtime boundary', () => {
     ).toBe(false);
     expect(
       ownerTurn(() => {
-        throw new Error('scheduled or non-human');
+        throw new Error('automation or non-human');
       }),
     ).toBe(false);
   });

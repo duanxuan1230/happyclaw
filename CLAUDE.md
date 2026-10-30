@@ -33,7 +33,7 @@ Agent Profile（身份、四段 Prompt、能力策略）
     ├── Main Session（可绑定私聊或普通群）
     ├── Runtime Session（独立 Claude 上下文，可绑定私聊或普通群；Host 工作区可选独立 git worktree）
     ├── Native Context Session（飞书话题等原生线程）
-    └── Scheduled Run（group 或 isolated）
+    └── Automation（自动化：按计划把提示词作为真实的一轮发进会话）
 ```
 
 重要命名边界：
@@ -44,6 +44,9 @@ Agent Profile（身份、四段 Prompt、能力策略）
   不是产品级 Agent Profile。
 - 同一个 Workspace 内的会话共享工作区文件目录，但拥有独立 Claude Session；
   工作区文件隔离与对话上下文隔离是两件事。
+- 自动化（Automation）属于 Workspace，每次运行都是某个真实会话里的一轮：绑定已有会话
+  （Agent 在聊天里创建时默认绑定当前会话）、每次新建或持续会话。运行会话是普通
+  `agents` 行（`source_kind='automation'`、`automation_id`），不是 `kind='task'`。
 - 例外是独立 worktree 的 Runtime Session：Host 工作区的工作目录是 git 仓库时，新建会话
   可选它，宿主在 `data/worktrees/{folder}/{sessionId}` 建分支 `happyclaw/<短 id>`，该会话
   每轮以它为 cwd，文件面板、项目 Skills 和 Review 面板也以它为根。worktree 缺失或损坏时
@@ -61,7 +64,7 @@ Agent Profile（身份、四段 Prompt、能力策略）
 | `src/db.ts`                        | SQLite Schema、迁移和持久化访问器                      |
 | `src/group-queue.ts`               | Session 串行、Runner 生命周期、重试与容量控制          |
 | `src/container-runner.ts`          | Host/Container Runner、挂载、环境与能力快照            |
-| `src/task-scheduler.ts`            | Cron、interval、once 调度和重启恢复                    |
+| `src/automation-runtime.ts`        | 自动化运行接入会话：注入输入、终态回写、Agent 工具 IPC |
 | `src/channel-mount-service.ts`     | 工作区/会话绑定和原生线程路由                          |
 | `src/channel-reliability-store.ts` | Inbox、Turn、Outbox、Streaming Card 的持久状态机       |
 | `src/im-manager.ts`                | 多用户、多账号渠道连接池                               |
@@ -70,6 +73,8 @@ Agent Profile（身份、四段 Prompt、能力策略）
 | `src/session-worktree.ts`          | 会话 worktree、工作区项目根与清理                      |
 | `src/git-review.ts`                | Review 面板的只读 git 状态与单文件 diff                |
 | `src/usage-limit-wait.ts`          | 撞用量上限后的等待与自动继续                           |
+| `src/automation-scheduler.ts`      | 自动化的到期触发、前置检查、错过与重启恢复             |
+| `src/automation-service.ts`        | 自动化的校验、权限，REST 与 Agent 工具共用             |
 | `src/memory-service.ts`            | Workspace Memory 召回、目录、提议与审计                |
 
 渠道实现位于：
@@ -99,14 +104,14 @@ Radix UI。路由以 `web/src/App.tsx` 为准：
 | `/chat/:groupFolder?`     | 工作台与会话                          |
 | `/agent-profiles`         | Agent 管理                            |
 | `/capabilities/:section?` | Skills、MCP、Plugins                  |
-| `/tasks`                  | 定时任务                              |
+| `/automations`            | 自动化                                |
 | `/usage`、`/billing`      | 用量与计费                            |
 | `/memory`                 | 记忆管理                              |
 | `/settings`               | 账户和系统设置                        |
 | `/monitor`                | 运行状态，需要 `manage_system_config` |
 | `/users`                  | 用户、邀请和审计管理                  |
 
-`/groups`、`/skills`、`/mcp-servers` 和 `/plugins` 是兼容重定向，不应新增独立页面。
+`/groups`、`/tasks`、`/skills`、`/mcp-servers` 和 `/plugins` 是兼容重定向，不应新增独立页面。
 
 桌面端外壳是一条可拖宽、可折叠（⌘B）的侧栏加嵌入式页面画布；侧栏包含导航和
 工作区 → 会话树，⌘K 打开命令面板。手机（`phone:`，触屏且窄于 1024px）由左上角
@@ -168,7 +173,7 @@ Web UI 约定：
   下一轮 Agent。Web 与飞书等渠道共用这套 Workspace/Session 级语义。
 - 显式“发送”或 `steer` 是优先屏障：它中断当前 loop，与它之前已排队的普通消息按可见
   顺序一起进入下一轮；之后才到达的普通消息不会被吞并，留到再下一轮合批。
-- 普通消息与定时任务使用明确的队列状态；失败采用有界指数退避。
+- 普通消息使用明确的队列状态；失败采用有界指数退避。
 - 中断分两类。显式停止（`/break`、Web 与飞书卡片的停止按钮、飞书撤回）在 `_interrupt`
   之外再写 `_interrupt_reason`（`{"queryId","reason":"stop"}`，两个文件都以临时文件加
   rename 写入）；`/steer`、「发送」、没有原因的旧信号，以及撞额度、换模型、模型上限、子代理
@@ -187,11 +192,22 @@ Web UI 约定：
   队列，在重置后 60 秒加 0–30 秒抖动自动继续（WS `usage_limit_wait`）；同一输入最多连续
   等待 3 次、单次不超过 7 天，超出按原逻辑失败。智能体绑定的连接只看这一个连接，自动池取
   全池最早的重置时刻。新消息或「立即发送」结束等待并合批；`/break`、取消、`/clear`、
-  `/fresh`、删除取消等待。定时任务进入 `retry_wait`，不消耗尝试次数。等待期间不占
-  Runner 或容器名额。
-- 定时任务连续因同一错误失败时只通知一次，恢复成功后通知一次「已恢复」。
-- Script 任务与其他任务共用 `CONTAINER_TIMEOUT`，不设置独立并发池或超时配置。
-- 服务重启时，错过的周期任务记为 `missed` 并推进计划；一次性任务仍会补跑。
+  `/fresh`、删除取消等待。等待期间不占 Runner 或容器名额。
+- 自动化到期时，调度器在一个事务里写运行记录并推进下次触发，再把提示词作为合成输入
+  （`source_kind='automation_prompt'`、`messages.automation_run_id`）写进目标会话的
+  durable 队列：排在活跃轮次和已排队输入之后，不 steer，不与用户消息或别的运行合批；
+  回复按这条输入的 `source_jid`（创建时冻结的来源路由，例如飞书话题）投递。Agent 看到的
+  运行上下文（自动化 id、计划、停止条件、无人值守、安静模式）作为附件里的隐藏条目存在
+  这条输入上，追加在用户消息之后，不进 system prompt；Web 只显示提示词本身。
+- 同一自动化同时最多一个运行；到期时上一次还在排队或运行，本次记为 `skipped`。服务停机
+  期间到期的周期运行不补跑，记一条 `missed` 并从现在起算下次；一次性的仍会补跑。
+  `endAt` 到达或 Agent 调用 `automation_complete` 后状态为 `completed`。
+- 前置检查和脚本只用于管理员的 Host 工作区：`/bin/sh -c`，环境变量白名单，默认超时
+  60 秒；退出码 0 执行、2 跳过（不耗 token）、其他记失败。脚本与 Agent 轮次共用
+  `CONTAINER_TIMEOUT` 无输出看门狗，不设置独立并发池。
+- 撞用量上限时，自动化输入与其他输入一样留在 durable 队列里等待，运行保持 `queued`。
+  安静模式（`silentWhenIdle`）下没有发现变化的成功运行生为已读、不向 IM 投递；失败
+  总是通知，同一错误连续失败只通知一次，恢复成功后通知一次「已恢复」。
 - 后台子代理未结清时 Runner 扣住本轮结果，游标不前进，重启后整轮重跑。子代理（Task）
   的启动、终态和最终答复按发起它的输入写入 `subagent_checkpoints`；重跑同一输入时
   这些断点作为上下文回注给主 Agent：已完成的直接汇总，未完成的标明中断，部署、迁移、
@@ -231,7 +247,7 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   `ScheduleWakeup`、`EnterWorktree`/`ExitWorktree`、`EnterPlanMode`/`ExitPlanMode`）：
   Runner 每轮结束会关闭 CLI，这些承诺会静默丢失，计划模式也等不到审批，因此默认禁用，
   并设置 `CLAUDE_CODE_DISABLE_CRON=1` 关闭 CLI 自带的定时调度；定时需求走 HappyClaw
-  的 `schedule_task`。
+  的自动化（`automation_*` 工具）。
 - Runner 安装 `canUseTool`（`builtin-tool-policy.ts`），CLI 才会注册
   AskUserQuestion；普通调用仍由 `bypassPermissions` 直接放行，不经过它，其余请求人工
   确认的调用（如 Hook 返回 `ask`）与没有它时一样被拒绝。Runner 没有交互作答通道：
@@ -268,8 +284,8 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - Skill、MCP、Plugin 变更会停相关 Runner 并开新 SDK 会话，下一轮自动补注近期历史；
   运行中的 Agent 自己调用 `install_skill` 时，本轮结果送达后才重置。安装、卸载 Skill
   只接受工作区主人亲自发起的轮次。
-- Workspace Memory 只有整批输入都来自工作区主人的互动轮次才直接写入；群成员轮次与定时
-  任务的写入存为 `proposed`，在记忆页确认后才参与召回。每轮按用户本人正文的词项召回
+- Workspace Memory 只有整批输入都来自工作区主人的互动轮次才直接写入；群成员轮次与自动化
+  运行的写入存为 `proposed`，在记忆页确认后才参与召回。每轮按用户本人正文的词项召回
   相关条目（`workspace_memory_recall_fts`），全部条目的标题目录随每轮笔记增量注入。
 - 禁用、删除或缺失的精确选择能力必须让配置失败，不得静默替换。
 - Prompt 或能力身份变化后必须失效旧的暖 Runner。
@@ -436,7 +452,7 @@ cancelled 结束且游标前进。批次含其他输入时不中断。回复锚�
 普通消息默认就是 durable queue，不存在显式 `/queue` 控制命令。旧的 `/queue ...`
 按普通 Agent 输入处理。飞书 Reaction 属于真正执行的 batch，而不是入站消息：同一 batch
 最多在最后一条飞书输入上显示一个 `OnIt`，queued 消息不显示；只有真实飞书消息 ID
-（`om_…`）能成为 `OnIt` 目标，定时任务提示等宿主合成的输入不加 Reaction。同一 Session
+（`om_…`）能成为 `OnIt` 目标，自动化提示等宿主合成的输入不加 Reaction。同一 Session
 的 Reaction 操作在该 Session 的确认链上串行，上一批的删除先于下一批的添加到达飞书，
 但添加和清理都不阻塞 Agent 启动或排队交接；彼此独立的 Session 可以并发显示。
 
@@ -478,18 +494,18 @@ data/
   `agents`
 - 渠道：`channel_accounts`、`channel_mounts`、`agent_channel_mounts`、
   `im_context_bindings`
-- 消息与调度：`chats`、`messages`、`scheduled_tasks`、`task_runs`、
-  `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、执行
-  轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）、
-  `usage_limit_waits`、`task_failure_notices`
+- 消息：`chats`、`messages`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、
+  执行轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）、
+  `usage_limit_waits`
+- 自动化：`automations`、`automation_runs`、`automation_failure_streaks`
 - 记忆：`workspace_memory_*`（含召回索引 `workspace_memory_recall_fts`）
 - 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary`、
   `usage_event_connections` 及 `billing_*`、订阅、余额和兑换码相关表
 
 Channel Reliability 的 Inbox/Turn/Outbox/Card 表由
 `src/channel-reliability-store.ts` 在同一数据库连接上创建；同样，`session_worktrees` 由
-`src/session-worktree-store.ts`，等待、补注、失败通知和用量连接表由
-`src/runtime-state-store.ts` 创建。
+`src/session-worktree-store.ts`，自动化表由 `src/automation-store.ts`，等待、补注和用量
+连接表由 `src/runtime-state-store.ts` 创建。
 
 ## 8. 认证与权限
 

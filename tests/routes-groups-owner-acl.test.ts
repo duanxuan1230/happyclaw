@@ -524,9 +524,9 @@ describe('DELETE /:jid mutation pause', () => {
   test('work accepted during pre-stop is discarded and never runs after deletion', async () => {
     const jid = 'web:delete-mutation-race';
     const folder = 'delete-mutation-race';
-    const descendantJid = `${jid}#task:arrived-during-delete`;
-    const postDeleteDescendantJid = `${jid}#task:first-seen-after-delete`;
-    const lateDescendantJid = `${jid}#task:late-after-all-pauses`;
+    const descendantJid = `${jid}#agent:arrived-during-delete`;
+    const postDeleteDescendantJid = `${jid}#agent:first-seen-after-delete`;
+    const lateDescendantJid = `${jid}#agent:late-after-all-pauses`;
     const profile = db.createAgentProfile({
       ownerUserId: OWNER_ID,
       name: 'Delete Mutation Agent',
@@ -552,12 +552,12 @@ describe('DELETE /:jid mutation pause', () => {
       // DELETE removes that cache entry before finally discarding its token, so
       // Queue must retain each parked state's original mutation key rather than
       // dynamically degrading from `folder` to `jid` during cleanup.
-      const taskSeparator = groupJid.indexOf('#task:');
-      if (taskSeparator >= 0) {
-        const baseJid = groupJid.slice(0, taskSeparator);
-        const taskId = groupJid.slice(taskSeparator + 6);
+      const agentSeparator = groupJid.indexOf('#agent:');
+      if (agentSeparator >= 0) {
+        const baseJid = groupJid.slice(0, agentSeparator);
+        const agentId = groupJid.slice(agentSeparator + 7);
         const cached = webDepsCache[baseJid] as { folder?: string } | undefined;
-        return `${cached?.folder ?? baseJid}#task:${taskId}`;
+        return `${cached?.folder ?? baseJid}#${agentId}`;
       }
       const cached = webDepsCache[groupJid] as { folder?: string } | undefined;
       return cached?.folder ?? groupJid;

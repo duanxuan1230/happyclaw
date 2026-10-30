@@ -17,6 +17,7 @@ import {
   beforeEach,
   describe,
   expect,
+  onTestFinished,
   test,
   vi,
 } from 'vitest';
@@ -73,6 +74,11 @@ const agentRoutes = (await import('../src/routes/agents.js')).default;
 const gitRoutes = (await import('../src/routes/git-review.js')).default;
 const groupRoutes = (await import('../src/routes/groups.js')).default;
 const fileRoutes = (await import('../src/routes/files.js')).default;
+const automationStore = await import('../src/automation-store.js');
+const { createAutomationCore } = await import('../src/automation-service.js');
+const { setAutomationRuntimeService } =
+  await import('../src/automation-run-ledger.js');
+const automationHarness = await import('./automation-harness.js');
 
 const ADMIN = 'admin-1';
 const queueGroups: Array<{
@@ -767,6 +773,25 @@ describe('deleting worktree sessions', () => {
     const worktree = store.getSessionWorktree(sessionId)!;
     fs.writeFileSync(path.join(worktree.worktree_path, 'wip.txt'), 'wip\n');
 
+    // Automations outlive the rebuild; one bound to the removed session pauses.
+    const runtime = automationHarness.createFakeRuntime();
+    const sessionJid = `${jid}#agent:${sessionId}`;
+    runtime.sessions.add(sessionJid);
+    const { service } = createAutomationCore(runtime.deps);
+    setAutomationRuntimeService(service);
+    onTestFinished(() => setAutomationRuntimeService(null));
+    const actor = { kind: 'web', userId: ADMIN, isAdmin: true } as const;
+    const manual = { schedule: { kind: 'manual' as const } };
+    const workspaceLevel = service.create(actor, {
+      workspaceJid: jid,
+      ...automationHarness.draft(manual),
+    });
+    const bound = service.create(actor, {
+      workspaceJid: jid,
+      ...automationHarness.draft({ ...manual, sessionMode: 'bound' }),
+      targetSessionJid: sessionJid,
+    });
+
     const refused = await call(groupRoutes, `/${enc(jid)}/clear-history`, {
       method: 'POST',
     });
@@ -781,6 +806,13 @@ describe('deleting worktree sessions', () => {
     );
     expect(forced.status).toBe(200);
     expect(db.getAgent(sessionId)).toBeUndefined();
+    expect(automationStore.getAutomation(workspaceLevel.id)?.status).toBe(
+      'active',
+    );
+    expect(automationStore.getAutomation(bound.id)).toMatchObject({
+      status: 'paused',
+      statusReason: '绑定的会话已删除',
+    });
     expect(fs.existsSync(worktree.worktree_path)).toBe(false);
     expect(git(repo, 'branch', '--list', worktree.branch)).toContain(
       worktree.branch,

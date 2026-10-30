@@ -1,13 +1,10 @@
 import { Hono, type Context } from 'hono';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 import type { Variables } from '../web-context.js';
 import {
   getWebDeps,
   hasHostExecutionPermission,
   isHostExecutionGroup,
-  projectWebAgentRemoved,
   projectWebAgentStatus,
 } from '../web-context.js';
 import {
@@ -15,7 +12,6 @@ import {
   dirtyWorktreesConflict,
   findDirtySessionWorktrees,
   refreshSessionWorktreeStatus,
-  forgetSessionWorktree,
   removeSessionWorktree,
   toSessionWorktreePayload,
   WorktreeUnavailableError,
@@ -28,17 +24,10 @@ import {
 import { authMiddleware } from '../middleware/auth.js';
 import { canAccessGroup, canModifyGroup } from '../group-acl.js';
 import {
-  clearSessionChannelOwner,
   getRegisteredGroup,
   getAllRegisteredGroups,
   listAgentsByJid,
   getAgent,
-  deleteAgent,
-  updateAgentStatus,
-  createAgent,
-  ensureChatExists,
-  deleteMessagesForChatJid,
-  deleteSession,
   getGroupsByTargetAgent,
   getGroupsByTargetAgents,
   setRegisteredGroup,
@@ -53,7 +42,6 @@ import {
   getRegisteredGroupNames,
   getChannelAccount,
 } from '../db.js';
-import { DATA_DIR } from '../config.js';
 import type {
   AudienceMode,
   AuthUser,
@@ -62,7 +50,11 @@ import type {
 } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
-import { ensureAgentDirectories } from '../utils.js';
+import {
+  createConversationSession,
+  deleteConversationSession,
+} from '../session-factory.js';
+import { getAutomationService } from '../automation-run-ledger.js';
 import {
   buildSessionMountUpdate,
   buildDetachedWorkspaceUpdate,
@@ -193,6 +185,46 @@ function unbindError(result: { reason: string }): string {
 }
 
 // GET /api/groups/:jid/agents — list all agents for a group
+/**
+ * Names of the user's automations in a workspace, for labelling their run
+ * sessions. Another user's automation stays unnamed (owner isolation).
+ */
+function automationNamesFor(
+  user: AuthUser,
+  jid: string,
+  sessions: SubAgent[],
+): Map<string, string> {
+  const service = getAutomationService();
+  if (!service || !sessions.some((a) => a.source_kind === 'automation')) {
+    return new Map();
+  }
+  try {
+    return new Map(
+      service
+        .list(
+          { kind: 'web', userId: user.id, isAdmin: user.role === 'admin' },
+          { workspaceJid: jid },
+        )
+        .map((automation) => [automation.id, automation.name]),
+    );
+  } catch (err) {
+    logger.warn({ err, jid }, 'Failed to list automations for sessions');
+    return new Map();
+  }
+}
+
+/** `automation_id` / `automation_name` of an automation run session. */
+function automationFields(
+  session: SubAgent,
+  names: Map<string, string>,
+): { automation_id?: string; automation_name?: string | null } {
+  if (session.source_kind !== 'automation' || !session.automation_id) return {};
+  return {
+    automation_id: session.automation_id,
+    automation_name: names.get(session.automation_id) ?? null,
+  };
+}
+
 router.get('/:jid/agents', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const user = c.get('user');
@@ -207,6 +239,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   }
 
   const agents = listAgentsByJid(jid);
+  const automationNames = automationNamesFor(user, jid, agents);
   const virtualChatJids = agents
     .filter((a) => a.kind === 'conversation')
     .map((a) => `${jid}#agent:${a.id}`);
@@ -231,6 +264,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
         root_message_id: a.root_message_id ?? null,
         title_source: a.title_source ?? null,
         last_active_at: a.last_active_at ?? null,
+        ...automationFields(a, automationNames),
       };
       if (a.kind === 'conversation') {
         const linked = linkedByAgent.get(a.id) ?? [];
@@ -269,6 +303,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
   }
 
   const agents = listAgentsByJid(jid).filter((a) => a.kind === 'conversation');
+  const automationNames = automationNamesFor(user, jid, agents);
   const virtualChatJids = agents.map((a) => `${jid}#agent:${a.id}`);
   const latestByChatJid = getLatestMessagePreviewPerChat(virtualChatJids);
   const mountsBySession = listChannelMountsBySessions(agents.map((a) => a.id));
@@ -315,6 +350,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
           root_message_id: a.root_message_id ?? null,
           title_source: a.title_source ?? null,
           last_active_at: a.last_active_at ?? null,
+          ...automationFields(a, automationNames),
           latest_message: latest
             ? {
                 content: latest.content,
@@ -413,27 +449,6 @@ function worktreesBySession(folder: string): Map<string, SessionWorktree> {
   );
 }
 
-/** Insert the session; a failed insert must not strand its new worktree. */
-async function insertSession(
-  session: SubAgent,
-  worktree: SessionWorktree | null,
-): Promise<void> {
-  try {
-    createAgent(session);
-  } catch (error) {
-    if (worktree) {
-      await removeSessionWorktree(session.id, { force: true }).catch(
-        (cleanupError) =>
-          logger.error(
-            { err: cleanupError, sessionId: session.id },
-            'Failed to remove the worktree of a session that was not created',
-          ),
-      );
-    }
-    throw error;
-  }
-}
-
 /**
  * Refuse to delete a session whose worktree holds uncommitted changes until
  * the caller confirms with `force_worktree=true`. Checked before the runner
@@ -530,12 +545,10 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
     return c.json({ error: NON_WORKSPACE_SESSION_PARENT_ERROR }, 400);
   }
   const body = await c.req.json().catch(() => ({}));
-  let name = typeof body.name === 'string' ? body.name.trim() : '';
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
   if (name.length > 40) {
     return c.json({ error: 'Name too long (max 40 chars)' }, 400);
   }
-  const isAutoTitle = !name;
-  if (!name) name = '新对话';
   const description =
     typeof body.description === 'string' ? body.description.trim() : '';
 
@@ -548,45 +561,15 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
     sessionId: agentId,
   });
   if (worktree instanceof Response) return worktree;
-  const now = new Date().toISOString();
-
-  const agent: SubAgent = {
-    id: agentId,
-    group_folder: group.folder,
-    chat_jid: jid,
+  const agent = await createConversationSession({
+    workspaceJid: jid,
+    group,
+    createdBy: user.id,
     name,
-    prompt: description,
-    status: 'idle',
-    kind: 'conversation',
-    created_by: user.id,
-    created_at: now,
-    completed_at: null,
-    result_summary: null,
-    last_im_jid: null,
-    spawned_from_jid: null,
-    // Channel-native topics and Web-created conversations intentionally
-    // coexist in one workspace. The source belongs to the session, not to
-    // the workspace-wide navigation mode.
-    source_kind: 'manual',
-    title_source: isAutoTitle ? 'auto_pending' : 'manual',
-  };
-
-  await insertSession(agent, worktree);
-
-  // Create IPC + session directories
-  ensureAgentDirectories(group.folder, agentId);
-
-  // Create virtual chat record for this agent's messages
-  const virtualChatJid = `${jid}#agent:${agentId}`;
-  ensureChatExists(virtualChatJid);
-
-  // Broadcast through the injected Web projection boundary.
-  projectWebAgentStatus(jid, agentId, 'idle', name, description);
-
-  logger.info(
-    { agentId, jid, name, userId: user.id },
-    'User conversation created',
-  );
+    description,
+    sessionId: agentId,
+    worktree,
+  });
 
   return c.json({
     agent: {
@@ -632,8 +615,6 @@ router.post('/:jid/sessions', authMiddleware, async (c) => {
   if (name.length > 40) {
     return c.json({ error: 'Name too long (max 40 chars)' }, 400);
   }
-  const isAutoTitle = !name;
-  if (!name) name = '新对话';
   const description =
     typeof body.description === 'string' ? body.description.trim() : '';
 
@@ -646,38 +627,18 @@ router.post('/:jid/sessions', authMiddleware, async (c) => {
     sessionId,
   });
   if (worktree instanceof Response) return worktree;
-  const now = new Date().toISOString();
-  const session: SubAgent = {
-    id: sessionId,
-    group_folder: group.folder,
-    chat_jid: jid,
+  // A thread-mapped channel only controls its own native sessions. It must
+  // not remove the workspace owner's ability to create independent Web
+  // sessions in the same workspace.
+  const session = await createConversationSession({
+    workspaceJid: jid,
+    group,
+    createdBy: user.id,
     name,
-    prompt: description,
-    status: 'idle',
-    kind: 'conversation',
-    created_by: user.id,
-    created_at: now,
-    completed_at: null,
-    result_summary: null,
-    last_im_jid: null,
-    spawned_from_jid: null,
-    // A thread-mapped channel only controls its own native sessions. It must
-    // not remove the workspace owner's ability to create independent Web
-    // sessions in the same workspace.
-    source_kind: 'manual',
-    title_source: isAutoTitle ? 'auto_pending' : 'manual',
-  };
-
-  await insertSession(session, worktree);
-  ensureAgentDirectories(group.folder, sessionId);
-  ensureChatExists(`${jid}#agent:${sessionId}`);
-
-  projectWebAgentStatus(jid, sessionId, 'idle', name, description);
-
-  logger.info(
-    { sessionId, jid, name, userId: user.id },
-    'Workspace session created',
-  );
+    description,
+    sessionId,
+    worktree,
+  });
 
   const payload = {
     id: session.id,
@@ -913,66 +874,18 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   });
   if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
   try {
-    // If the agent is still running or idle, stop the process
-    if (agent.status === 'running' || agent.status === 'idle') {
-      updateAgentStatus(agentId, 'error', '用户手动停止');
-      // Stop running process via queue
-      const deps = getWebDeps();
-      if (deps) {
-        const virtualJid = `${jid}#agent:${agentId}`;
-        deps.queue.stopGroup(virtualJid);
-      }
-    }
-
-    // Clean up IPC/session directories
-    const agentIpcDir = path.join(
-      DATA_DIR,
-      'ipc',
-      group.folder,
-      'agents',
-      agentId,
-    );
-    try {
-      fs.rmSync(agentIpcDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-    const agentSessionDir = path.join(
-      DATA_DIR,
-      'sessions',
-      group.folder,
-      'agents',
-      agentId,
-    );
-    try {
-      fs.rmSync(agentSessionDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-
-    // Delete virtual chat messages for conversation agents
-    if (agent.kind === 'conversation') {
-      const virtualChatJid = `${jid}#agent:${agentId}`;
-      deleteMessagesForChatJid(virtualChatJid);
-
-      // Note: IM bindings are checked above and block deletion if present.
-      // No auto-clear here — user must unbind explicitly before deleting.
-    }
-
-    // Delete session records
-    deleteSession(group.folder, agentId);
-    clearSessionChannelOwner(group.folder, agentId);
-
-    deleteAgent(agentId);
-    forgetSessionWorktree(agentId);
+    // IM bindings are checked above and block deletion if present; the user
+    // must unbind explicitly before deleting.
+    await deleteConversationSession({
+      workspaceJid: jid,
+      group,
+      session: agent,
+    });
   } finally {
     // The worktree is gone: whatever happened above, the lane's work must
     // not run on without it.
     worktreeRelease.finish();
   }
-
-  // Broadcast removal
-  projectWebAgentRemoved(jid, agentId, agent.name);
 
   logger.info({ agentId, jid, userId: user.id }, 'Agent deleted by user');
   return c.json({ success: true });
@@ -1078,35 +991,12 @@ router.delete('/:jid/sessions/:sessionId', authMiddleware, async (c) => {
   });
   if ('refusal' in worktreeRelease) return worktreeRelease.refusal;
   try {
-    if (session.status === 'running' || session.status === 'idle') {
-      updateAgentStatus(sessionId, 'error', '用户手动停止');
-      const deps = getWebDeps();
-      if (deps) deps.queue.stopGroup(`${jid}#agent:${sessionId}`);
-    }
-
-    for (const dir of [
-      path.join(DATA_DIR, 'ipc', group.folder, 'agents', sessionId),
-      path.join(DATA_DIR, 'sessions', group.folder, 'agents', sessionId),
-    ]) {
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
-    }
-
-    deleteMessagesForChatJid(`${jid}#agent:${sessionId}`);
-    deleteSession(group.folder, sessionId);
-    clearSessionChannelOwner(group.folder, sessionId);
-    deleteAgent(sessionId);
-    forgetSessionWorktree(sessionId);
+    await deleteConversationSession({ workspaceJid: jid, group, session });
   } finally {
     // The worktree is gone: whatever happened above, the lane's work must
     // not run on without it.
     worktreeRelease.finish();
   }
-
-  projectWebAgentRemoved(jid, sessionId, session.name);
 
   logger.info({ sessionId, jid, userId: user.id }, 'Session deleted by user');
   return c.json({ success: true });

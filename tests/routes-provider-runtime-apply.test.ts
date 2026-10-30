@@ -522,14 +522,14 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
   test('keeps a capacity-queued descendant task instead of dropping it', async () => {
     const folder = unique('queued-work');
     const jid = `web:${folder}`;
-    const descendantJid = `${jid}#task:scheduled`;
+    const descendantJid = `${jid}#agent:queued`;
     const group = registerWorkspace(jid, folder);
     const queue = new GroupQueue();
     liveQueue = queue;
     queue.setSerializationKeyResolver((candidate) => {
-      const taskSeparator = candidate.indexOf('#task:');
-      if (taskSeparator >= 0) {
-        return `${folder}#task:${candidate.slice(taskSeparator + 6)}`;
+      const agentSeparator = candidate.indexOf('#agent:');
+      if (agentSeparator >= 0) {
+        return `${folder}#${candidate.slice(agentSeparator + 7)}`;
       }
       return candidate === jid ? folder : candidate;
     });
@@ -543,7 +543,7 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
     expect(
       queue.enqueueTask(
         descendantJid,
-        'scheduled',
+        'queued',
         async () => {
           runs += 1;
         },

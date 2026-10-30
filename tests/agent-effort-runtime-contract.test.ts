@@ -9,11 +9,11 @@ function read(relativePath: string): string {
 }
 
 describe('Agent effort runtime contracts', () => {
-  test('normal conversations and isolated scheduled tasks forward runtime policy', () => {
+  test('conversations forward runtime policy', () => {
     expect(read('src/runner-agent-profile.ts')).toMatch(
       /function toRunnerAgentProfile[\s\S]*runtimePolicy: profile\.runtime_policy/,
     );
-    for (const caller of ['src/index.ts', 'src/task-scheduler.ts']) {
+    for (const caller of ['src/index.ts']) {
       expect(read(caller)).toContain('agentProfile: toRunnerAgentProfile(');
     }
   });

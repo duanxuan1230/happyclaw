@@ -46,9 +46,6 @@ function host(inputs: Record<string, AgentBuilderPersistedInput>) {
   }));
   const activeAgentBuilderTurns = new AgentBuilderTurnRegistry();
   const globals: Record<string, unknown> = {
-    resolveScheduledTaskIpcRunId: () => null,
-    extractDurableTaskRunIdFromNamespace: () => null,
-    getTaskRunById: () => undefined,
     getUserHomeGroup: () => undefined,
     resolveBroadcastFolder: () => FOLDER,
     registeredGroups: registrations,
@@ -87,11 +84,10 @@ function host(inputs: Record<string, AgentBuilderPersistedInput>) {
    */
   const create = async (
     turnId: string,
-    taskRunId: string | null = null,
     sign = true,
     admittedTurnId: string | null = turnId,
   ) => {
-    const scope = { groupFolder: FOLDER, agentId: null, taskRunId };
+    const scope = { groupFolder: FOLDER, agentId: null };
     const capability = issueWorkspaceMemoryWriteCapability(
       scope,
       admittedTurnId,
@@ -121,15 +117,17 @@ function host(inputs: Record<string, AgentBuilderPersistedInput>) {
         registrations['web:team'],
         '/tmp/unused',
         null,
-        taskRunId,
       );
     } finally {
       revokeWorkspaceMemoryWriteCapability(scope, capability.runnerInstanceId);
     }
     return results.at(-1);
   };
-  const start = (chatJid: string, messageId: string) =>
-    activeAgentBuilderTurns.set(FOLDER, chatJid, messageId);
+  const start = (
+    chatJid: string,
+    messageId: string,
+    automationRunId: string | null = null,
+  ) => activeAgentBuilderTurns.set(FOLDER, chatJid, messageId, automationRunId);
   return { create, start, createWorkspaceMemory };
 }
 
@@ -142,7 +140,16 @@ const human = (
   source_jid: sourceJid,
   is_from_me: 0,
   source_kind: null,
-  task_id: null,
+  automation_run_id: null,
+});
+
+const automationInput = (runId: string): AgentBuilderPersistedInput => ({
+  content: 'check the build',
+  sender: 'automation',
+  source_jid: 'web:team',
+  is_from_me: 0,
+  source_kind: 'automation_prompt',
+  automation_run_id: runId,
 });
 
 describe('what a Workspace Memory write becomes on the host', () => {
@@ -169,41 +176,27 @@ describe('what a Workspace Memory write becomes on the host', () => {
     });
   });
 
-  test('a scheduled run proposes, and only with its signed capability', async () => {
-    const { create, createWorkspaceMemory } = host({});
-    expect(await create('run-1', 'task-run-1')).toMatchObject({
+  test('an automation run proposes, and only with its signed capability', async () => {
+    const { create, start, createWorkspaceMemory } = host({
+      'automation-run-r1': automationInput('r1'),
+      'automation-run-r2': automationInput('r2'),
+    });
+    start('web:team', 'automation-run-r1', 'r1');
+    expect(await create('automation-run-r1')).toMatchObject({
       success: true,
       proposal: true,
     });
-    expect(await create('run-2', 'task-run-2', false)).toMatchObject({
-      success: false,
-      code: 'workspace_memory_invalid_capability',
-    });
-    expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
-  });
-
-  test('an isolated scheduled run without a turn id writes under its run id', async () => {
-    // Its launch admits the run id as the first turn, and the runner names
-    // that id on its writes.
-    const { create, createWorkspaceMemory } = host({});
-    expect(
-      await create('task-run-fallback-1', 'task-run-fallback-1'),
-    ).toMatchObject({ success: true, proposal: true });
-    expect(createWorkspaceMemory).toHaveBeenCalledTimes(1);
     expect(createWorkspaceMemory).toHaveBeenLastCalledWith(
       expect.objectContaining({
         proposal: true,
         sourceType: 'scheduled_task',
         provenance: expect.objectContaining({
-          sourceId: 'task-run-fallback-1',
+          sourceId: 'automation-run-r1',
         }),
       }),
     );
-
-    // A runner that was admitted no turn cannot write, signature or not.
-    expect(
-      await create('task-run-fallback-2', 'task-run-fallback-2', true, null),
-    ).toMatchObject({
+    start('web:team', 'automation-run-r2', 'r2');
+    expect(await create('automation-run-r2', false)).toMatchObject({
       success: false,
       code: 'workspace_memory_invalid_capability',
     });

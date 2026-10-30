@@ -31,7 +31,6 @@ import {
   IpcTurnDeliveryTracker,
   IpcTurnOutputCorrelation,
   latestIpcInputMessage,
-  scheduledGroupRunIdFromIpcMessages,
 } from '../container/agent-runner/src/ipc-delivery.js';
 import { normalizeChannelTurnContext } from '../container/agent-runner/src/types.js';
 
@@ -57,7 +56,6 @@ vi.mock('../src/runtime-config.js', () => ({
   }),
 }));
 vi.mock('../src/db.js', () => ({
-  getTaskById: () => undefined,
   getChannelAccount: () => undefined,
 }));
 const { GroupQueue } = await import('../src/group-queue.js');
@@ -276,15 +274,11 @@ async function fixture(
     processingTypingLeaseIdsByCompletion: new Map(),
     processingIndicatorJidsByInput: new Map(),
     rememberScheduledGroupRuns: vi.fn(),
-    injectionTaskId: undefined,
+    messagesToSend: [],
     lastSourceJidForRoute: warm.sourceJid,
     invokeActiveRouteUpdater: vi.fn(),
     SAFE_REQUEST_ID_RE: /^[A-Za-z0-9-]+$/,
     verifyAndConsumeWorkspaceMemoryMutation,
-    resolveScheduledTaskIpcRunId: () => null,
-    extractDurableTaskRunIdFromNamespace: () => null,
-    getTaskRunById: () => undefined,
-    resolveBroadcastFolder: () => 'review',
     canAccessGroup: vi.fn(),
     isFeishuCapabilityMutation: () => false,
     imManager: {
@@ -344,7 +338,6 @@ async function fixture(
           undefined,
           globals.realMainInjected,
           warm.sourceJid,
-          undefined,
           globals.createIpcDeliveryTarget(),
           warm,
           (receipt) =>
@@ -502,7 +495,6 @@ function runner(f: Awaited<ReturnType<typeof fixture>>) {
       runnerInstanceId: f.auth.runnerInstanceId,
       secret: f.auth.signingSecret,
       agentId: f.agentId,
-      taskRunId: null,
     },
     workspaceIpc: path.dirname(f.input),
     workspaceGroup: paths.root,
@@ -512,7 +504,6 @@ function runner(f: Awaited<ReturnType<typeof fixture>>) {
     ipcDeliveryTracker: tracker,
     outputCorrelation: new IpcTurnOutputCorrelation(tracker, 'cold-a'),
     latestIpcInputMessage,
-    scheduledGroupRunIdFromIpcMessages,
     normalizeChannelTurnContext,
     emitOutput: true,
     mcpToolsContext: ctx,
@@ -865,7 +856,6 @@ test.each([false, true])(
           );
       },
       'web:review',
-      undefined,
       { chatJid: f.jid, cursor, coveredCursors: [cursor] },
       web,
       (receipt) =>

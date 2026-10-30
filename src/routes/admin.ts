@@ -84,7 +84,6 @@ import {
   markAdminHostOnlyCleanupPending,
 } from '../admin-host-only-runtime.js';
 import { getSystemSettings } from '../runtime-config.js';
-import { notifyTaskSchedulerChanged } from '../task-scheduler.js';
 import { onPasswordHashBusy } from '../password-hash-busy.js';
 
 const adminRoutes = new Hono<{ Variables: Variables }>();
@@ -181,9 +180,6 @@ async function commitActiveAdminHostOnlyGrant(
         if (fresh) liveGroups[jid] = fresh;
       }
       for (const folder of folders) delete deps.sessions[folder];
-    }
-    if (migration.migratedTaskIds.length > 0) {
-      notifyTaskSchedulerChanged();
     }
   };
 

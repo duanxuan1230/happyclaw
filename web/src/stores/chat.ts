@@ -122,7 +122,7 @@ export interface Message {
   source_kind?:
     | 'sdk_final'
     | 'sdk_send_message'
-    | 'scheduled_task_result'
+    | 'automation_prompt'
     | 'interrupt_partial'
     | 'legacy'
     | null;
@@ -146,6 +146,14 @@ export interface Message {
     | null;
   delivery_run_id?: string | null;
   delivery_updated_at?: string | null;
+  /** The automation that sent an `automation_prompt` input. */
+  automation?: MessageAutomationOrigin | null;
+}
+
+export interface MessageAutomationOrigin {
+  id: string;
+  name: string;
+  runId: string;
 }
 
 export type FollowUpMode = 'queue' | 'steer';
@@ -1016,7 +1024,6 @@ function isUsageAnswer(message: Message, runtimeJid: string): boolean {
     message.is_from_me &&
     message.sender !== '__system__' &&
     message.source_kind !== 'sdk_send_message' &&
-    message.source_kind !== 'scheduled_task_result' &&
     !!message.turn_id
   );
 }
@@ -1224,12 +1231,7 @@ interface ChatState {
     agentId?: string,
     runId?: string,
   ) => void;
-  handleWsNewMessage: (
-    chatJid: string,
-    wsMsg: any,
-    agentId?: string,
-    source?: string,
-  ) => void;
+  handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string) => void;
   handleAgentStatus: (
     chatJid: string,
     agentId: string,
@@ -1472,18 +1474,6 @@ function settleStreamingState(
  */
 export function isLiveStream(state: StreamingState | undefined): boolean {
   return !!state && !state.interrupted && !state.settling;
-}
-
-/** A final reply of `turnId` belongs to this settled card. */
-function settledTurnMatches(
-  settled: StreamingState,
-  turnId: string | null | undefined,
-): boolean {
-  return (
-    !turnId ||
-    (!settled.turnId && !settled.inputTurnId) ||
-    answersInput(settled, turnId)
-  );
 }
 
 /**
@@ -5256,7 +5246,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 通过 WebSocket new_message 事件立即添加消息（避免轮询延迟导致消息"丢失"）
-  handleWsNewMessage: (chatJid, wsMsg, agentId?, source?) => {
+  handleWsNewMessage: (chatJid, wsMsg, agentId?) => {
     if (!wsMsg || !wsMsg.id) return;
     // Skip while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[chatJid]) return;
@@ -5299,6 +5289,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delivery_status: wsMsg.delivery_status ?? null,
       delivery_run_id: wsMsg.delivery_run_id ?? null,
       delivery_updated_at: wsMsg.delivery_updated_at ?? null,
+      ...(wsMsg.automation ? { automation: wsMsg.automation } : {}),
     };
     const resetsContext =
       msg.sender === '__system__' &&
@@ -5310,7 +5301,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const isProactiveUtterance =
       msg.is_from_me &&
       msg.sender !== '__system__' &&
-      source !== 'scheduled_task' &&
       msg.source_kind === 'sdk_send_message';
 
     // Route to agentMessages if this is a conversation agent message
@@ -5477,7 +5467,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const isAgentReply =
         msg.is_from_me &&
         msg.sender !== '__system__' &&
-        source !== 'scheduled_task' &&
         msg.source_kind !== 'sdk_send_message';
       const isSystemError = isTerminalSystemMessage(msg);
       const shouldFinalizeAssistant =
@@ -5559,29 +5548,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       }
 
-      // A group-mode scheduled task streams in the main runner and posts its
-      // result as a scheduled_task message: it is that run's final, and
-      // replaces the settled card of the same turn in this same update.
-      const settledForTask = s.settledStreaming[chatJid];
-      const isTaskResult =
-        (source === 'scheduled_task' ||
-          msg.source_kind === 'scheduled_task_result') &&
-        msg.is_from_me &&
-        msg.sender !== '__system__';
-      // Its run may still be closing: the live card of exactly its turn
-      // settles in place. An isolated task posts here too, while another turn
-      // streams, so nothing short of the same input does.
-      const liveForTask = s.streaming[chatJid];
-      const taskInPlace =
-        isTaskResult &&
-        endsTurn(msg) &&
-        streamsInputOf(s.activeRuns, chatJid, liveForTask, msg.turn_id);
-      const replacesSettledTask =
-        isTaskResult &&
-        !taskInPlace &&
-        !!settledForTask &&
-        settledTurnMatches(settledForTask, msg.turn_id);
-
       // A direct human message is also the earliest cross-tab/IM signal that a
       // new logical run is about to start. Do not wait for the first Claude
       // stream event: warm runners can spend noticeable time preparing context
@@ -5606,22 +5572,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
           : s.unreadReplies;
       return {
-        ...(replacesSettledTask && settledForTask
-          ? {
-              ...finalizedReplyCaches(s, settledForTask, msg.id),
-              settledStreaming: withoutKey(s.settledStreaming, chatJid),
-            }
-          : {}),
-        ...(taskInPlace
-          ? {
-              ...finalizedReplyCaches(s, liveForTask, msg.id),
-              activeRuns: markRunAnswered(s.activeRuns, chatJid, msg.turn_id),
-              streaming: withoutKey(s.streaming, chatJid),
-              ...(answersInput(settledForTask, msg.turn_id)
-                ? { settledStreaming: withoutKey(s.settledStreaming, chatJid) }
-                : {}),
-            }
-          : {}),
         ...(replyLanded
           ? {
               streaming: withoutKey(s.streaming, chatJid),

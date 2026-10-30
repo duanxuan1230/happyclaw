@@ -1,6 +1,6 @@
 import {
   MessageCircle,
-  Clock4,
+  Timer,
   Bot,
   Puzzle,
   BarChart3,
@@ -21,7 +21,7 @@ export const baseNavItems: NavItem[] = [
   { path: '/chat', icon: MessageCircle, label: '工作台' },
   { path: '/agent-profiles', icon: Bot, label: '智能体' },
   { path: '/capabilities', icon: Puzzle, label: '能力库' },
-  { path: '/tasks', icon: Clock4, label: '任务' },
+  { path: '/automations', icon: Timer, label: '自动化' },
   { path: '/usage', icon: BarChart3, label: '用量', hideOnMobile: true },
   { path: '/memory', icon: Brain, label: '记忆', hideOnMobile: true },
   { path: '/billing', icon: Wallet, label: '账单', requiresBilling: true },

@@ -12,6 +12,17 @@ import {
 export const NATIVE_ROUTE_UNAVAILABLE_ERROR =
   "Progress was not delivered: this turn's native channel route is unavailable. Do not retry it. End the turn, or send your final answer once with send_message(delivery_role=final); the final uses the same route, so if it fails as well, do not retry it either.";
 
+/**
+ * An IPC request file is disposable only after its result ACK is durable.
+ * Legacy requests without requestId keep the fire-and-forget path.
+ */
+export function canDeleteAcknowledgedIpcSource(
+  requestId: string | undefined,
+  resultWritten: boolean,
+): boolean {
+  return !requestId || resultWritten;
+}
+
 export interface HostIpcOutputRouteInput {
   sourceGroup: string;
   agentId?: string | null;
@@ -19,7 +30,6 @@ export interface HostIpcOutputRouteInput {
   text: string;
   deliveryRole?: unknown;
   authorized: boolean;
-  scheduledTask: boolean;
   interactionMode?: 'assistant' | 'proactive';
   /**
    * The channel the input turn came from (recorded when its turn was bound):
@@ -49,8 +59,6 @@ export function resolveHostIpcLogicalChatJid(input: {
   sourceChatJid: string;
   agentId?: string | null;
   agentChatJid?: string | null;
-  taskRunId?: string | null;
-  scheduledTask: boolean;
   /** Immutable logical base captured when the input turn was admitted. */
   runtimeChatJid?: string | null;
   resolveWorkspaceJid?: (chatJid: string) => string | null;
@@ -61,9 +69,6 @@ export function resolveHostIpcLogicalChatJid(input: {
     input.sourceChatJid;
   if (input.agentId) {
     return `${input.agentChatJid || baseChatJid}#agent:${input.agentId}`;
-  }
-  if (input.taskRunId && input.scheduledTask) {
-    return `${baseChatJid}#task:${input.taskRunId}`;
   }
   return baseChatJid;
 }
@@ -104,8 +109,8 @@ function normalizeDeliveryRole(value: unknown): TurnMessageDeliveryRole | null {
  * An explicit progress/final request is consumed by the exact active primary
  * turn, including conversation agents. Even a failed stage attempt is still
  * consumed so it cannot fall through and create a second provider message.
- * Legacy requests, explicit `separate`, and scheduled-task notifications keep
- * their independent delivery path.
+ * Legacy requests and explicit `separate` keep their independent delivery
+ * path.
  *
  * A proactive turn's final is always its own message. Its progress depends on
  * where the turn came from: a Web turn stages it into the turn's process,
@@ -130,11 +135,7 @@ export function routeHostIpcOutput(
       reason: 'unauthorized',
     };
   }
-  if (
-    input.scheduledTask ||
-    deliveryRole === null ||
-    deliveryRole === 'separate'
-  ) {
+  if (deliveryRole === null || deliveryRole === 'separate') {
     return {
       path: 'separate_provider',
       delivered: false,

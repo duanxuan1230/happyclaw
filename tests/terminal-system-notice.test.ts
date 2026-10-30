@@ -157,7 +157,7 @@ function mainLane(input: {
     lastProcessed: { id: inputTurnId, timestamp: '2026-09-25T00:00:00.000Z' },
     cursorCommittedInputTurns: new Set<string>(),
     proactiveTailNoticesDelivered: new Set<string>(),
-    projectCurrentScheduledGroupTerminal: vi.fn(async () => false),
+    settleCurrentAutomationRun: vi.fn(),
     clearProcessingIndicatorForInput: vi.fn(async () => {}),
     // A settled turn closes the progress a failed attempt left (none here).
     turnTraces: new TurnTraceTracker({
@@ -185,7 +185,7 @@ function mainLane(input: {
       noticeKey: string,
       webType: string,
       text: string,
-      scheduledError?: string,
+      runError?: string,
     ) => Promise<boolean>,
   };
 }
@@ -290,9 +290,10 @@ describe('processGroupMessages deterministic failure settlement', () => {
     // The independent notice Turn is not blocked by the completed reply Turn.
     expect(lane.imManager.sendMessage).toHaveBeenCalledTimes(1);
     expect(lane.advanceCursors).toHaveBeenCalledTimes(1);
-    expect(
-      lane.globals.projectCurrentScheduledGroupTerminal,
-    ).toHaveBeenCalledWith('failed', '无法恢复的会话记录错误：bad image');
+    expect(lane.globals.settleCurrentAutomationRun).toHaveBeenCalledWith({
+      status: 'failed',
+      error: '无法恢复的会话记录错误：bad image',
+    });
     expect(webSystemMessages(lane.chatJid)).toEqual([
       'context_reset:会话已自动重置：bad image',
     ]);
@@ -484,9 +485,6 @@ describe('message retry exhaustion notice', () => {
     Object.assign(runtime.globals, {
       registeredGroups: { [groupJid]: group },
       getAgentBuilderInputMessage: db.getAgentBuilderInputMessage,
-      getTaskRunById: db.getTaskRunById,
-      resolveScheduledGroupRunsForOutput: () => [],
-      projectTerminalScheduledGroupRuns: vi.fn(async () => false),
       resolveEffectiveGroup: (value: unknown) => ({ effectiveGroup: value }),
       resolveTrustedInteractionMode: () => 'assistant',
       clearTrackedProcessingIndicators: vi.fn(async () => {}),

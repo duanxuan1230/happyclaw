@@ -96,7 +96,7 @@ export function workspaceOwnerImIds(
  * throws unless every input in it is a human message `isOwnerInput` accepts.
  * A Web input is the owner's by user id; an IM input by the sender's IM id.
  * Only such a turn writes memory directly; any other turn (a group member's,
- * a batch with anyone but the owner in it, a scheduled run) only proposes,
+ * a batch with anyone but the owner in it, an automation run) only proposes,
  * and the owner confirms or rejects the proposal on the Memory page.
  */
 export function isWorkspaceMemoryOwnerTurn(
@@ -123,7 +123,7 @@ export function isWorkspaceMemoryOwnerTurn(
 
 export function workspaceMemoryWriteRejection(input: {
   operation: string | undefined;
-  hostTurnKind: 'interactive' | 'scheduled' | 'unknown';
+  hostTurnKind: 'interactive' | 'automation' | 'unknown';
   runtimeAgentId: string | null;
   runtimeAgentKind: 'task' | 'conversation' | 'spawn' | null;
   capabilityValid: boolean;
@@ -140,7 +140,7 @@ export function workspaceMemoryWriteRejection(input: {
   }
   if (
     input.hostTurnKind !== 'interactive' &&
-    input.hostTurnKind !== 'scheduled'
+    input.hostTurnKind !== 'automation'
   ) {
     return {
       code: 'workspace_memory_no_active_turn',

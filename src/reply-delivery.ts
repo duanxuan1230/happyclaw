@@ -1,5 +1,5 @@
 /**
- * Pure decision logic for whether a scheduled-task/message-processing run
+ * Pure decision logic for whether a message-processing run
  * genuinely delivered a reply to the user, and whether that genuine
  * delivery should block a retry after a late-turn error. Extracted from
  * processGroupMessages (src/index.ts) so the two directions of this
@@ -7,75 +7,6 @@
  * send_message delivery also count?" — are independently unit-testable
  * without the surrounding IO/streaming machinery.
  */
-
-import type { InteractionMode } from './types.js';
-import {
-  isInternalOnlyAgentOutput,
-  SCHEDULED_TASK_SILENT_COMPLETION_NOTICE,
-  stripAgentInternalTags,
-} from './utils.js';
-
-export interface ScheduledGroupDeliveryContract {
-  /** SDK final is the one physical IM delivery lane. */
-  frameworkDeliversFinalText: boolean;
-  /** Agent must call send_message; SDK final remains archive-only. */
-  agentDeliversWithSendMessage: boolean;
-}
-
-export interface ScheduledProactiveArchiveCandidateInput {
-  status: 'success' | 'error' | 'stream' | 'closed';
-  inputTurnCompleted?: boolean;
-  hasScheduledGroupRuns: boolean;
-  /** Interactive Proactive runner output lane. */
-  proactiveFinalCandidate?: string | null;
-  /** Task-output runner lane (scheduled turns intentionally use this lane). */
-  result?: string | null;
-}
-
-/** Select the archive-only SDK final after a healthy scheduled input ends. */
-export function resolveScheduledProactiveArchiveCandidate(
-  input: ScheduledProactiveArchiveCandidateInput,
-): string {
-  if (
-    !input.hasScheduledGroupRuns ||
-    input.status !== 'success' ||
-    input.inputTurnCompleted !== true
-  ) {
-    return '';
-  }
-  return (input.proactiveFinalCandidate ?? input.result ?? '').trim();
-}
-
-/**
- * Workspace text that settles a completed scheduled group turn as success:
- * the visible final, or a silent-completion notice when the Agent ended with
- * only `<internal>` blocks on purpose. Empty text means no business result.
- */
-export function resolveScheduledGroupCompletion(candidate: string): {
-  text: string;
-  internalOnly: boolean;
-} {
-  const visible = candidate ? stripAgentInternalTags(candidate).trim() : '';
-  if (visible) return { text: visible, internalOnly: false };
-  return isInternalOnlyAgentOutput(candidate)
-    ? { text: SCHEDULED_TASK_SILENT_COMPLETION_NOTICE, internalOnly: true }
-    : { text: '', internalOnly: false };
-}
-
-/** Exactly one lane owns physical IM delivery for a scheduled group turn. */
-export function resolveScheduledGroupDeliveryContract(
-  interactionMode: InteractionMode,
-): ScheduledGroupDeliveryContract {
-  return interactionMode === 'assistant'
-    ? {
-        frameworkDeliversFinalText: true,
-        agentDeliversWithSendMessage: false,
-      }
-    : {
-        frameworkDeliversFinalText: false,
-        agentDeliversWithSendMessage: true,
-      };
-}
 
 export interface StreamingCardReplyAcknowledgementInput {
   /** An ACK-lost/partial provider mutation can never advance the turn. */
@@ -137,35 +68,6 @@ export function isGenuineReplyResult(info: ReplyResultInfo): boolean {
   }
   if (info.finalizationReason === 'truncated') return false;
   return true;
-}
-
-export interface ScheduledGroupPrimaryResultInfo extends ReplyResultInfo {
-  status: 'success' | 'error' | 'stream' | 'closed';
-  providerFailure?: boolean;
-  hasScheduledGroupRuns: boolean;
-}
-
-/**
- * A scheduled group run is finalized by the same substantive primary answer
- * that the user sees. Host runners may emit that answer before a later,
- * content-free `inputTurnCompleted` lifecycle frame; requiring the lifecycle
- * flag would persist the answer as ordinary `sdk_final` and strand the exact
- * run in `delivered`.
- *
- * Held/partial/provider-failure outputs remain ineligible, so an intermediate
- * checkpoint can never become the business terminal.
- */
-export function shouldFinalizeScheduledGroupPrimaryResult(
-  info: ScheduledGroupPrimaryResultInfo,
-): boolean {
-  return (
-    info.hasScheduledGroupRuns &&
-    info.status === 'success' &&
-    !info.providerFailure &&
-    (info.sourceKind === 'sdk_final' ||
-      info.sourceKind === 'truncation_continue') &&
-    isGenuineReplyResult(info)
-  );
 }
 
 export function occupiesPrimaryReplyDeliverySlot(

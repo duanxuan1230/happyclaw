@@ -45,7 +45,7 @@ afterEach(() => {
 });
 
 describe('startup typed IPC delivery recovery', () => {
-  test('deletes main/agent claims, excludes task-run, and recovers even when pull equals committed', () => {
+  test('deletes main/agent claims and recovers even when pull equals committed', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ipc-startup-'));
     roots.push(root);
     const mainFile = path.join(root, 'folder', 'input', 'main.json');
@@ -57,18 +57,9 @@ describe('startup typed IPC delivery recovery', () => {
       'input',
       'agent.json',
     );
-    const taskFile = path.join(
-      root,
-      'folder',
-      'tasks-run',
-      'task-1',
-      'input',
-      'task.json',
-    );
     const invalidFile = path.join(root, 'folder', 'input', 'legacy.json');
     writeDelivery(mainFile, 'web:main', 'm1');
     writeDelivery(agentFile, 'web:main#agent:agent-1', 'a1');
-    writeDelivery(taskFile, 'web:main#task:task-1', 't1');
     fs.writeFileSync(
       invalidFile,
       JSON.stringify({ type: 'message', text: 'legacy' }),
@@ -87,7 +78,6 @@ describe('startup typed IPC delivery recovery', () => {
     ]);
     expect(fs.existsSync(mainFile)).toBe(false);
     expect(fs.existsSync(agentFile)).toBe(false);
-    expect(fs.existsSync(taskFile)).toBe(true);
     expect(fs.existsSync(invalidFile)).toBe(true);
     expect(rewindPersistedBeforeDelete).toBe(true);
 

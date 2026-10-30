@@ -118,7 +118,6 @@ import {
   partitionIpcMessagesForLogicalTurn,
   requeueIpcInputMessages,
   resolveLogicalQueryInputTurnId,
-  scheduledGroupRunIdFromIpcMessages,
   shouldAcceptIpcMessagesDuringQuery,
   type IpcDeliveryReceipt,
   type IpcInputMessage,
@@ -343,7 +342,6 @@ const SECURITY_RULES = loadPrompt('security-rules.md');
 const INTERACTION_GUIDELINES = loadPrompt('interaction.md');
 const ASSISTANT_OUTPUT_GUIDELINES = loadPrompt('output.assistant.md');
 const PROACTIVE_OUTPUT_GUIDELINES = loadPrompt('output.proactive.md');
-const TASK_OUTPUT_GUIDELINES = loadPrompt('output.task.md');
 const WEB_FETCH_GUIDELINES = loadPrompt('web-fetch.md');
 const BACKGROUND_TASK_GUIDELINES = loadPrompt('background-tasks.md');
 const ASSISTANT_DELIVERY_CONTRACT = loadPrompt(
@@ -366,11 +364,7 @@ const CHANNEL_FORMAT_COMMON =
 function usesProactiveInteractiveContract(
   containerInput: ContainerInput,
 ): boolean {
-  return (
-    containerInput.interactionMode === 'proactive' &&
-    !containerInput.isScheduledTask &&
-    !containerInput.messageTaskId
-  );
+  return containerInput.interactionMode === 'proactive';
 }
 
 function buildAgentIdentityPrompt(
@@ -815,7 +809,7 @@ class MessageStream {
       filteredImages = valid.length > 0 ? valid : undefined;
     }
 
-    // 每条 user message 前置当前本地时间，让 agent 能正确推理相对时间 / schedule_task 的
+    // 每条 user message 前置当前本地时间，让 agent 能正确推理相对时间 / 自动化的
     // once/cron 取值（#563）。刻意放在 user message（缓存前缀之后的未缓存区）而非 system
     // prompt：① 不会因每 turn 时间不同而击穿整段 system+历史的 prompt cache；② 长会话里
     // 每个 turn 都拿到新鲜时间，而非会话启动那一刻的陈旧时间。
@@ -1000,10 +994,7 @@ function resolveAgentBuilderEnabled(
   input: ContainerInput,
   isHome: boolean,
 ): boolean {
-  return (
-    input.agentBuilderEnabled ??
-    (isHome && !input.agentId && !input.isScheduledTask)
-  );
+  return input.agentBuilderEnabled ?? (isHome && !input.agentId);
 }
 
 /**
@@ -1486,7 +1477,6 @@ function drainIpcInput(): IpcDrainResult {
             images: data.images,
             queryRunId:
               typeof data.queryRunId === 'string' ? data.queryRunId : undefined,
-            taskId: typeof data.taskId === 'string' ? data.taskId : undefined,
             sourceJid:
               typeof data.sourceJid === 'string' ? data.sourceJid : undefined,
             channelContext: normalizeChannelTurnContext(
@@ -1653,17 +1643,8 @@ function waitForIpcMessage(): Promise<
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
         const allImages = messages.flatMap((m) => m.images || []);
-        // If any drained message carries a taskId, attribute the combined turn
-        // to it (take the last one — later messages supersede earlier in a batch).
-        let combinedTaskId: string | undefined;
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].taskId) {
-            combinedTaskId = messages[i].taskId;
-            break;
-          }
-        }
-        // Same convention for sourceJid: per-channel MCP tools should see the
-        // chat the most recent message arrived from.
+        // Per-channel MCP tools should see the chat the most recent message
+        // arrived from.
         let combinedSourceJid = latestIpcInputMessage(messages)?.sourceJid;
         if (!combinedSourceJid) {
           for (let i = messages.length - 1; i >= 0; i--) {
@@ -1683,7 +1664,6 @@ function waitForIpcMessage(): Promise<
         resolve({
           text: combinedText,
           images: allImages.length > 0 ? allImages : undefined,
-          taskId: combinedTaskId,
           sourceJid: combinedSourceJid,
           channelContext: combinedChannelContext,
           messages,
@@ -1859,14 +1839,6 @@ async function runQueryAttempt(
     activeOutputInputTurnId = currentInputTurnId;
     if (mcpToolsContext) {
       mcpToolsContext.currentInputTurnId = currentInputTurnId;
-      if (currentMessage) {
-        mcpToolsContext.currentTaskId = currentMessage.taskId ?? null;
-        mcpToolsContext.currentScheduledTaskRunId =
-          scheduledGroupRunIdFromIpcMessages(
-            currentMessages,
-            currentMessage.taskId,
-          );
-      }
     }
     if (currentMessage) {
       if (currentMessage.queryRunId) {
@@ -1878,7 +1850,6 @@ async function runQueryAttempt(
         currentMessage.sourceJid,
         currentMessage.channelContext,
       );
-      containerInput.messageTaskId = currentMessage.taskId ?? undefined;
     }
     if (mcpToolsContext) {
       mcpToolsContext.currentQueryRunId = containerInput.queryRunId;
@@ -2795,7 +2766,7 @@ async function runQueryAttempt(
       status: 'success',
       // Proactive SDK text is control-plane only; user-visible speech must
       // cross the send_message delivery boundary. Preserve the completed text
-      // only for internal diagnostics and scheduled-result extraction. Public
+      // only for internal diagnostics and automation result extraction. Public
       // interactive hosts must never project it as a fallback message.
       result: proactiveInteractiveContract ? null : candidate.finalText,
       ...(proactiveInteractiveContract &&
@@ -2899,28 +2870,17 @@ async function runQueryAttempt(
           },
         }
       : {}),
-    ...(agentBuilderEnabled &&
-    !containerInput.isScheduledTask &&
-    !containerInput.messageTaskId
-      ? { agentBuilder: AGENT_BUILDER_GUIDELINES }
-      : {}),
-    output:
-      containerInput.isScheduledTask || containerInput.messageTaskId
-        ? TASK_OUTPUT_GUIDELINES
-        : proactiveInteractiveContract
-          ? PROACTIVE_OUTPUT_GUIDELINES
-          : ASSISTANT_OUTPUT_GUIDELINES,
+    ...(agentBuilderEnabled ? { agentBuilder: AGENT_BUILDER_GUIDELINES } : {}),
+    output: proactiveInteractiveContract
+      ? PROACTIVE_OUTPUT_GUIDELINES
+      : ASSISTANT_OUTPUT_GUIDELINES,
     ...(hasWebTools ? { web: WEB_FETCH_GUIDELINES } : {}),
     ...(backgroundTaskToolsAvailable
       ? { backgroundTasks: BACKGROUND_TASK_GUIDELINES }
       : {}),
-    ...(!containerInput.isScheduledTask && !containerInput.messageTaskId
-      ? {
-          deliveryContract: proactiveInteractiveContract
-            ? PROACTIVE_DELIVERY_CONTRACT
-            : ASSISTANT_DELIVERY_CONTRACT,
-        }
-      : {}),
+    deliveryContract: proactiveInteractiveContract
+      ? PROACTIVE_DELIVERY_CONTRACT
+      : ASSISTANT_DELIVERY_CONTRACT,
   });
   for (const warning of promptPlan.warnings) log(`[WARN] ${warning}`);
   if (promptPlan.errors.length > 0) {
@@ -4703,7 +4663,7 @@ async function main(): Promise<void> {
   );
 
   // Create in-process SDK MCP server (replaces the stdio subprocess)
-  // NOTE: chatJid and currentTaskId are mutated in-place by the main loop
+  // NOTE: chatJid and currentInputTurnId are mutated in-place by the main loop
   // below so that createMcpTools() closures observe updates via ctx reference.
   // See the per-turn updates at the bottom of the query loop.
   //
@@ -4730,9 +4690,6 @@ async function main(): Promise<void> {
     agentBuilderEnabled,
     ownerProfileEnabled: containerInput.happyClawOwnerProfileEnabled === true,
     interactionMode: containerInput.interactionMode ?? 'assistant',
-    isScheduledTask: containerInput.isScheduledTask || false,
-    currentTaskId: containerInput.messageTaskId ?? null,
-    currentScheduledTaskRunId: null,
     currentInputTurnId: containerInput.turnId,
     workspaceMemoryMutationAuth:
       containerInput.workspaceMemoryMutationSigningSecret &&
@@ -4741,7 +4698,6 @@ async function main(): Promise<void> {
             runnerInstanceId: containerInput.workspaceMemoryRunnerInstanceId,
             secret: containerInput.workspaceMemoryMutationSigningSecret,
             agentId: containerInput.agentId ?? null,
-            taskRunId: containerInput.taskRunId ?? null,
           }
         : undefined,
     get currentSessionId() {
@@ -4786,19 +4742,6 @@ async function main(): Promise<void> {
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
   let promptImages = containerInput.images;
-  if (containerInput.isScheduledTask) {
-    const scheduledTaskPrefixLines = [
-      '[定时任务 - 以下内容由系统自动发送，并非来自用户或群组的直接消息。]',
-      '',
-      '重要：你正在定时任务模式下运行。你的最终输出会自动作为正式任务结果归档到所属 Web 工作区，但不会自动发送到飞书等外部渠道。',
-      '',
-      '最终输出必须包含一份完整、可独立阅读的业务结果，不得只回复“已完成”“已发送”、消息 ID、文件路径或简短摘要。需要向外部渠道交付时，默认在完成任务后调用一次 mcp__happyclaw__send_message；如果任务明确要求使用 feishu-cli 等其他工具，则按任务要求执行，不要重复发送。',
-      '',
-      '此外：本次运行就是该定时任务本身的执行，对应任务已在调度中。即使下面内容里出现「每隔/每天/定期/提醒我」等字样，也不要再调用 mcp__happyclaw__schedule_task 创建新的定时任务（除非内容明确要求你另外新建一个不同的任务）。',
-    ];
-    const scheduledTaskPrefix = scheduledTaskPrefixLines.join('\n');
-    prompt = scheduledTaskPrefix + '\n\n' + prompt;
-  }
   const pendingDrain = drainIpcInput();
   const coldBatchMessageIds = new Set(
     containerInput.currentBatchMessageIds ?? [],
@@ -4850,23 +4793,6 @@ async function main(): Promise<void> {
     );
     mcpToolsConfig.currentInputTurnId =
       latestIpcDeliveryId(pendingDrain.messages) ?? containerInput.turnId;
-    // Likewise carry the task identity. A group-mode scheduled task injected
-    // into this cold-start window (process registered, SDK transport not yet
-    // ready) arrives via IPC with a taskId; without propagating it here the
-    // first query's send_message would route as a non-task message and the task
-    // notify would be lost (#559, on the boot-drain path the piped-message
-    // taskId plumbing doesn't cover). Only override when a taskId is present so
-    // a plain message in the batch doesn't wipe the startup messageTaskId.
-    for (let i = pendingDrain.messages.length - 1; i >= 0; i--) {
-      const tid = pendingDrain.messages[i].taskId;
-      if (tid) {
-        mcpToolsConfig.currentTaskId = tid;
-        mcpToolsConfig.currentScheduledTaskRunId =
-          scheduledGroupRunIdFromIpcMessages(pendingDrain.messages, tid);
-        containerInput.messageTaskId = tid;
-        break;
-      }
-    }
   }
 
   // Query loop: run query -> wait for IPC message -> run new query -> repeat
@@ -5131,15 +5057,6 @@ async function main(): Promise<void> {
         containerInput.turnId = generateTurnId();
         mcpToolsConfig.currentInputTurnId =
           latestIpcDeliveryId(nextMessage.messages) ?? containerInput.turnId;
-        // See main-loop comment: reset task attribution for this new turn.
-        mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
-        mcpToolsConfig.currentScheduledTaskRunId =
-          scheduledGroupRunIdFromIpcMessages(
-            nextMessage.messages,
-            nextMessage.taskId,
-          );
-        containerInput.messageTaskId =
-          mcpToolsConfig.currentTaskId ?? undefined;
         setCurrentChannelTurn(
           containerInput,
           nextMessage.sourceJid,
@@ -5507,18 +5424,6 @@ async function main(): Promise<void> {
       containerInput.turnId = generateTurnId();
       mcpToolsConfig.currentInputTurnId =
         latestIpcDeliveryId(nextMessage.messages) ?? containerInput.turnId;
-      // Clear per-turn task attribution: the previous query may have been a
-      // scheduled-task turn, but this new IPC message is a regular follow-up
-      // unless it explicitly carried a taskId (see nextMessage.taskId below).
-      // Forgetting to clear would cause regular user replies to be broadcast
-      // to the task's notify channels, hijacking later conversation.
-      mcpToolsConfig.currentTaskId = nextMessage.taskId ?? null;
-      mcpToolsConfig.currentScheduledTaskRunId =
-        scheduledGroupRunIdFromIpcMessages(
-          nextMessage.messages,
-          nextMessage.taskId,
-        );
-      containerInput.messageTaskId = mcpToolsConfig.currentTaskId ?? undefined;
       setCurrentChannelTurn(
         containerInput,
         nextMessage.sourceJid,

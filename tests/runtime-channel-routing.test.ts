@@ -430,7 +430,6 @@ describe('actual message loop dispatches the unconsumed channel suffix', () => {
       ...interactionRuntime,
       ...channelInteraction,
       channelConversationJid,
-      resolveScheduledGroupPromptInteractionMode: () => null,
       ...db,
       getChannelType,
       EMPTY_CURSOR,
@@ -537,9 +536,6 @@ describe('actual runtime mount-mode admission and resume safety', () => {
         jid === research
           ? { workspace_jid: homeJid, interaction_mode_override: 'assistant' }
           : undefined,
-      getTaskRunById: () => undefined,
-      resolveScheduledGroupPromptInteractionMode: (message: NewMessage) =>
-        message.task_id ? 'proactive' : null,
     };
     const harness = createRuntimeSourceHarness(globals);
     harness.install('resolveTrustedInteractionMode');
@@ -568,20 +564,6 @@ describe('actual runtime mount-mode admission and resume safety', () => {
     expect(next.messages.map((message: NewMessage) => message.id)).toEqual([
       'b',
     ]);
-    const frozen = globals.selectRuntimeInteractionBatch(
-      [
-        {
-          ...messages[0],
-          task_id: 'frozen-task',
-          source_kind: 'scheduled_task_prompt',
-        },
-        messages[2],
-      ],
-      group,
-      homeJid,
-    );
-    expect(frozen.interactionMode).toBe('proactive');
-    expect(frozen.messages).toHaveLength(1);
     const spawned = globals.selectRuntimeInteractionBatch(
       messages,
       group,

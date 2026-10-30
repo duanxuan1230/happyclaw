@@ -51,11 +51,8 @@ vi.mock('../src/logger.js', () => ({
   },
 }));
 
-const {
-  buildVolumeMounts,
-  cleanupContainerTaskRuntimeEnvDirs,
-  getContainerRuntimeEnvDir,
-} = await import('../src/container-runner.js');
+const { buildVolumeMounts, getContainerRuntimeEnvDir } =
+  await import('../src/container-runner.js');
 
 function writeMcpStore(
   ownerId: string,
@@ -184,84 +181,31 @@ describe('managed MCP runtime secret boundary', () => {
     const botAAgent = getContainerRuntimeEnvDir(
       'workspace',
       'agent-a',
-      undefined,
       'account-a',
     );
     const botBAgent = getContainerRuntimeEnvDir(
       'workspace',
       'agent-a',
-      undefined,
       'account-b',
     );
     const botAMain = getContainerRuntimeEnvDir(
       'workspace',
       undefined,
-      undefined,
-      'account-a',
-    );
-    const botATask = getContainerRuntimeEnvDir(
-      'workspace',
-      undefined,
-      'task-a',
       'account-a',
     );
 
-    expect(new Set([botAAgent, botBAgent, botAMain, botATask]).size).toBe(4);
+    expect(new Set([botAAgent, botBAgent, botAMain]).size).toBe(3);
     expect(botAAgent).toContain(
       path.join('channel-accounts', 'account-a', 'agents', 'agent-a'),
     );
     expect(() =>
-      getContainerRuntimeEnvDir(
-        'workspace',
-        '../escape',
-        undefined,
-        'account-a',
-      ),
+      getContainerRuntimeEnvDir('workspace', '../escape', 'account-a'),
     ).toThrow(/Invalid agent id/);
-  });
-
-  test('cleans a task env snapshot under every Bot identity', () => {
-    const taskRunId = 'task-run-a';
-    const taskDirs = [
-      getContainerRuntimeEnvDir('workspace', undefined, taskRunId, 'account-a'),
-      getContainerRuntimeEnvDir('workspace', undefined, taskRunId, 'account-b'),
-      getContainerRuntimeEnvDir('workspace', undefined, taskRunId),
-    ];
-    for (const taskDir of taskDirs) {
-      fs.mkdirSync(taskDir, { recursive: true });
-      fs.writeFileSync(path.join(taskDir, 'env'), 'SECRET=value');
-    }
-
-    cleanupContainerTaskRuntimeEnvDirs('workspace', taskRunId);
-
-    expect(taskDirs.every((taskDir) => !fs.existsSync(taskDir))).toBe(true);
-  });
-
-  test('cleans task env snapshots for a valid dotted workspace folder', () => {
-    const folder = 'workspace.with-dot';
-    const taskRunId = 'task-run-dot';
-    const taskDirs = [
-      getContainerRuntimeEnvDir(folder, undefined, taskRunId, 'account-a'),
-      getContainerRuntimeEnvDir(folder, undefined, taskRunId),
-    ];
-    for (const taskDir of taskDirs) {
-      fs.mkdirSync(taskDir, { recursive: true });
-      fs.writeFileSync(path.join(taskDir, 'env'), 'SECRET=value');
-    }
-
-    cleanupContainerTaskRuntimeEnvDirs(folder, taskRunId);
-
-    expect(taskDirs.every((taskDir) => !fs.existsSync(taskDir))).toBe(true);
   });
 
   test('rejects unsafe workspace folders before building env paths', () => {
     expect(() =>
-      getContainerRuntimeEnvDir(
-        '../workspace',
-        undefined,
-        'task-run-a',
-        'account-a',
-      ),
+      getContainerRuntimeEnvDir('../workspace', undefined, 'account-a'),
     ).toThrow(/Invalid group folder/);
   });
 
@@ -370,7 +314,6 @@ describe('managed MCP runtime secret boundary', () => {
         group('custom-member-workspace', ownerId) as any,
         false,
         true,
-        undefined,
         undefined,
         undefined,
         undefined,

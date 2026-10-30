@@ -10,7 +10,6 @@ import {
 } from '../src/agent-builder-turn-auth.js';
 import {
   SKILL_MUTATION_NON_OWNER_REJECTION,
-  SKILL_MUTATION_TASK_RUN_REJECTION,
   skillMutationTurnRejection,
 } from '../src/skill-ipc-authorization.js';
 import { isWorkspaceMemoryOwnerTurn } from '../src/workspace-memory-ipc.js';
@@ -31,7 +30,7 @@ const groups: Record<string, Record<string, string>> = {
 
 function check(
   messages: Record<string, AgentBuilderPersistedInput>,
-  options: { isolatedTaskRun?: boolean; agentId?: string | null } = {},
+  options: { agentId?: string | null } = {},
 ) {
   const registry = new AgentBuilderTurnRegistry();
   const scope = agentBuilderTurnScope(FOLDER, options.agentId ?? null);
@@ -43,7 +42,7 @@ function check(
         chatJid: WEB_JID,
         messageId,
         runtimeTurnId: ids[ids.length - 1],
-        scheduledTaskId: null,
+        automationRunId: null,
       })),
     );
   }
@@ -51,7 +50,6 @@ function check(
     registry,
     sourceFolder: FOLDER,
     turnScope: scope,
-    isolatedTaskRun: options.isolatedTaskRun ?? false,
     ownerUserId: OWNER,
     loadPersistedInput: (_chatJid, messageId) => messages[messageId] ?? null,
     getGroup: (jid) => groups[jid.split('#')[0]],
@@ -70,7 +68,7 @@ const input = (
   source_jid: sourceJid,
   is_from_me: 0,
   source_kind: null,
-  task_id: null,
+  automation_run_id: null,
   ...extra,
 });
 
@@ -134,7 +132,7 @@ describe('install_skill / uninstall_skill only from the owner’s own turn', () 
             chatJid: WEB_JID,
             messageId: 'm1',
             runtimeTurnId: 'm1',
-            scheduledTaskId: null,
+            automationRunId: null,
           },
         ]);
         const load = () => message;
@@ -149,7 +147,6 @@ describe('install_skill / uninstall_skill only from the owner’s own turn', () 
             registry,
             sourceFolder: FOLDER,
             turnScope: scope,
-            isolatedTaskRun: false,
             ownerUserId: OWNER,
             loadPersistedInput: load,
             ...lookup,
@@ -172,18 +169,15 @@ describe('install_skill / uninstall_skill only from the owner’s own turn', () 
     delete groups[chat];
   });
 
-  test('scheduled, isolated-task and turn-less requests are refused', () => {
+  test('automation-run and turn-less requests are refused', () => {
     expect(
       check({
         m1: input(OWNER, WEB_JID, {
-          task_id: 'task-1',
-          source_kind: 'scheduled_task_prompt',
+          automation_run_id: 'run-1',
+          source_kind: 'automation_prompt',
         }),
       }),
     ).toBe(SKILL_MUTATION_NON_OWNER_REJECTION);
-    expect(check({}, { isolatedTaskRun: true })).toBe(
-      SKILL_MUTATION_TASK_RUN_REJECTION,
-    );
     expect(check({})).toBe(SKILL_MUTATION_NON_OWNER_REJECTION);
   });
 

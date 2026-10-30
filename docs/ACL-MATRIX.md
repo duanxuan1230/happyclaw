@@ -203,7 +203,7 @@ Agent Runtime 的 Workspace Memory MCP 还叠加执行上下文策略：
 | ------------------------------------------------ | ---- | ---------------------------------- |
 | 顶层 Main/Runtime Session，批次全部是 owner 输入 | 允许 | 按 Workspace ACL                   |
 | 顶层 Main/Runtime Session，含非 owner 输入       | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
-| Scheduled Run（group 或 isolated）               | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
+| 自动化运行的轮次                                 | 允许 | 只能创建/修改/忘记 `proposed` 条目 |
 | Spawn/Task 会话、SDK Task Sub-Agent              | 允许 | 拒绝                               |
 
 owner 输入的判定在宿主：Web 输入的 sender 等于 owner 用户 id；IM 输入的发送者 IM id
@@ -368,27 +368,22 @@ Agent MCP 调用没有 Cookie，但必须携带由主进程创建的运行上下
 消息、图片和文件工具必须限制在授权的 Session 或当前 Turn 路由。跨工作区操作必须
 经过主进程 owner 检查；不能根据 Agent 文本参数自行扩大范围。
 
-定时任务：
+自动化：
 
-- Agent 任务继承创建者、Workspace 和 Agent 身份。
-- Script 任务仅允许 admin 的 Host Workspace。
+- 每次运行都是真实会话里的一轮：绑定已有会话（默认当前会话）、每次新建或持续会话。
+- 脚本和前置检查仅允许 admin 的 Host Workspace。
 - `adminHostOnlyMode` 仅允许 admin 配置；开启后 active admin 拥有的 Workspace
-  与任务强制使用 Host，所有 Container 写入入口都会拒绝。member 始终保留
-  Container 隔离。
-- `group` 模式注入主 Session；`isolated` 使用独立 Session、IPC 和运行记录。
-- 立即运行使用 idempotency key；取消只影响对应 Run。
+  强制使用 Host，所有 Container 写入入口都会拒绝。member 始终保留 Container 隔离。
 
-定时任务的 IPC/MCP 面授权与 Web 面同源，均为 `canAccessGroup`，**admin 不提供
-全局旁路**：
+自动化的 Agent 工具（`automation_*`）不接收任何 JID。主进程从 IPC 目录和正在执行的
+批次推出调用者（`src/automation-runtime.ts` 的 `deriveAutomationActor`），**admin
+不提供全局旁路**：
 
-- 判定实现在 `src/task-acl.ts`，覆盖 `schedule_task`、`pause_task`、
-  `resume_task`、`cancel_task`、`update_task`、`run_task_now`、`stop_task_run`、
-  `restore_task`、`list_task_runs` 以及 `list_tasks` 的可见性过滤。
-- 允许两条路径：目标是 Agent 自身工作区目录；或该工作区属主同样拥有目标群组。
-- `isAdminHome` 只保留为能力判定（Script 任务、Host 执行模式），不参与工作区范围
-  判定。原因：admin Home Agent 是会接触不可信内容的 LLM，而任务 `prompt` 会被按
-  计划重放、以 Bot 身份在目标会话发言、并计费到目标工作区。
-- 任务 `prompt` 属于用户内容，因此 `list_tasks` 不允许跨租户枚举。
+- 批次是某次自动化运行的输入：只能暂停、完成、删除、通知或静默它自己的自动化。
+- 批次完全来自工作区主人（与 `install_skill` 同一条主人轮次规则）：可以创建和修改，
+  新建的自动化绑定当前会话和这条输入的来源路由（例如飞书话题）。
+- 其他轮次（群成员、混合批次）只能列出。
+- 旧的 `schedule_task` 等请求一律返回错误，提示改用自动化工具。
 
 ## 11. 修改 ACL 的验证要求
 

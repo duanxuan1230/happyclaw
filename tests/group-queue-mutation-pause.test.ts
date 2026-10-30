@@ -20,14 +20,14 @@ vi.mock('../src/runtime-config.js', () => ({
     maxConcurrentHostProcesses: 10,
   }),
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue } = await import('../src/group-queue.js');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 const WEB_JID = 'web:mutation-a';
 const IM_JID = 'feishu:mutation-b';
-const DESCENDANT_JID = `${IM_JID}#task:new-run`;
+const DESCENDANT_JID = `${IM_JID}#agent:new-run`;
 const FOLDER = 'mutation-shared-folder';
 
 let queue: InstanceType<typeof GroupQueue>;
@@ -193,9 +193,9 @@ describe('GroupQueue mutation pause', () => {
     const second = queue.pauseGroupsForMutation([IM_JID]);
     expect(queue.isGroupMutationPaused(WEB_JID)).toBe(true);
     expect(
-      queue.isGroupMutationPaused(`${WEB_JID}#task:created-during-mutation`),
+      queue.isGroupMutationPaused(`${WEB_JID}#agent:created-during-mutation`),
     ).toBe(true);
-    queue.enqueueTask(`${WEB_JID}#task:overlap`, 'overlap', async () => {
+    queue.enqueueTask(`${WEB_JID}#agent:overlap`, 'overlap', async () => {
       taskRuns++;
     });
 
@@ -326,7 +326,7 @@ describe('GroupQueue mutation pause', () => {
 
     expect(
       queue.enqueueTask(
-        `${WEB_JID}#task:late-after-resume`,
+        `${WEB_JID}#agent:late-after-resume`,
         'late',
         async () => {
           newTaskRuns++;
@@ -372,7 +372,7 @@ describe('GroupQueue mutation pause', () => {
     // external resolver/cache has disappeared.
     expect(
       queue.enqueueTask(
-        `${WEB_JID}#task:brand-new`,
+        `${WEB_JID}#agent:brand-new`,
         'brand-new',
         async () => {
           taskRuns++;

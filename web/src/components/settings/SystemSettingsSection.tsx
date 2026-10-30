@@ -7,7 +7,6 @@ import { api } from '../../api/client';
 import { useAuthStore } from '../../stores/auth';
 import { useChatStore } from '../../stores/chat';
 import { useGroupsStore } from '../../stores/groups';
-import { useTasksStore } from '../../stores/tasks';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -597,7 +596,6 @@ export function HostIntegrationSettingsSection({
         await Promise.allSettled([
           useChatStore.getState().loadGroups(),
           useGroupsStore.getState().loadGroups(),
-          useTasksStore.getState().loadTasks(),
         ]);
       }
       setSettings(data);
@@ -826,7 +824,7 @@ export function HostIntegrationSettingsSection({
             htmlFor="admin-host-only-mode"
             description={
               <span id="admin-host-only-mode-description">
-                开启后，管理员拥有的工作区和定时任务会统一迁移到宿主机，并禁止再选择
+                开启后，管理员拥有的工作区和自动化会统一迁移到宿主机，并禁止再选择
                 Docker；普通成员仍固定使用
                 Docker。关闭后不会自动把已有工作区迁回
                 Docker。宿主机工作区暂不支持网页终端。

@@ -12,10 +12,6 @@ const hostRunner = fs.readFileSync(
   'utf8',
 );
 const main = fs.readFileSync(path.join(root, 'src/index.ts'), 'utf8');
-const taskScheduler = fs.readFileSync(
-  path.join(root, 'src/task-scheduler.ts'),
-  'utf8',
-);
 
 describe('provider fallback source contracts', () => {
   test('cold/warm retry uses the failed turn payload rather than startup input', () => {
@@ -147,9 +143,6 @@ describe('provider fallback source contracts', () => {
     ).toHaveLength(2);
     expect(hostRunner).toContain('healthyInputTurnCompleted');
     expect(hostRunner).toContain('hostHealthyInputTurnCompleted');
-    expect(hostRunner).toContain(
-      'Provider failed after scheduled input completed; suppressing replay',
-    );
   });
 
   test('provider failures are visible only at pool exhaustion across interaction modes', () => {
@@ -166,23 +159,6 @@ describe('provider fallback source contracts', () => {
     );
     expect(main).toMatch(
       /!publishesFrameworkAnswer\(interactionMode\)\s*&&\s*!output\.providerFailure/,
-    );
-  });
-
-  test('scheduled tasks classify exhausted providers as failures', () => {
-    expect(taskScheduler).toContain(
-      'streamedOutput.providerFailureTerminal === true',
-    );
-    // The upstream limit text, when the runner captured one, replaces the
-    // generic pool notice — but only on the terminal projection.
-    expect(taskScheduler).toContain(
-      'error = output.providerFailureNotice || PROVIDER_FAILURE_USER_NOTICE',
-    );
-    expect(taskScheduler).toMatch(
-      /streamedOutput\.providerFailureNotice \|\|\s*PROVIDER_FAILURE_USER_NOTICE/,
-    );
-    expect(hostRunner).toContain(
-      'Scheduled task provider failed; retrying the same prompt on another provider',
     );
   });
 });

@@ -455,6 +455,13 @@ export interface NewMessage {
   source_kind?: MessageSourceKind | null;
   finalization_reason?: MessageFinalizationReason | null;
   task_id?: string | null;
+  /** automation_runs.id when source_kind='automation_prompt'. */
+  automation_run_id?: string | null;
+  /**
+   * The automation an automation_prompt input belongs to. Derived when a
+   * message is listed or announced to the Web; never persisted.
+   */
+  automation?: { id: string; name: string; runId: string } | null;
   delivery_mode?: FollowUpMode | null;
   delivery_status?: FollowUpStatus | null;
   delivery_run_id?: string | null;
@@ -485,6 +492,9 @@ export interface QueuedFollowUp {
   timestamp: string;
   attachments?: string;
   channel_context?: ChannelTurnContext;
+  source_kind?: MessageSourceKind | null;
+  automation_run_id?: string | null;
+  automation?: NewMessage['automation'];
   delivery_mode: FollowUpMode;
   delivery_status: 'queued' | 'promoting';
   delivery_run_id?: string | null;
@@ -528,8 +538,11 @@ export type MessageSourceKind =
   | 'overflow_partial'
   | 'compact_partial'
   | 'user_command'
+  /** Rows of the retired scheduled tasks: rendered in history, never replayed. */
   | 'scheduled_task_prompt'
   | 'scheduled_task_result'
+  /** An automation run's input (messages.automation_run_id is set). */
+  | 'automation_prompt'
   | 'legacy'
   | 'auto_continue'
   | 'truncation_continue';
@@ -554,152 +567,6 @@ export interface MessageCursor {
   id: string;
   /** Durable host ingest position. Missing only on legacy persisted cursors. */
   sequence?: number;
-}
-
-export interface ScheduledTask {
-  id: string;
-  group_folder: string;
-  chat_jid: string;
-  prompt: string;
-  schedule_type: 'cron' | 'interval' | 'once';
-  schedule_value: string;
-  context_mode: 'group' | 'isolated';
-  execution_type: 'agent' | 'script';
-  script_command: string | null;
-  execution_mode?: 'host' | 'container' | null;
-  workspace_jid?: string | null;
-  workspace_folder?: string | null;
-  running_until?: string | null;
-  runner_id?: string | null;
-  next_run: string | null;
-  last_run: string | null;
-  last_result: string | null;
-  status: 'active' | 'paused' | 'completed' | 'parsing';
-  created_at: string;
-  created_by?: string;
-  notify_channels?: string[] | null;
-  /**
-   * Concrete delivery route captured when the task was created.
-   *
-   * `chat_jid` is workspace-level, so execution used to re-derive its target and
-   * could fall back to another group in the same folder. This JID carries the
-   * whole binding — provider, external chat, channel account and Feishu
-   * thread/root — so a run either reaches the place it was scheduled from or
-   * fails; it never silently picks somewhere else.
-   */
-  delivery_route_jid?: string | null;
-  /** Optimistic-concurrency revision for edits made through REST/MCP/UI. */
-  revision: number;
-  updated_at: string;
-  /** Soft deletion keeps task history queryable while removing future fires. */
-  deleted_at: string | null;
-}
-
-export type TaskRunTrigger = 'scheduled' | 'manual' | 'backfill';
-
-export type TaskRunStatus =
-  | 'queued'
-  | 'running'
-  | 'retry_wait'
-  | 'success'
-  | 'failed'
-  | 'cancelled'
-  | 'missed'
-  | 'delivered';
-
-export type TaskRunNotificationStatus =
-  | 'pending'
-  | 'success'
-  | 'partial_failed'
-  | 'failed'
-  | 'uncertain'
-  | 'skipped';
-
-export interface TaskRunNotificationSummary {
-  attempted: number;
-  succeeded: number;
-  failed: number;
-  failed_channels: string[];
-  /** Subset of failed attempts whose provider acceptance is unknown. */
-  uncertain?: number;
-  uncertain_channels?: string[];
-}
-
-export interface TaskRunNotificationReceipt {
-  status: Exclude<TaskRunNotificationStatus, 'pending'>;
-  summary: TaskRunNotificationSummary;
-  error?: string | null;
-}
-
-/**
- * Immutable, non-secret definition used by one occurrence. A queued/retried run
- * must never silently switch to a newer task definition.
- */
-export interface TaskRunDefinitionSnapshot {
-  prompt: string;
-  group_folder: string;
-  chat_jid: string;
-  delivery_route_jid: string | null;
-  context_mode: 'group' | 'isolated';
-  execution_type: 'agent' | 'script';
-  execution_mode: 'host' | 'container' | null;
-  script_command: string | null;
-  notify_channels: string[] | null;
-  /**
-   * Delivery contract frozen when a group-mode occurrence crosses the durable
-   * workspace-prompt hand-off.  It is intentionally absent on historical and
-   * isolated runs; consumers fall back to the workspace mode only for those
-   * legacy rows.
-   */
-  interaction_mode?: InteractionMode;
-}
-
-/** Durable state for one scheduled/manual occurrence. */
-export interface TaskRun {
-  id: string;
-  task_id: string;
-  trigger_type: TaskRunTrigger;
-  idempotency_key: string | null;
-  scheduled_for: string;
-  definition_revision: number;
-  definition_snapshot: TaskRunDefinitionSnapshot;
-  status: TaskRunStatus;
-  attempt: number;
-  available_at: string;
-  lease_owner: string | null;
-  lease_token: number;
-  lease_expires_at: string | null;
-  started_at: string | null;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
-  duration_ms: number;
-  result: string | null;
-  error: string | null;
-  notification_status: TaskRunNotificationStatus;
-  notification_error: string | null;
-  notification_summary: TaskRunNotificationSummary | null;
-  notification_attempt: number;
-  notification_available_at: string | null;
-}
-
-export interface ClaimedTaskRun extends TaskRun {
-  status: 'running';
-  lease_owner: string;
-  lease_expires_at: string;
-}
-
-export interface TaskRunLog {
-  id?: number;
-  run_id?: string;
-  task_id: string;
-  run_at: string;
-  duration_ms: number;
-  /** `queued` means a group-mode prompt was delivered to the workspace queue;
-   * it does not claim that the Agent has finished executing it. */
-  status: 'running' | 'queued' | 'success' | 'error';
-  result: string | null;
-  error: string | null;
 }
 
 // --- Auth types ---
@@ -881,7 +748,11 @@ export interface SubAgent {
     | 'feishu_thread'
     | 'auto_im'
     | 'channel_direct'
+    /** Run session of an automation (fresh or persistent mode). */
+    | 'automation'
     | null;
+  /** automations.id when source_kind='automation'. */
+  automation_id?: string | null;
   thread_id?: string | null;
   root_message_id?: string | null;
   title_source?:
@@ -959,6 +830,7 @@ export interface UsageLimitWaitSnapshot {
 }
 
 export type WsMessageOut =
+  | import('./automation-contract.js').AutomationWsEvent
   | {
       /**
        * How full a conversation's context is: after each completed turn, and

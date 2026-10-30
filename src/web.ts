@@ -47,7 +47,9 @@ import authRoutes from './routes/auth.js';
 import groupRoutes from './routes/groups.js';
 import memoryRoutes from './routes/memory.js';
 import configRoutes, { injectConfigDeps } from './routes/config.js';
+import type { AutomationWsEvent } from './automation-contract.js';
 import tasksRoutes from './routes/tasks.js';
+import automationRoutes from './routes/automations.js';
 import adminRoutes from './routes/admin.js';
 import fileRoutes from './routes/files.js';
 import monitorRoutes, { injectMonitorDeps } from './routes/monitor.js';
@@ -136,6 +138,7 @@ import { makeExpandContext } from './plugin-expander-context.js';
 import type { ExpandContext } from './plugin-expander-context.js';
 import { PLUGIN_EXPANSION_ATTACHMENT_TYPE } from './plugin-expander-sentinel.js';
 import { persistPluginExpansion } from './plugin-expander-store.js';
+import { presentAutomationMessage } from './automation-run-ledger.js';
 import { logger } from './logger.js';
 import { buildPresentedAttachments } from './attachment-thumbnails.js';
 import { createOrderedDispatcher } from './ordered-dispatch.js';
@@ -331,6 +334,7 @@ app.route('/api/groups', fileRoutes); // File routes also under /api/groups
 app.route('/api/memory', memoryRoutes);
 app.route('/api/config', configRoutes);
 app.route('/api/tasks', tasksRoutes);
+app.route('/api/automations', automationRoutes);
 app.route('/api/skills', skillsRoutes);
 app.route('/api/admin', adminRoutes);
 app.route('/api/browse', browseRoutes);
@@ -543,7 +547,9 @@ app.get('/api/follow-ups', authMiddleware, async (c) => {
   if (!canAccessGroup(authUser, group)) {
     return c.json({ error: 'Access denied' }, 403);
   }
-  return c.json({ items: listQueuedFollowUps(chatJid) });
+  return c.json({
+    items: listQueuedFollowUps(chatJid).map(presentAutomationMessage),
+  });
 });
 
 app.post('/api/follow-ups/:messageId/action', authMiddleware, async (c) => {
@@ -966,7 +972,6 @@ async function handleWebUserMessage(
       );
     },
     chatJid,
-    undefined,
     {
       chatJid,
       coveredCursors: [messageCursor],
@@ -1338,7 +1343,6 @@ async function handleAgentConversationMessage(
           receipt?.deliveryId,
           receipt?.cursor,
           receipt?.chatJid,
-          undefined,
           agentId,
         );
       } else {
@@ -1346,7 +1350,6 @@ async function handleAgentConversationMessage(
       }
     },
     virtualChatJid,
-    undefined,
     {
       chatJid: virtualChatJid,
       coveredCursors: [agentMessageCursor],
@@ -2726,7 +2729,7 @@ export function broadcastFollowUpUpdate(
   }
   const jid = normalizeHomeJid(baseChatJid);
   const allowedUserIds = getGroupAllowedUserIds(baseChatJid);
-  const items = listQueuedFollowUps(chatJid);
+  const items = listQueuedFollowUps(chatJid).map(presentAutomationMessage);
   const msg: WsMessageOut = {
     type: 'follow_up_update',
     chatJid: jid,
@@ -3240,7 +3243,7 @@ function updateStreamingSnapshot(
   //
   // 键必须用完整 normalizedJid（含 #agent: 后缀），与 runner/快照同粒度：
   // 主 runner idle 只 tombstone `web:folder`，不会误杀并发 sub-agent /
-  // 定时任务（虚拟 jid）的快照；agent runner idle tombstone 自己的
+  // 会话（虚拟 jid）的快照；agent runner idle tombstone 自己的
   // `web:folder#agent:id`，其迟到事件才能被自己的 tombstone 拦住。
   if (snapshotTombstones.has(normalizedJid)) return;
 
@@ -3602,6 +3605,11 @@ export function broadcastBillingUpdate(
   // Send only to the specific user
   const allowedUserIds = new Set([userId]);
   safeBroadcast(msg, false, allowedUserIds);
+}
+
+/** Automation changes go only to the owner's clients. */
+export function broadcastAutomationEvent(event: AutomationWsEvent): void {
+  safeBroadcast(event, false, new Set([event.ownerId]));
 }
 
 export function broadcastWhatsAppStatus(

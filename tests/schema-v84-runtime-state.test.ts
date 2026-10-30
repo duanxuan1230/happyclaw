@@ -32,7 +32,6 @@ const store = await import('../src/runtime-state-store.js');
 
 const RUNTIME_TABLES = [
   'session_history_reinjections',
-  'task_failure_notices',
   'usage_event_connections',
   'usage_limit_waits',
 ];

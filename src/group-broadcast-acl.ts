@@ -10,14 +10,8 @@ import {
 } from './workspace-attribution.js';
 
 export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
-  const virtualSeparator = ['#agent:', '#task:']
-    .map((separator) => chatJid.indexOf(separator))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  const baseChatJid =
-    virtualSeparator === undefined
-      ? chatJid
-      : chatJid.slice(0, virtualSeparator);
+  const agentSep = chatJid.indexOf('#agent:');
+  const baseChatJid = agentSep < 0 ? chatJid : chatJid.slice(0, agentSep);
   const group = getRegisteredGroup(baseChatJid);
   if (!group) return null;
 

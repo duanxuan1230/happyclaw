@@ -341,51 +341,6 @@ describe('run_finished before the final message', () => {
     expect(state.streaming[JID]).toBeUndefined();
   });
 
-  it('replaces the settled card of a group-mode scheduled task with its result', () => {
-    streamAReply(JID);
-    useChatStore.getState().handleRunFinished(JID, 'run-a');
-
-    const updates: Array<{ settled: boolean; ids: string[] }> = [];
-    const unsubscribe = useChatStore.subscribe((s) =>
-      updates.push({
-        settled: !!s.settledStreaming[JID],
-        ids: (s.messages[JID] ?? []).map((m) => m.id),
-      }),
-    );
-    useChatStore.getState().handleWsNewMessage(
-      JID,
-      finalMessage('sched-1', '## 定时任务结果\n\n最终答案。', {
-        source_kind: 'scheduled_task_result',
-      }),
-      undefined,
-      'scheduled_task',
-    );
-    unsubscribe();
-
-    // One update: the result in, the card out. Never both on screen.
-    expect(updates).toEqual([{ settled: false, ids: ['sched-1'] }]);
-    const state = useChatStore.getState();
-    expect(state.thinkingCache['sched-1']).toBe('先想一想。');
-    expect(state.pendingThinking[JID]).toBeUndefined();
-  });
-
-  it("leaves another turn's settled card for its own final", () => {
-    streamAReply(JID);
-    useChatStore.getState().handleRunFinished(JID, 'run-a');
-    useChatStore.getState().handleWsNewMessage(
-      JID,
-      finalMessage('sched-other', '另一个任务', {
-        source_kind: 'scheduled_task_result',
-        turn_id: 'turn-other',
-      }),
-      undefined,
-      'scheduled_task',
-    );
-    const state = useChatStore.getState();
-    expect(state.settledStreaming[JID]?.partialText).toBe('最终答案。');
-    expect(state.thinkingCache['sched-other']).toBeUndefined();
-  });
-
   it('ignores a run_finished for another attempt', () => {
     streamAReply(JID);
     useChatStore.getState().handleRunFinished(JID, 'run-other');
@@ -1259,39 +1214,6 @@ describe('a final that arrives while its run is still closing', () => {
     expect(state.streaming[JID]?.partialText).toBe('最终答案。');
     expect(state.thinkingCache['interim-1']).toBeUndefined();
     expect(state.activeRuns[JID]?.answered).toBeUndefined();
-  });
-
-  it('settles a group-mode scheduled task in place on its result, and only on its own', () => {
-    useChatStore.getState().handleRunStarted(JID, 'run-a');
-    streamTurn('run-a', { turnId: 'sched-turn', inputTurnId: 'sched-input' });
-
-    // An isolated task posts its result here while this turn streams.
-    useChatStore.getState().handleWsNewMessage(
-      JID,
-      finalMessage('isolated-1', '别的任务', {
-        source_kind: 'scheduled_task_result',
-        turn_id: 'isolated-input',
-      }),
-      undefined,
-      'scheduled_task',
-    );
-    let state = useChatStore.getState();
-    expect(state.streaming[JID]?.partialText).toBe('最终答案。');
-    expect(state.thinkingCache['isolated-1']).toBeUndefined();
-
-    useChatStore.getState().handleWsNewMessage(
-      JID,
-      finalMessage('sched-1', '## 定时任务结果', {
-        source_kind: 'scheduled_task_result',
-        turn_id: 'sched-input',
-      }),
-      undefined,
-      'scheduled_task',
-    );
-    state = useChatStore.getState();
-    expect(state.streaming[JID]).toBeUndefined();
-    expect(state.thinkingCache['sched-1']).toBe('想一想 run-a');
-    expect(state.activeRuns[JID]?.answered).toBe('sched-input');
   });
 
   it('settles a session reply in place, its tab still running until run_finished', () => {

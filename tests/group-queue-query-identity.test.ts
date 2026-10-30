@@ -17,7 +17,7 @@ vi.mock('../src/runtime-config.js', () => ({
     maxConcurrentHostProcesses: 5,
   }),
 }));
-vi.mock('../src/db.js', () => ({ getTaskById: () => undefined }));
+vi.mock('../src/db.js', () => ({}));
 
 const { GroupQueue } = await import('../src/group-queue.js');
 
@@ -204,14 +204,15 @@ describe('GroupQueue query identity', () => {
     );
     expect(state.messageRetrySnapshot).toBeNull();
 
-    const scheduledJid = 'web:home#task:scheduled-a';
-    const scheduledState = (queue as any).getGroup(scheduledJid);
-    scheduledState.active = true;
-    scheduledState.groupFolder = 'home';
-    scheduledState.activeRunnerIsTask = true;
-    scheduledState.queryInFlight = false;
+    // A task runner outside a conversation lane records no retry snapshot.
+    const taskJid = 'web:home-task';
+    const taskState = (queue as any).getGroup(taskJid);
+    taskState.active = true;
+    taskState.groupFolder = 'home';
+    taskState.activeRunnerIsTask = true;
+    taskState.queryInFlight = false;
     expect(
-      queue.setMessageRetrySnapshot(scheduledJid, {
+      queue.setMessageRetrySnapshot(taskJid, {
         coveredCursors: [
           { timestamp: '2026-08-14T00:00:00.000Z', id: 'task-input' },
         ],
@@ -270,24 +271,16 @@ describe('GroupQueue query identity', () => {
     state.queryId = null;
 
     expect(
-      queue.sendMessage(
-        jid,
-        'forward root',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          chatJid: jid,
-          coveredCursors: [
-            { timestamp: '2026-08-14T00:00:00.000Z', id: 'om_root' },
-          ],
-          cursor: {
-            timestamp: '2026-08-14T00:00:00.000Z',
-            id: 'om_root',
-          },
+      queue.sendMessage(jid, 'forward root', undefined, undefined, undefined, {
+        chatJid: jid,
+        coveredCursors: [
+          { timestamp: '2026-08-14T00:00:00.000Z', id: 'om_root' },
+        ],
+        cursor: {
+          timestamp: '2026-08-14T00:00:00.000Z',
+          id: 'om_root',
         },
-      ),
+      }),
     ).toBe('sent');
     expect(queue.activeQueryExclusivelyCoversMessage(jid, 'om_root')).toBe(
       true,

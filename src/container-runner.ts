@@ -88,7 +88,6 @@ import { releaseHappyClawOwnerIntroductionLease } from './owner-profile-store.js
 import { applyProviderSwitchToInput } from './provider-switch-context.js';
 import {
   getUserById,
-  getTaskRunById,
   isDatabaseInitialized,
   getSessionModelSelection,
   getSessionProviderId,
@@ -113,7 +112,6 @@ import {
 import { isApiError } from './agent-output-parser.js';
 import {
   CODEX_REAUTH_REQUIRED_USER_NOTICE,
-  DEFAULT_MAX_TRANSIENT_RETRIES,
   TransientRetryLedger,
   resolveProviderFailureClass,
   resolveTerminalProviderFailureNotice,
@@ -669,7 +667,6 @@ export interface ContainerInput {
   readonly currentBatchMessageIds?: readonly string[];
   isHome?: boolean;
   isAdminHome?: boolean;
-  isScheduledTask?: boolean;
   /**
    * Internal per-runner HMAC secret delivered only in the stdin bootstrap.
    * Never expose this in environment variables, files, logs, prompts, or IPC.
@@ -677,14 +674,8 @@ export interface ContainerInput {
   workspaceMemoryMutationSigningSecret?: string;
   /** Public identity paired with the runner-private signing secret. */
   workspaceMemoryRunnerInstanceId?: string;
-  /** Isolated task run ID — determines IPC namespace (tasks-run/{taskRunId}/) */
-  taskRunId?: string;
-  /** Claude session/provider namespace. Tasks use task:<id> while IPC still uses taskRunId. */
+  /** Claude session/provider namespace when it differs from agentId. */
   sessionAgentId?: string;
-  /** If the last unprocessed message was emitted by a scheduled task prompt,
-   * this is that task's ID; propagated into agent-runner so MCP send_message
-   * outputs can be attributed back to the task record. */
-  messageTaskId?: string;
   images?: Array<{ data: string; mimeType?: string }>;
   agentProfile?: {
     id: string;
@@ -940,8 +931,7 @@ export function usageLimitWaitScopeFor(
 ): UsageLimitWaitScope {
   return {
     scopeKey: usageLimitWaitScopeKey(input),
-    inputKey:
-      input.turnId ?? (input.isScheduledTask ? input.taskRunId : undefined),
+    inputKey: input.turnId,
   };
 }
 
@@ -1071,22 +1061,6 @@ export function recordUsageConnection(
   } catch (err) {
     logger.warn({ err, eventId }, 'Failed to record the usage connection');
   }
-}
-
-export function hasNonReplayableTaskNotificationEvidence(
-  summary: { succeeded: number; uncertain?: number } | null | undefined,
-): boolean {
-  return Boolean(
-    summary && (summary.succeeded > 0 || (summary.uncertain ?? 0) > 0),
-  );
-}
-
-function scheduledInputHasPhysicalSideEffect(input: ContainerInput): boolean {
-  if (!input.isScheduledTask || !input.taskRunId || !isDatabaseInitialized())
-    return false;
-  return hasNonReplayableTaskNotificationEvidence(
-    getTaskRunById(input.taskRunId)?.notification_summary,
-  );
 }
 
 function providerFailureDispositionLogMessage(
@@ -2304,14 +2278,13 @@ function assertRuntimeEnvPathSegment(value: string, label: string): string {
 /**
  * Keep generated env files isolated by both runtime and Feishu Bot identity.
  *
- * Conversation agents and task runs can execute concurrently inside one
- * workspace. A bound channel account is also included so two Bots routed to
+ * The main session and conversation agents can execute concurrently inside
+ * one workspace. A bound channel account is also included so two Bots routed to
  * the same main workspace can never overwrite each other's credentials.
  */
 export function getContainerRuntimeEnvDir(
   groupFolder: string,
   ipcAgentId?: string,
-  taskRunId?: string,
   feishuChannelAccountId?: string | null,
 ): string {
   const safeGroupFolder = assertValidWorkspaceFolderName(
@@ -2329,9 +2302,7 @@ export function getContainerRuntimeEnvDir(
     : ['default'];
   const runtimePath = ipcAgentId
     ? ['agents', assertRuntimeEnvPathSegment(ipcAgentId, 'agent id')]
-    : taskRunId
-      ? ['tasks-run', assertRuntimeEnvPathSegment(taskRunId, 'task run id')]
-      : ['main'];
+    : ['main'];
   return path.join(
     DATA_DIR,
     'env',
@@ -2339,48 +2310,6 @@ export function getContainerRuntimeEnvDir(
     ...identityPath,
     ...runtimePath,
   );
-}
-
-/**
- * Remove every identity-specific environment snapshot for one isolated task
- * run. The scheduler does not need to retain or rediscover which Bot identity
- * was selected after the container exits.
- */
-export function cleanupContainerTaskRuntimeEnvDirs(
-  groupFolder: string,
-  taskRunId: string,
-): void {
-  const safeTaskRunId = assertRuntimeEnvPathSegment(taskRunId, 'task run id');
-  const safeGroupFolder = assertValidWorkspaceFolderName(
-    groupFolder,
-    'group folder',
-  );
-  const workspaceEnvRoot = path.join(DATA_DIR, 'env', safeGroupFolder);
-  const taskRuntimeSuffix = path.join('tasks-run', safeTaskRunId);
-
-  fs.rmSync(path.join(workspaceEnvRoot, 'default', taskRuntimeSuffix), {
-    recursive: true,
-    force: true,
-  });
-
-  const accountRoot = path.join(workspaceEnvRoot, 'channel-accounts');
-  let accountEntries: fs.Dirent[];
-  try {
-    accountEntries = fs.readdirSync(accountRoot, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  for (const entry of accountEntries) {
-    if (!entry.isDirectory()) continue;
-    // Ignore unexpected legacy/manual entries instead of letting them broaden
-    // the deletion target.
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
-    fs.rmSync(path.join(accountRoot, entry.name, taskRuntimeSuffix), {
-      recursive: true,
-      force: true,
-    });
-  }
 }
 
 export interface OAuthLaunchSnapshot {
@@ -2406,7 +2335,6 @@ function prepareVolumeMounts(
   mountUserSkills = true,
   sessionAgentId?: string,
   ownerHomeFolder?: string,
-  taskRunId?: string,
   resolvedProvider?: ResolvedProvider,
   ipcAgentId?: string,
   agentProfile?: RunnerAgentProfile,
@@ -2689,13 +2617,10 @@ function prepareVolumeMounts(
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // Sub-agents get their own IPC subdirectory under agents/{agentId}/
-  // Isolated tasks get their own IPC subdirectory under tasks-run/{taskRunId}/
   // Keep host IPC roots owner-only; the entrypoint applies the selected bridge.
   const groupIpcDir = ipcAgentId
     ? path.join(DATA_DIR, 'ipc', group.folder, 'agents', ipcAgentId)
-    : taskRunId
-      ? path.join(DATA_DIR, 'ipc', group.folder, 'tasks-run', taskRunId)
-      : path.join(DATA_DIR, 'ipc', group.folder);
+    : path.join(DATA_DIR, 'ipc', group.folder);
   mkdirForContainer(groupIpcDir);
   // All agents (main + sub/conversation) get agents/ subdir for spawn/message IPC
   for (const sub of ['messages', 'tasks', 'input', 'agents'] as const) {
@@ -2718,7 +2643,6 @@ function prepareVolumeMounts(
   const envDir = getContainerRuntimeEnvDir(
     group.folder,
     ipcAgentId,
-    taskRunId,
     feishuCliBinding?.source === 'channel_account'
       ? feishuCliBinding.accountId
       : null,
@@ -3448,28 +3372,23 @@ export async function runContainerAgent(
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
   input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
-  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
-    input = { ...input, turnId: input.taskRunId };
-  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
-    taskRunId: input.taskRunId ?? null,
   };
   const {
     runnerInstanceId: workspaceMemoryRunnerInstanceId,
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId ?? input.taskRunId,
+    input.turnId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'container',
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
     sessionAgentId: sessionAgentId ?? null,
-    taskRunId: input.taskRunId ?? null,
     agentEffort: resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
     sessionEffort: poolResult?.sessionEffort,
   });
@@ -3486,7 +3405,6 @@ export async function runContainerAgent(
       shouldMountUserSkills,
       sessionAgentId,
       ownerHomeFolder,
-      input.taskRunId,
       resolvedProvider,
       input.agentId,
       input.agentProfile,
@@ -3951,38 +3869,6 @@ export async function runContainerAgent(
       providerPool.releaseSession(selectedProfileId);
     }
   }
-}
-
-export function writeTasksSnapshot(
-  groupFolder: string,
-  isAdminHome: boolean,
-  tasks: Array<{
-    id: string;
-    groupFolder: string;
-    prompt: string;
-    schedule_type: string;
-    schedule_value: string;
-    status: string;
-    next_run: string | null;
-  }>,
-): void {
-  // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
-
-  // Admin home sees all tasks, others only see their own
-  const filteredTasks = isAdminHome
-    ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
-
-  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  // 删除后重建：容器创建的文件归属 node(1000) 用户，宿主机进程无法覆写
-  try {
-    fs.unlinkSync(tasksFile);
-  } catch {
-    /* ignore */
-  }
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
 export interface AvailableGroup {
@@ -4476,12 +4362,9 @@ export async function runHostAgent(
 
   // 2. 确保目录结构（宿主机模式下限制目录权限）
   // Sub-agents get their own IPC and session directories
-  // Isolated tasks get their own IPC subdirectory under tasks-run/{taskRunId}/
   const groupIpcDir = input.agentId
     ? path.join(DATA_DIR, 'ipc', group.folder, 'agents', input.agentId)
-    : input.taskRunId
-      ? path.join(DATA_DIR, 'ipc', group.folder, 'tasks-run', input.taskRunId)
-      : path.join(DATA_DIR, 'ipc', group.folder);
+    : path.join(DATA_DIR, 'ipc', group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), {
     recursive: true,
     mode: 0o700,
@@ -4629,28 +4512,23 @@ export async function runHostAgent(
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
   input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
-  if (!input.turnId && input.isScheduledTask && input.taskRunId) {
-    input = { ...input, turnId: input.taskRunId };
-  }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
-    taskRunId: input.taskRunId ?? null,
   };
   const {
     runnerInstanceId: workspaceMemoryRunnerInstanceId,
     signingSecret: workspaceMemoryMutationSigningSecret,
   } = issueWorkspaceMemoryWriteCapability(
     workspaceMemoryCapabilityScope,
-    input.turnId ?? input.taskRunId,
+    input.turnId,
   );
   const codexGatewayLease = new CodexGatewayRunnerLease({
     kind: 'host',
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
     sessionAgentId: sessionAgentId ?? null,
-    taskRunId: input.taskRunId ?? null,
     agentEffort: resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
     sessionEffort: hostPoolResult?.sessionEffort,
   });
@@ -5338,11 +5216,10 @@ export async function runHostAgent(
 export type AgentRunner = typeof runContainerAgent | typeof runHostAgent;
 
 /**
- * Model-tier fallback lives inside agent-runner. Scheduled tasks have no warm
- * user-turn stream, so they can also retry the same immutable prompt across
- * healthy provider profiles here. Interactive conversations keep failover in
- * GroupQueue/IPC recovery so a late warm-turn failure never replays the
- * process's original cold-start prompt.
+ * Model-tier fallback lives inside agent-runner, and provider failover for a
+ * conversation lives in GroupQueue/IPC recovery, so a late warm-turn failure
+ * never replays the process's original cold-start prompt. This is the single
+ * entry both runner kinds go through.
  */
 export async function runAgentWithModelFallback(
   runFn: AgentRunner,
@@ -5356,197 +5233,5 @@ export async function runAgentWithModelFallback(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   ownerHomeFolder?: string,
 ): Promise<ContainerOutput> {
-  // Isolated scheduled tasks historically omitted turnId. Give the whole
-  // outer fallback loop one stable logical identity so the transient ledger
-  // can pin its authorized replay to the first attempted provider. Reuse the
-  // durable task occurrence when available; otherwise generate exactly once.
-  if (input.isScheduledTask && !input.turnId) {
-    input = {
-      ...input,
-      turnId: input.taskRunId?.trim() || randomUUID(),
-    };
-  }
-  // A top-level Agent owns exactly one complete model configuration. Retrying
-  // through other enabled configurations would violate that contract and can
-  // send a Workspace to a different gateway or official subscription. The
-  // global default binds the same way, but only because the operator chose
-  // it; with none chosen a multi-provider pool still retries across its
-  // members (see resolvePinnedModelConfigId).
-  const selectedModelConfigId = resolvePinnedModelConfigId(
-    input.agentProfile?.modelConfigId,
-    {
-      groupFolder: group.folder,
-      agentId: input.sessionAgentId ?? input.agentId,
-    },
-  );
-  const enabledProviders = getEnabledProviders();
-  const fallbackTier = getSystemSettings().fallbackModel?.trim();
-  const fallbackOnlyCombinations = fallbackTier
-    ? enabledProviders.filter(
-        (provider) =>
-          providerModelTier(provider.anthropicModel) !==
-          providerModelTier(fallbackTier),
-      ).length
-    : 0;
-  // Account failures remove every tier at once; model failures remove one
-  // (account, tier) pair. This bound covers every distinct reachable pair
-  // without allowing a malformed non-terminal signal to loop forever.
-  const maxAttempts = selectedModelConfigId
-    ? 1
-    : Math.max(1, enabledProviders.length + fallbackOnlyCombinations);
-  let lastOutput: ContainerOutput | undefined;
-  let availabilityState = providerPool.getAvailabilityStateKey();
-  // A transient replay is not a distinct combination — it re-runs the same
-  // (account, tier) on purpose — so it must not consume the combination budget.
-  // Without this a single-account install computes maxAttempts = 1 and a
-  // scheduled task could never use the retry the disposition granted it, while
-  // adding the headroom up front would instead hand a pinned Agent a second
-  // attempt it must not get for an account failure. Granted only after an
-  // observed transient failure, and capped independently of the per-input
-  // ledger that is the real bound.
-  let transientReplayBudget = 0;
-
-  for (
-    let attempt = 0;
-    attempt < maxAttempts + transientReplayBudget;
-    attempt += 1
-  ) {
-    let completedInputBeforeProviderFailure = false;
-    let attemptedProviderId: string | null = null;
-    const gatedOnOutput = onOutput
-      ? async (output: ContainerOutput): Promise<void> => {
-          if (!output.providerFailure && output.inputTurnCompleted) {
-            completedInputBeforeProviderFailure = true;
-          }
-          if (
-            input.isScheduledTask &&
-            output.providerFailure &&
-            (completedInputBeforeProviderFailure ||
-              output.providerFailureTerminal !== true)
-          ) {
-            return;
-          }
-          await onOutput(output);
-        }
-      : undefined;
-
-    lastOutput = await runFn(
-      group,
-      input,
-      (proc, identifier, selectedProviderId) => {
-        attemptedProviderId = selectedProviderId;
-        onProcess(proc, identifier, selectedProviderId);
-      },
-      gatedOnOutput,
-      ownerHomeFolder,
-    );
-    if (
-      input.isScheduledTask &&
-      lastOutput.providerFailure &&
-      completedInputBeforeProviderFailure
-    ) {
-      logger.warn(
-        {
-          group: group.name,
-          attempt: attempt + 1,
-        },
-        'Provider failed after scheduled input completed; suppressing replay to avoid duplicate side effects',
-      );
-      return {
-        ...lastOutput,
-        status: 'success',
-        result: null,
-        providerFailure: false,
-        providerFailureTerminal: undefined,
-        inputTurnCompleted: true,
-      };
-    }
-    if (
-      input.isScheduledTask &&
-      lastOutput.providerFailure &&
-      scheduledInputHasPhysicalSideEffect(input)
-    ) {
-      logger.warn(
-        { group: group.name, taskRunId: input.taskRunId },
-        'Scheduled input produced an acknowledged or uncertain physical side effect; suppressing whole-prompt provider replay',
-      );
-      return {
-        ...lastOutput,
-        status: 'success',
-        result: null,
-        providerFailure: false,
-        providerFailureTerminal: undefined,
-        inputTurnCompleted: true,
-      };
-    }
-    if (
-      !input.isScheduledTask ||
-      !lastOutput.providerFailure ||
-      lastOutput.providerFailureTerminal === true ||
-      // Every connection is out of usage: no other attempt can serve it.
-      lastOutput.providerUsageLimitResumeAt !== undefined
-    ) {
-      return lastOutput;
-    }
-
-    const nextAvailabilityState = providerPool.getAvailabilityStateKey();
-    // A transient failure deliberately leaves availability untouched, so the
-    // no-progress guard below would read "nothing changed" and stop — burning
-    // the replay budget the disposition just granted without ever using it.
-    // Reaching here already proves the failure was non-terminal, i.e. the
-    // bounded ledger allowed one more attempt, so the same-provider replay this
-    // guard normally prevents is exactly the intended behaviour here.
-    const replayableTransient =
-      resolveProviderFailureClass(lastOutput) === 'transient';
-    if (
-      replayableTransient &&
-      transientReplayBudget < DEFAULT_MAX_TRANSIENT_RETRIES
-    ) {
-      transientReplayBudget += 1;
-    }
-    if (
-      attemptedProviderId !== null &&
-      !replayableTransient &&
-      nextAvailabilityState === availabilityState
-    ) {
-      logger.error(
-        {
-          group: group.name,
-          attempt: attempt + 1,
-          providerId: attemptedProviderId,
-        },
-        'Scheduled provider retry made no availability progress; stopping replay',
-      );
-      applyKnownProviderFailureDisposition(lastOutput, true);
-      return lastOutput;
-    }
-    availabilityState = nextAvailabilityState;
-
-    logger.warn(
-      {
-        group: group.name,
-        attempt: attempt + 1,
-        maxAttempts,
-      },
-      replayableTransient
-        ? 'Scheduled task hit a transient provider failure; replaying the same prompt on the same provider'
-        : 'Scheduled task provider failed; retrying the same prompt on another provider',
-    );
-  }
-
-  if (lastOutput?.providerFailure) {
-    logger.error(
-      { group: group.name, maxAttempts },
-      'Scheduled provider retry reached its distinct-combination safety bound',
-    );
-    applyKnownProviderFailureDisposition(lastOutput, true);
-    return lastOutput;
-  }
-  return (
-    lastOutput ?? {
-      status: 'error',
-      result: null,
-      error: 'No provider attempt was executed',
-    }
-  );
+  return runFn(group, input, onProcess, onOutput, ownerHomeFolder);
 }

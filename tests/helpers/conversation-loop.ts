@@ -47,12 +47,9 @@ export function createConversationLoop(input: {
       id === agentId
         ? { id, kind: 'conversation', status: 'idle', name: id }
         : undefined,
-    resolveTerminalScheduledGroupPromptRun: () => null,
-    getTaskRunById: () => undefined,
     getRegisteredGroup: () => undefined,
     getWorkspaceInteractionMode: () => 'assistant',
     getChannelMount: () => undefined,
-    resolveScheduledGroupPromptInteractionMode: () => null,
     queue,
     createIpcDeliveryTarget: (_jid: string, messages: NewMessage[]) => {
       globals.admittedBatch = messages;

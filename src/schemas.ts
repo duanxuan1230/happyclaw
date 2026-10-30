@@ -5,6 +5,7 @@ import { AGENT_EFFORT_LEVELS } from './agent-effort.js';
 import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './group-constants.js';
+import { AUTOMATION_LIMITS } from './automation.js';
 import {
   getModelPreset,
   isValidModelId,
@@ -66,143 +67,66 @@ export const FeishuAppRegistrationCreateSchema = z.object({
   brand: z.enum(['feishu', 'lark']).optional().default('feishu'),
 });
 
+const AutomationScheduleSchema = z.object({
+  kind: z.enum(['cron', 'interval', 'once', 'manual']),
+  cronExpr: z.string().max(200).nullable().optional(),
+  timezone: z.string().max(64).nullable().optional(),
+  intervalMs: z.number().int().positive().nullable().optional(),
+  runAt: z.string().max(64).nullable().optional(),
+});
+
+const AutomationPreRunCheckSchema = z.object({
+  command: z.string().max(AUTOMATION_LIMITS.scriptCommandMax * 2),
+  timeoutMs: z.number().int().positive().nullable().optional(),
+});
+
 /**
- * A schedule's prompt is replayed on a timer, so it is stored content with no
- * natural bound.
- *
- * Exported because the REST schemas are not the only writers: the MCP/IPC
- * `schedule_task` and `update_task` handlers call createTask/updateTask
- * directly. The Agent path is the one this cap exists for, so it must use the
- * same number rather than leave the hole open.
+ * Shape and a generous size cap only: the automation service applies the
+ * shared validateAutomationDraft rules, cron syntax and the permission
+ * checks, so REST and the agent tools reject the same drafts with the same
+ * messages.
  */
-export const MAX_TASK_PROMPT_LENGTH = 16384;
-
-/** Same reasoning as MAX_TASK_PROMPT_LENGTH, for script tasks. */
-export const MAX_TASK_SCRIPT_COMMAND_LENGTH = 4096;
-
-export const TaskPatchSchema = z.object({
-  chat_jid: z.string().min(1).optional(),
-  // Same bound as TaskCreateSchema; an update must not be a way around it.
-  prompt: z.string().max(MAX_TASK_PROMPT_LENGTH).optional(),
-  schedule_type: z.enum(['cron', 'interval', 'once']).optional(),
-  schedule_value: z.string().optional(),
-  context_mode: z.enum(['group', 'isolated']).optional(),
-  execution_type: z.enum(['agent', 'script']).optional(),
-  execution_mode: z.enum(['host', 'container']).optional(),
-  script_command: z
+const AutomationDraftFields = {
+  name: z.string().max(200),
+  prompt: z
     .string()
-    .max(MAX_TASK_SCRIPT_COMMAND_LENGTH)
+    .max(AUTOMATION_LIMITS.promptMax * 2)
     .nullable()
     .optional(),
-  status: z.enum(['active', 'paused']).optional(),
-  // next_run 必须是可解析的 ISO 日期。schedule_value 在 PATCH 路由里随
-  // schedule_type 决定语义（cron/interval/once 各有要求），路由层会单独检查。
-  // 这里只兜底 next_run 的格式，避免 garbage-in 让 scheduler computeNextRun 抛
-  // RangeError 把任务永久卡死在 runningTaskIds（高危 bug 修复）。
-  next_run: z
+  stopWhen: z.string().max(2000).nullable().optional(),
+  schedule: AutomationScheduleSchema,
+  endAt: z.string().max(64).nullable().optional(),
+  silentWhenIdle: z.boolean().optional(),
+  preRunCheck: AutomationPreRunCheckSchema.nullable().optional(),
+  scriptCommand: z
     .string()
-    .refine((v) => !isNaN(Date.parse(v)), 'next_run must be ISO 8601')
+    .max(AUTOMATION_LIMITS.scriptCommandMax * 2)
+    .nullable()
     .optional(),
-  notify_channels: z.array(ChannelProviderSchema).nullable().optional(),
+};
+
+const AutomationSessionModeSchema = z.enum(['fresh', 'persistent', 'bound']);
+
+export const AutomationCreateSchema = z.object({
+  ...AutomationDraftFields,
+  workspaceJid: z.string().min(1).max(512),
+  sessionMode: AutomationSessionModeSchema,
+  targetSessionJid: z.string().max(512).nullable().optional(),
+  execution: z.enum(['agent', 'script']).optional(),
 });
 
-export const TaskPurgeSchema = z.object({
-  tasks: z
-    .array(
-      z.object({
-        id: z.string().trim().min(1).max(128),
-        expected_revision: z.number().int().positive(),
-      }),
-    )
-    .min(1)
-    .max(500),
-});
-
-// Cron 表达式校验：5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）
-// 也允许预定义表达式如 @daily, @hourly 等
-const CRON_REGEX =
-  /^(@(yearly|annually|monthly|weekly|daily|hourly|minutely|secondly)|(\S+\s+){4,5}\S+)$/;
-
-// interval 调度上限：1 年毫秒数。再大就接近 JS Date 的安全范围边界，
-// `new Date(Date.now() + ms).toISOString()` 会抛 RangeError。1 年内任何场景
-// 都该用 cron 而不是 interval，所以这是合理的硬上限。
-const MAX_INTERVAL_MS = 365 * 24 * 60 * 60 * 1000;
-const MIN_INTERVAL_MS = 60 * 1000;
-
-// JS Date 安全上限（约 8.64e15ms after 1970）。once 任务给 100 年余量足够。
-const MAX_ONCE_TIMESTAMP_MS = 100 * 365 * 24 * 60 * 60 * 1000;
-
-export const TaskCreateSchema = z
-  .object({
-    group_folder: z.string().min(1).optional(),
-    chat_jid: z.string().min(1).optional(),
-    // See MAX_TASK_PROMPT_LENGTH: the same bound applies on every writer.
-    prompt: z.string().max(MAX_TASK_PROMPT_LENGTH).optional().default(''),
-    schedule_type: z.enum(['cron', 'interval', 'once']),
-    schedule_value: z.string().min(1),
-    context_mode: z.enum(['group', 'isolated']).optional(),
-    execution_type: z.enum(['agent', 'script']).optional(),
-    execution_mode: z.enum(['host', 'container']).optional(),
-    script_command: z.string().max(MAX_TASK_SCRIPT_COMMAND_LENGTH).optional(),
-    notify_channels: z.array(ChannelProviderSchema).nullable().optional(),
-  })
-  .superRefine((data, ctx) => {
-    const execType = data.execution_type || 'agent';
-    if (execType === 'agent' && !data.prompt?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['prompt'],
-        message: '智能体模式下 prompt 为必填项',
-      });
-    }
-    if (execType === 'script' && !data.script_command?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['script_command'],
-        message: '脚本模式下 script_command 为必填项',
-      });
-    }
-    if (data.schedule_type === 'cron') {
-      if (!CRON_REGEX.test(data.schedule_value.trim())) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['schedule_value'],
-          message: 'Invalid cron expression (expected 5 or 6 fields)',
-        });
-      }
-    } else if (data.schedule_type === 'interval') {
-      const num = Number(data.schedule_value);
-      if (!Number.isFinite(num) || num < MIN_INTERVAL_MS) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['schedule_value'],
-          message: 'Interval must be at least 60000 milliseconds',
-        });
-      } else if (num > MAX_INTERVAL_MS) {
-        // 防止 `new Date(Date.now() + ms).toISOString()` 抛 RangeError 让请求 500
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['schedule_value'],
-          message: `Interval exceeds maximum (${MAX_INTERVAL_MS} ms = 1 year). Use cron for longer schedules.`,
-        });
-      }
-    } else if (data.schedule_type === 'once') {
-      const ts = Date.parse(data.schedule_value);
-      if (isNaN(ts)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['schedule_value'],
-          message: 'Once schedule must be a valid ISO 8601 date string',
-        });
-      } else if (Math.abs(ts) > MAX_ONCE_TIMESTAMP_MS) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['schedule_value'],
-          message: 'Once schedule out of representable range',
-        });
-      }
-    }
+export const AutomationPatchSchema = z
+  .object(AutomationDraftFields)
+  .partial()
+  .extend({
+    expectedRevision: z.number().int().positive(),
+    sessionMode: AutomationSessionModeSchema.optional(),
+    targetSessionJid: z.string().max(512).nullable().optional(),
   });
+
+export const AutomationMarkReadSchema = z.object({
+  runIds: z.array(z.string().min(1).max(128)).max(500).optional(),
+});
 
 // 单张图片附件上限 5MB（base64 编码后约 6.67MB）
 const MAX_IMAGE_BASE64_LENGTH = (5 * 1024 * 1024 * 4) / 3; // ~6.67M chars

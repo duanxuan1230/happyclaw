@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { Link2, Pencil, Trash2 } from 'lucide-react';
+import { Link2, Pencil, Timer, Trash2 } from 'lucide-react';
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { PromptDialog } from '@/components/common/PromptDialog';
 import { isLiveStream, useChatStore } from '../../../stores/chat';
@@ -63,10 +63,12 @@ export function useWorkspaceSessions<T extends Element>(groupJid: string) {
 /** A conversation row's ⋯ items; the main conversation only binds. */
 export function SessionMenuItems({
   onBind,
+  onCreateAutomation,
   onRename,
   onDelete,
 }: {
   onBind: () => void;
+  onCreateAutomation?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
 }) {
@@ -76,6 +78,12 @@ export function SessionMenuItems({
         <Link2 />
         会话绑定
       </DropdownMenuItem>
+      {onCreateAutomation && (
+        <DropdownMenuItem onClick={onCreateAutomation}>
+          <Timer />
+          从此会话创建自动化…
+        </DropdownMenuItem>
+      )}
       {onRename && (
         <DropdownMenuItem onClick={onRename}>
           <Pencil />

@@ -4,10 +4,8 @@ import type {
 } from './agent-builder-turn-auth.js';
 import { isWorkspaceMemoryOwnerTurn } from './workspace-memory-ipc.js';
 
-export const SKILL_MUTATION_TASK_RUN_REJECTION =
-  '定时任务运行中不能安装或卸载 Skill。请由工作区主人在对话中操作。';
 export const SKILL_MUTATION_NON_OWNER_REJECTION =
-  '本轮对话不是由工作区主人发起的（群成员、定时任务或系统触发），不能安装或卸载 Skill。请由工作区主人亲自在对话中发起。';
+  '本轮对话不是由工作区主人发起的（群成员、自动化或系统触发），不能安装或卸载 Skill。请由工作区主人亲自在对话中发起。';
 
 /**
  * Why an Agent's install_skill / uninstall_skill request must be refused, or
@@ -25,7 +23,6 @@ export function skillMutationTurnRejection(input: {
   sourceFolder: string;
   /** Turn-registry scope of the requesting runtime (agentBuilderTurnScope). */
   turnScope: string;
-  isolatedTaskRun: boolean;
   ownerUserId: string;
   loadPersistedInput: (
     chatJid: string,
@@ -35,7 +32,6 @@ export function skillMutationTurnRejection(input: {
   getFolderJids: (folder: string) => string[];
   getChannelType: (jid: string) => string | null;
 }): string | null {
-  if (input.isolatedTaskRun) return SKILL_MUTATION_TASK_RUN_REJECTION;
   const ownerTurn = isWorkspaceMemoryOwnerTurn({
     ownerUserId: input.ownerUserId,
     workspaceJids: input.getFolderJids(input.sourceFolder),

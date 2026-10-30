@@ -86,7 +86,6 @@ function mountSession(folder: string) {
     'main',
     undefined,
     undefined,
-    undefined,
     hostClaudeProfile() as never,
   );
   const sessionDir = path.join(ROOT, 'sessions', folder, '.claude');

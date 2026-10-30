@@ -84,6 +84,12 @@ import { preAcceptImDeliveryError } from './im-send-retry-policy.js';
 import { prepareWeChatTextChunks } from './wechat-outbound.js';
 
 /** Union type for any streaming card controller (Feishu, DingTalk, Discord, QQ, or WeCom) */
+/** Presentation choices for one streaming reply. */
+export interface StreamingSessionOptions {
+  /** Fixed card title (an automation run shows the automation's name). */
+  title?: string;
+}
+
 export type StreamingSession =
   | StreamingCardController
   | DingTalkStreamingCardController
@@ -296,6 +302,7 @@ export interface IMChannel {
     onCardCreated?: (messageId: string) => void,
     lifecycle?: StreamingCardLifecycle,
     inputMessageId?: string,
+    options?: StreamingSessionOptions,
   ): Promise<StreamingSession | undefined>;
   /** Reconcile a non-terminal card through this exact connected Bot. */
   reconcileStreamingCard?(
@@ -502,6 +509,7 @@ export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
       onCardCreated?: (messageId: string) => void,
       lifecycle?: StreamingCardLifecycle,
       inputMessageId?: string,
+      options?: StreamingSessionOptions,
     ): Promise<StreamingSession | undefined> {
       if (!inner) return undefined;
       const larkClient = inner.getLarkClient();
@@ -520,6 +528,7 @@ export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
         replyInThread: target.replyInThread,
         onCardCreated,
         lifecycle,
+        title: options?.title,
         // 降级可观测性：卡片连续更新失败进入 error 态时记一条 warn。
         // 终态收口与是否允许静态消息兜底由 controller/index.ts 的严格
         // delivery phase 负责；这里仅补可观测日志。

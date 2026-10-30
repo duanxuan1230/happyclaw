@@ -57,7 +57,6 @@ describe('WeCom full-stack provider registration', () => {
       'web/src/components/settings/channel-meta.tsx',
       'web/src/utils/channel-accounts.ts',
       'web/src/stores/channel-accounts.ts',
-      'web/src/utils/task-utils.ts',
       'src/channel-prefixes.ts',
       'src/schemas.ts',
     ]) {
