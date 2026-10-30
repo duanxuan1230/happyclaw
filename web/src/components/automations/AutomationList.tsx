@@ -43,7 +43,7 @@ function AutomationListCell({
         aria-current={selected ? 'true' : undefined}
         onClick={() => onSelect(automation.id)}
         className={cn(
-          'flex w-full cursor-pointer flex-col gap-1 rounded-lg px-3 py-2.5 pr-10 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50',
+          'flex w-full cursor-pointer flex-col gap-1 rounded-lg px-3 py-2.5 pr-10 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 phone:pr-3',
           selected ? 'bg-surface-selected' : 'hover:bg-surface-hover',
         )}
       >
@@ -68,6 +68,8 @@ function AutomationListCell({
           {automationSubtitle(automation)}
         </span>
       </button>
+      {/* A phone runs it from the detail's top bar instead: a 24px button
+          on every row starts a billed run on a stray tap. */}
       <button
         type="button"
         aria-label={`立即运行「${automation.name}」`}
@@ -80,7 +82,7 @@ function AutomationListCell({
         className={cn(
           rowIconButtonClass,
           revealOnRowHover,
-          'absolute right-2 bottom-2.5',
+          'absolute right-2 bottom-2.5 phone:hidden',
         )}
       >
         <Play className="size-3.5" />
