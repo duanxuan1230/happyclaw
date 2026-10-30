@@ -245,6 +245,7 @@ function StreamingContent({
         {askUserTools.map((tool) => (
           <AskUserQuestionCard
             key={tool.toolUseId}
+            toolUseId={tool.toolUseId}
             questions={readStepQuestions(tool.toolInput) ?? []}
           />
         ))}

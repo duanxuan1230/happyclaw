@@ -5,10 +5,12 @@
 //   ?statusbar=1  the composer alone over a stub list, with a status bar
 //                 that shows while setStatusRunning(true)
 //   ?readonly=1   the user may not change the workspace's configuration
+//   ?ask=1     the composer alone under two AskUserQuestion cards
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import { wsManager } from '../../src/api/ws';
+import { AskUserQuestionCard } from '../../src/components/chat/AskUserQuestionCard';
 import { ChatView } from '../../src/components/chat/ChatView';
 import { MessageInput } from '../../src/components/chat/MessageInput';
 import { Toaster } from '../../src/components/ui/sonner';
@@ -298,7 +300,33 @@ function BareComposer() {
       data-composer-dock-host
       className="relative flex h-full min-w-0 flex-col overflow-x-hidden"
     >
-      <div className="min-h-0 flex-1 overflow-y-auto" />
+      <div className="min-h-0 flex-1 overflow-y-auto px-4">
+        {askCards && (
+          <div className="mx-auto max-w-3xl pt-4">
+            <AskUserQuestionCard
+              toolUseId="ask-single"
+              questions={[
+                {
+                  question: '用哪个方案？',
+                  options: ['窄 selector', '宽 selector'],
+                },
+              ]}
+            />
+            <AskUserQuestionCard
+              toolUseId="ask-steps"
+              questions={[
+                { question: '周末去哪？', options: ['爬山', '看展', '在家'] },
+                {
+                  question: '带什么？',
+                  multiSelect: true,
+                  options: ['水', '相机', '伞', '充电宝'],
+                },
+                { question: '几点出发？', options: ['8 点', '10 点'] },
+              ]}
+            />
+          </div>
+        )}
+      </div>
       <MessageInput
         groupJid={groupJid}
         onSend={(content) => record({ to: 'main', content, images: 0 })}
@@ -327,8 +355,9 @@ function StatusProbe({ running }: { running: boolean }) {
   );
 }
 
-const bareComposer =
-  new URLSearchParams(window.location.search).get('statusbar') === '1';
+const params = new URLSearchParams(window.location.search);
+const askCards = params.get('ask') === '1';
+const bareComposer = params.get('statusbar') === '1' || askCards;
 
 createRoot(document.getElementById('root')!).render(
   <MemoryRouter initialEntries={['/chat/e2e-composer']}>

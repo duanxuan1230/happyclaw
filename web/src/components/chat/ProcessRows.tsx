@@ -1017,6 +1017,7 @@ export function QuestionCards({
     .filter(isQuestionStep)
     .map((step) => ({
       id: step.id,
+      toolUseId: step.toolUseId ?? step.id,
       questions:
         step.questions ??
         readStepQuestions(
@@ -1029,7 +1030,11 @@ export function QuestionCards({
   return (
     <div className="mt-1 space-y-1.5">
       {cards.map((card) => (
-        <AskUserQuestionCard key={card.id} questions={card.questions ?? []} />
+        <AskUserQuestionCard
+          key={card.id}
+          toolUseId={card.toolUseId}
+          questions={card.questions ?? []}
+        />
       ))}
     </div>
   );
