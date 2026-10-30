@@ -47,8 +47,10 @@ export default defineConfig({
       ? [
           {
             name: 'webkit-iphone',
-            // The model picker's taps, where iOS focus rules apply for real.
-            testMatch: /(composer|model-selector)\.spec\.ts$/,
+            // Phone specs, where iOS focus, keyboard and touch rules apply for
+            // real; CDP-driven touch cases skip themselves here.
+            testMatch:
+              /(composer|model-selector|overlay|viewport|touch-primitives|chat-reading|phone-nav|mobile-chat|workspace-pages|settings-admin|chat-code-split)\.spec\.ts$/,
             use: { ...devices['iPhone 14'] },
           },
           {
