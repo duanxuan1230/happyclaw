@@ -14,7 +14,7 @@ const buttonVariants = cva(
       variant: {
         default: 'bg-primary text-primary-foreground [a]:hover:bg-primary/80',
         outline:
-          'border-border bg-background pointer-coarse:active:bg-surface-hover hover:bg-surface-hover hover:text-foreground aria-expanded:bg-surface-hover aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50',
+          'border-border bg-background hover:bg-surface-hover hover:text-foreground aria-expanded:bg-surface-hover aria-expanded:text-foreground pointer-coarse:active:bg-surface-hover dark:border-input dark:bg-input/30 dark:hover:bg-input/50',
         secondary:
           'bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary aria-expanded:text-secondary-foreground',
         ghost:
@@ -40,7 +40,8 @@ const buttonVariants = cva(
       // takes taps (cindy's MIN_TOUCH_TARGET hitSlop); the visible size is
       // unchanged. Right after another button it does not reach back over
       // it: that button's area already covers the gap and lies below this
-      // one, so neither steals taps from the other's face.
+      // one, so neither steals taps from the other's face. `hitSlop={false}`
+      // is for dense rows where the area would cover neighbours.
       hitSlop: {
         true: 'phone:after:absolute phone:after:inset-x-[min(0px,calc(50%-22px))] phone:after:inset-y-[min(0px,calc(50%-22px))] phone:[[data-size][data-variant]+&]:after:left-0',
         false: '',
@@ -58,14 +59,12 @@ function Button({
   className,
   variant = 'default',
   size = 'default',
-  hitSlop = true,
+  hitSlop,
   asChild = false,
   ...props
 }: React.ComponentProps<'button'> &
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean;
-    /** False for dense rows where the phone hit area would cover neighbours. */
-    hitSlop?: boolean;
   }) {
   const Comp = asChild ? Slot.Root : 'button';
 

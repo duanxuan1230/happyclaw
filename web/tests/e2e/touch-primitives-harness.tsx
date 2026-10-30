@@ -1,6 +1,6 @@
 // UI primitives with their phone touch sizing: icon buttons alone, side by
 // side, absolutely placed and opted out of the hit area; text fields;
-// tabs, a command list, an InfoTip and two segmented controls (one that fits,
+// tabs, a command list, a toggle group, an InfoTip and two segmented controls (one that fits,
 // one that overflows). Nothing here talks to a backend.
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -22,6 +22,10 @@ import {
 } from '../../src/components/ui/native-select';
 import { Tabs, TabsList, TabsTrigger } from '../../src/components/ui/tabs';
 import { Textarea } from '../../src/components/ui/textarea';
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from '../../src/components/ui/toggle-group';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
 import '../../src/styles/globals.css';
 
@@ -117,6 +121,12 @@ function Harness() {
           <CommandItem data-testid="command-item">命令</CommandItem>
         </CommandList>
       </Command>
+      <ToggleGroup type="single" defaultValue="a" size="sm">
+        <ToggleGroupItem value="a" data-testid="toggle">
+          甲
+        </ToggleGroupItem>
+        <ToggleGroupItem value="b">乙</ToggleGroupItem>
+      </ToggleGroup>
       <InfoTip content="尚未完成的回复">
         <button type="button">未完成</button>
       </InfoTip>

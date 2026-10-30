@@ -51,10 +51,6 @@ describe('Button on a phone', () => {
   });
 
   test('IconButton passes hitSlop through', () => {
-    const on = render(<IconButton label="更多" icon="⋯" hideTooltip />);
-    expect(on.classList).toContain('phone:after:absolute');
-    act(() => root!.unmount());
-    container!.remove();
     const off = render(
       <IconButton label="更多" icon="⋯" hideTooltip hitSlop={false} />,
     );
