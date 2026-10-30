@@ -1,7 +1,8 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ZoomPanSurface } from './ZoomPanSurface';
 
 interface ImageLightboxProps {
   images: string[];
@@ -12,11 +13,15 @@ interface ImageLightboxProps {
 const viewerButtonClass =
   'flex size-10 cursor-pointer items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-colors outline-none hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/60 disabled:cursor-default disabled:opacity-30';
 
+/** How far a pull down goes before the backdrop is gone. */
+const PULL_FADE_DISTANCE = 400;
+
 /**
  * Full-screen image viewer. A Radix dialog, so it traps focus, closes on Esc,
  * locks page scroll and returns focus to the thumbnail. ←/→ and the side
- * buttons switch images; on touch, swipe to switch, pull down to close and
- * double-tap to zoom.
+ * buttons switch images. On touch (ZoomPanSurface) two fingers zoom about
+ * their midpoint and pan, one finger pans the zoomed image, a double tap
+ * zooms in or out, and at 1× a swipe switches images and a pull down closes.
  */
 export function ImageLightbox({
   images,
@@ -24,15 +29,10 @@ export function ImageLightbox({
   onClose,
 }: ImageLightboxProps) {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
-  const [scale, setScale] = useState(1);
-  const [translateY, setTranslateY] = useState(0);
-  const [bgOpacity, setBgOpacity] = useState(1);
+  const [pull, setPull] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
 
-  const touchStartRef = useRef({ x: 0, y: 0 });
-  const lastTapRef = useRef(0);
-  const isDraggingRef = useRef(false);
   // Without a Radix Trigger, focus has nowhere to return to on close; hand it
   // back to whatever opened the viewer (the thumbnail).
   const [returnFocusTo] = useState(
@@ -55,63 +55,9 @@ export function ImageLightbox({
     (index: number) => {
       if (index < 0 || index >= images.length) return;
       setCurrentIndex(index);
-      setScale(1);
     },
     [images.length],
   );
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    const touch = e.touches[0];
-    touchStartRef.current = { x: touch.clientX, y: touch.clientY };
-    isDraggingRef.current = false;
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    const touch = e.touches[0];
-    const dy = touch.clientY - touchStartRef.current.y;
-
-    // Pull-down to close only when not zoomed
-    if (scale === 1 && dy > 0) {
-      isDraggingRef.current = true;
-      setTranslateY(dy);
-      setBgOpacity(Math.max(0, 1 - dy / 400));
-    }
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    const touch = e.changedTouches[0];
-    const dx = touch.clientX - touchStartRef.current.x;
-    const dy = touch.clientY - touchStartRef.current.y;
-
-    // Pull-down close
-    if (isDraggingRef.current && translateY > 150) {
-      handleClose();
-      return;
-    }
-
-    // Reset pull-down state
-    if (isDraggingRef.current) {
-      setTranslateY(0);
-      setBgOpacity(1);
-      isDraggingRef.current = false;
-      return;
-    }
-
-    // Swipe left/right to switch images
-    if (Math.abs(dx) > 50 && Math.abs(dy) < 50 && scale === 1) {
-      show(dx < 0 ? currentIndex + 1 : currentIndex - 1);
-      return;
-    }
-
-    // Double-tap zoom
-    const now = Date.now();
-    if (now - lastTapRef.current < 300) {
-      setScale(scale === 1 ? 2 : 1);
-      lastTapRef.current = 0;
-    } else {
-      lastTapRef.current = now;
-    }
-  };
 
   const visible = isOpen && !isClosing;
   const chromeStyle = {
@@ -119,14 +65,9 @@ export function ImageLightbox({
     transition: 'opacity 300ms ease',
   };
   const overlayStyle = {
-    opacity: visible ? bgOpacity : 0,
-    transition: isDraggingRef.current ? 'none' : 'opacity 300ms ease',
+    opacity: visible ? Math.max(0, 1 - pull / PULL_FADE_DISTANCE) : 0,
+    transition: pull > 0 ? 'none' : 'opacity 300ms ease',
   };
-  const imageStyle = {
-    transform: `translateY(${translateY}px) scale(${scale})`,
-    transition: isDraggingRef.current ? 'none' : 'transform 300ms ease',
-  };
-
   return (
     // Stays open while the close animation runs; the parent unmounts it.
     <DialogPrimitive.Root open onOpenChange={(open) => !open && handleClose()}>
@@ -154,7 +95,11 @@ export function ImageLightbox({
 
           <DialogPrimitive.Close
             onClick={(e) => e.stopPropagation()}
-            className={cn(viewerButtonClass, 'absolute top-4 right-4 z-30')}
+            // Clear of the notch and the status bar, and 44px to the finger.
+            className={cn(
+              viewerButtonClass,
+              'absolute top-[calc(1rem+env(safe-area-inset-top))] right-[calc(1rem+env(safe-area-inset-right))] z-30 pointer-coarse:size-11',
+            )}
             aria-label="关闭"
             style={chromeStyle}
           >
@@ -199,27 +144,28 @@ export function ImageLightbox({
           )}
 
           {/* Image container */}
-          <div
-            className="relative z-10 flex h-full w-full items-center justify-center p-4 sm:px-16"
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
+          <ZoomPanSurface
+            resetKey={currentIndex}
+            className="z-10 flex h-full w-full items-center justify-center"
+            contentClassName="flex"
+            onSwipe={(direction) => show(currentIndex + direction)}
+            onPull={setPull}
+            onPullClose={handleClose}
           >
             <img
               src={images[currentIndex]}
               alt={`${currentIndex + 1} / ${images.length}`}
-              className="max-h-full max-w-full object-contain select-none"
-              style={imageStyle}
+              className="max-h-[calc(var(--vvh,100dvh)-2rem)] max-w-[calc(100vw-2rem)] object-contain select-none sm:max-w-[calc(100vw-8rem)]"
               draggable={false}
               onClick={(e) => e.stopPropagation()}
             />
-          </div>
+          </ZoomPanSurface>
 
           {/* Page indicator */}
           {multiple && (
             <div
               aria-hidden="true"
-              className="absolute bottom-8 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/50 px-3 py-1 text-sm text-white"
+              className="absolute bottom-[calc(2rem+env(safe-area-inset-bottom))] left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/50 px-3 py-1 text-sm text-white"
               style={chromeStyle}
             >
               {currentIndex + 1} / {images.length}
