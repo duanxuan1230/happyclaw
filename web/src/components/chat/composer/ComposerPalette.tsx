@@ -15,6 +15,8 @@ const LIST_MAX_PX = 256;
 const LIST_MIN_PX = 112;
 /** Room kept between the panel and the header above it. */
 const TOP_GAP_PX = 8;
+/** The panel's mb-2 above the card. */
+const PANEL_MARGIN_PX = 8;
 
 /**
  * Cap the list so the panel ends below the conversation header in what is
@@ -30,13 +32,15 @@ function useFitAboveAnchor(
     const list = listRef.current;
     const anchor = panel?.parentElement;
     if (!panel || !list || !anchor) return;
+    const host = anchor.closest<HTMLElement>('[data-composer-dock-host]');
+    const header = host
+      ? parseFloat(
+          getComputedStyle(host).getPropertyValue('--chat-header-height'),
+        ) || 0
+      : 0;
+    let frame = 0;
     const fit = () => {
-      const host = anchor.closest<HTMLElement>('[data-composer-dock-host]');
-      const header = host
-        ? parseFloat(
-            getComputedStyle(host).getPropertyValue('--chat-header-height'),
-          ) || 0
-        : 0;
+      frame = 0;
       const ceiling =
         Math.max(
           window.visualViewport?.offsetTop ?? 0,
@@ -44,21 +48,26 @@ function useFitAboveAnchor(
         ) +
         header +
         TOP_GAP_PX;
-      // The panel sits mb-2 above the anchor; what it adds besides the list
-      // (border, the key hints) comes off the list.
-      const chrome = panel.offsetHeight - list.offsetHeight + 8;
+      // What the panel adds besides the list (border, the key hints, its
+      // margin) comes off the list.
+      const chrome = panel.offsetHeight - list.offsetHeight + PANEL_MARGIN_PX;
       const room = anchor.getBoundingClientRect().top - ceiling - chrome;
       list.style.maxHeight = `${Math.max(LIST_MIN_PX, Math.min(LIST_MAX_PX, room))}px`;
     };
     fit();
+    // Viewport events come many per second while iOS scrolls: once a frame.
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(fit);
+    };
     const viewport = window.visualViewport;
-    viewport?.addEventListener('resize', fit);
-    viewport?.addEventListener('scroll', fit);
-    window.addEventListener('resize', fit);
+    viewport?.addEventListener('resize', schedule);
+    viewport?.addEventListener('scroll', schedule);
+    window.addEventListener('resize', schedule);
     return () => {
-      viewport?.removeEventListener('resize', fit);
-      viewport?.removeEventListener('scroll', fit);
-      window.removeEventListener('resize', fit);
+      cancelAnimationFrame(frame);
+      viewport?.removeEventListener('resize', schedule);
+      viewport?.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
     };
   }, [panelRef, listRef]);
 }
@@ -118,7 +127,7 @@ export function ComposerPalette({
         id={listId}
         role="listbox"
         aria-label={kind === 'slash' ? '命令与技能' : '工作区文件'}
-        className="max-h-64 overflow-y-auto overscroll-contain p-1"
+        className="overflow-y-auto overscroll-contain p-1"
       >
         {items.map((item, index) => {
           const Icon = ICONS[item.kind];

@@ -4,7 +4,7 @@ import {
   useContext,
   useEffect,
   useRef,
-  type SyntheticEvent,
+  useState,
 } from 'react';
 
 /**
@@ -30,27 +30,24 @@ export function useComposerDock(): ComposerDockApi | null {
 }
 
 /**
- * Report one overlay's open state to the composer around it: call the
- * returned function from the overlay's open-change handler. An overlay
- * unmounted while open counts as closed.
+ * The open state of one overlay a dock control owns, reported to the
+ * composer around it as it changes. An overlay unmounted while open counts
+ * as closed.
  */
-export function useDockOverlay(id: string): (open: boolean) => void {
+export function useDockOverlay(
+  id: string,
+): [open: boolean, setOpen: (open: boolean) => void] {
+  const [open, setOpenState] = useState(false);
   const dock = useComposerDock();
   const dockRef = useRef(dock);
   dockRef.current = dock;
   useEffect(() => () => dockRef.current?.setOverlayOpen(id, false), [id]);
-  return useCallback(
-    (open: boolean) => dockRef.current?.setOverlayOpen(id, open),
+  const setOpen = useCallback(
+    (next: boolean) => {
+      dockRef.current?.setOverlayOpen(id, next);
+      setOpenState(next);
+    },
     [id],
   );
-}
-
-/**
- * onMouseDown for a dock control that opens an overlay: the press keeps the
- * editor's focus. iOS never focuses a tapped button, so without this the
- * editor blurs (relatedTarget null) and the card folds into the pill before
- * the click arrives, which then lands on whatever moved under the finger.
- */
-export function keepEditorFocus(event: SyntheticEvent): void {
-  event.preventDefault();
+  return [open, setOpen];
 }

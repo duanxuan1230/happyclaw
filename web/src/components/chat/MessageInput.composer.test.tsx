@@ -509,7 +509,7 @@ describe('phone dock', () => {
   /** A dock control that reports its sheet, and shows the compact flag. */
   let reportSheet: (open: boolean) => void = () => {};
   function SheetControl() {
-    reportSheet = useDockOverlay('model');
+    reportSheet = useDockOverlay('model')[1];
     const compact = useComposerDock()?.compact;
     return <button type="button" data-compact={String(compact)} />;
   }

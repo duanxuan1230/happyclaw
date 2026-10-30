@@ -147,8 +147,10 @@ export function ConversationContextUsageLine({
   jid: string;
   agentId: string | null;
 }) {
+  // Shown each time the model sheet opens: what the store already has
+  // (turn pushes keep it current) is not fetched again.
   const figures = contextUsageFigures(
-    useConversationContextUsage(jid, agentId),
+    useConversationContextUsage(jid, agentId, { onlyIfMissing: true }),
   );
   if (!figures) return null;
   return (
@@ -165,19 +167,27 @@ export function ConversationContextUsageLine({
 }
 
 /** One conversation's usage, loaded when shown and after a reconnect. */
-function useConversationContextUsage(jid: string, agentId: string | null) {
-  const usage = useChatStore(
-    (s) => s.contextUsage[contextUsageKey(jid, agentId)],
-  );
+function useConversationContextUsage(
+  jid: string,
+  agentId: string | null,
+  { onlyIfMissing = false }: { onlyIfMissing?: boolean } = {},
+) {
+  const key = contextUsageKey(jid, agentId);
+  const usage = useChatStore((s) => s.contextUsage[key]);
   const load = useChatStore((s) => s.loadContextUsage);
   useEffect(() => {
-    void load(jid, agentId);
+    if (
+      !onlyIfMissing ||
+      useChatStore.getState().contextUsage[key] === undefined
+    ) {
+      void load(jid, agentId);
+    }
     const off = wsManager.on('connected', (data: { reconnect?: boolean }) => {
       if (data?.reconnect) void load(jid, agentId);
     });
     return () => {
       off();
     };
-  }, [jid, agentId, load]);
+  }, [jid, agentId, key, load, onlyIfMissing]);
   return usage;
 }

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import {
   FileUp,
   FolderUp,
@@ -26,7 +26,7 @@ import { IconButton } from '../../common/IconButton';
 import { Shortcut } from '../../common/Shortcut';
 import { SendButton, type SendButtonGlyph } from './cindy/SendButton';
 import { ActionSheet, type SheetAction } from './ActionSheet';
-import { keepEditorFocus, useDockOverlay } from './composerDock';
+import { useDockOverlay } from './composerDock';
 
 /**
  * Composer toolbar pill (cindy's dropdown tier): bare at rest, an outline and
@@ -145,12 +145,7 @@ export function ComposerToolbar({
   const plusGroups = [attachActions, sessionActions].filter(
     (group) => group.length > 0,
   );
-  const [plusSheetOpen, setPlusSheetOpen] = useState(false);
-  const reportPlusSheet = useDockOverlay('plus');
-  const changePlusSheet = (open: boolean) => {
-    reportPlusSheet(open);
-    setPlusSheetOpen(open);
-  };
+  const [plusSheetOpen, setPlusSheetOpen] = useDockOverlay('plus');
   // The model (and effort): right before send on a desktop, right after +
   // on a phone. The padding keeps the triggers' focus rings inside the
   // clip. In the resting pill the picker shows its compact chip (its own
@@ -196,7 +191,7 @@ export function ComposerToolbar({
             // A phone lists the same actions as rows of a bottom sheet.
             <ActionSheet
               open={plusSheetOpen}
-              onOpenChange={changePlusSheet}
+              onOpenChange={setPlusSheetOpen}
               title={plusLabel}
               description="添加附件或管理当前会话"
               groups={plusGroups.map((group) =>
@@ -209,7 +204,6 @@ export function ComposerToolbar({
                   icon={<Plus />}
                   disabled={plusDisabled}
                   hideTooltip
-                  onMouseDown={keepEditorFocus}
                   className={COMPOSER_PILL}
                 />
               }
@@ -258,7 +252,6 @@ export function ComposerToolbar({
           <IconButton
             label="清除当前会话上下文"
             icon={<Paintbrush />}
-            onMouseDown={keepEditorFocus}
             onClick={onResetSession}
             tooltipSide="top"
             className={COMPOSER_PILL}
@@ -268,7 +261,6 @@ export function ComposerToolbar({
           <IconButton
             label="终端"
             icon={<TerminalSquare />}
-            onMouseDown={keepEditorFocus}
             onClick={onToggleTerminal}
             tooltipSide="top"
             className={COMPOSER_PILL}

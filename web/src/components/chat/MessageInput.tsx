@@ -837,22 +837,14 @@ export const MessageInput = memo(function MessageInput({
   // here as it opens, before focus moves into it, so nothing depends on
   // when a trigger's aria-expanded flips.
   const [textFocused, setTextFocused] = useState(false);
-  const [openOverlays, setOpenOverlays] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const openOverlaysRef = useRef(openOverlays);
-  const dockApiRef = useRef<Omit<ComposerDockApi, 'compact'>>({
-    setOverlayOpen: (id, open) => {
-      const current = openOverlaysRef.current;
-      if (current.has(id) === open) return;
-      const next = new Set(current);
-      if (open) next.add(id);
-      else next.delete(id);
-      openOverlaysRef.current = next;
-      setOpenOverlays(next);
-    },
-  });
-  const overlayOpen = openOverlays.size > 0;
+  const [overlayOpen, setOverlayOpenState] = useState(false);
+  const openOverlaysRef = useRef(new Set<string>());
+  const setOverlayOpen = useCallback((id: string, open: boolean) => {
+    const overlays = openOverlaysRef.current;
+    if (open) overlays.add(id);
+    else overlays.delete(id);
+    setOverlayOpenState(overlays.size > 0);
+  }, []);
   const noteFocusIn = (event: React.FocusEvent<HTMLDivElement>) => {
     // As below: a field inside an overlay the dock opened is not its text.
     if (!event.currentTarget.contains(event.target as Node)) return;
@@ -928,6 +920,16 @@ export const MessageInput = memo(function MessageInput({
   // the editor instead of dropping focus; the caret stays where it was.
   const focusFromBlankArea = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0 || editor.isDestroyed) return;
+    // A press on one of the dock's own buttons keeps the editor's focus. iOS
+    // never focuses a tapped button: the editor would blur (relatedTarget
+    // null) and fold the card into the pill before the click arrives, which
+    // then lands on whatever moved under the finger. (A portal the dock
+    // opened bubbles here through React; its buttons are not the dock's.)
+    const button = (event.target as Element).closest?.('button');
+    if (dock && button && event.currentTarget.contains(button)) {
+      event.preventDefault();
+      return;
+    }
     if (
       !isComposerBlankPointerTarget(
         event.target,
@@ -981,8 +983,8 @@ export const MessageInput = memo(function MessageInput({
     !sendError;
   const dockCard = dock && !pill;
   const dockApi = useMemo<ComposerDockApi>(
-    () => ({ ...dockApiRef.current, compact: pill }),
-    [pill],
+    () => ({ compact: pill, setOverlayOpen }),
+    [pill, setOverlayOpen],
   );
 
   return (

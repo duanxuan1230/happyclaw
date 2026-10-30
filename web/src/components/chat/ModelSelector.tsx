@@ -58,11 +58,7 @@ import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useAuthStore } from '../../stores/auth';
 import { showToast } from '../../utils/toast';
 import { useIsPhone } from '../layout/phone';
-import {
-  keepEditorFocus,
-  useComposerDock,
-  useDockOverlay,
-} from './composer/composerDock';
+import { useComposerDock, useDockOverlay } from './composer/composerDock';
 import { ConversationContextUsageLine } from './composer/ContextUsageRing';
 import {
   effortLabel,
@@ -387,6 +383,13 @@ function effortShown(context: EffortContext): {
 const PHONE_PILL_CLASS =
   'relative inline-flex h-[34px] max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-surface-border bg-muted text-caption font-medium text-foreground transition-colors duration-100 before:absolute before:-inset-[5px] focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none active:bg-surface-hover aria-disabled:cursor-default data-[state=open]:bg-surface-hover';
 
+function phonePillClass(compact: boolean): string {
+  return cn(
+    PHONE_PILL_CLASS,
+    compact ? 'w-[34px] justify-center' : 'pr-2.5 pl-1.5',
+  );
+}
+
 /**
  * The composer's model and effort controls: plain text at rest, a filled
  * pill on hover or while open. Labels truncate; tooltips carry the full name.
@@ -453,12 +456,11 @@ export function ModelSelector({
   const narrow = useMediaQuery('(max-width: 639px)');
   const inSheet = phone || narrow;
   const compact = (useComposerDock()?.compact ?? false) && phone;
-  const reportSheet = useDockOverlay('model');
   const [selection, setSelection] = useState<SessionModelSelection | null>(
     null,
   );
   const [loadFailed, setLoadFailed] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDockOverlay('model');
   const [saving, setSaving] = useState(false);
   const modelTooltip = useQuietTooltip();
   const lastRefreshAt = useRef(0);
@@ -519,7 +521,6 @@ export function ModelSelector({
       return;
     }
     modelTooltip.onMenuOpenChange(next);
-    reportSheet(next);
     setOpen(next);
     if (next) refreshCatalog();
   };
@@ -664,8 +665,6 @@ export function ModelSelector({
   };
 
   const disabled = !canChange || saving;
-  // A phone's pill stays tappable and explains itself (see handleOpenChange).
-  const pillDisabled = phone && disabled;
   const effortDisabled =
     disabled || (!!effortContext && !!optionStatus(effortContext.option));
   const shown = effortContext ? effortShown(effortContext) : null;
@@ -741,16 +740,13 @@ export function ModelSelector({
                 return and open state survive the pill opening into it. */}
             <button
               type="button"
-              aria-disabled={pillDisabled || undefined}
+              // Never disabled outright: a tap says why (handleOpenChange).
+              aria-disabled={disabled || undefined}
               aria-label={`模型：${fullLabel}${
                 shown ? `，推理等级：${shown.spoken}` : ''
               }`}
               data-model-pill={compact ? 'compact' : ''}
-              onMouseDown={keepEditorFocus}
-              className={cn(
-                PHONE_PILL_CLASS,
-                compact ? 'w-[34px] justify-center' : 'pr-2.5 pl-1.5',
-              )}
+              className={phonePillClass(compact)}
             >
               {mark}
               {!compact && (
@@ -767,7 +763,7 @@ export function ModelSelector({
                       {effortLabel(shown.level)}
                     </span>
                   )}
-                  {!pillDisabled && chevron}
+                  {!disabled && chevron}
                 </>
               )}
             </button>
@@ -858,13 +854,8 @@ function UnavailablePill({
       aria-disabled
       aria-label="模型：不可用"
       data-model-pill={compact ? 'compact' : ''}
-      onMouseDown={keepEditorFocus}
       onClick={onTap}
-      className={cn(
-        PHONE_PILL_CLASS,
-        'text-muted-foreground',
-        compact ? 'w-[34px] justify-center' : 'pr-2.5 pl-1.5',
-      )}
+      className={cn(phonePillClass(compact), 'text-muted-foreground')}
     >
       <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-surface-selected">
         <Sparkles className="size-3" aria-hidden="true" />
@@ -896,7 +887,6 @@ function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
               disabled={disabled}
               aria-label={name}
               title={disabled ? name : undefined}
-              onMouseDown={keepEditorFocus}
               {...tooltip.triggerProps}
               className={cn(TRIGGER_CLASS, 'shrink-0')}
             >
@@ -969,8 +959,6 @@ interface ModelPanelProps {
   touch: boolean;
   /** Below the hint, e.g. a phone's context usage. */
   footer?: ReactNode;
-  /** The search field got focus (a sheet makes room for the keyboard). */
-  onSearchFocus?: () => void;
   /**
    * A phone picks the effort here, under the model in use; null when that
    * model takes none. Undefined leaves the effort to the control beside the
@@ -999,7 +987,6 @@ function ModelPanel({
   inSheet,
   touch,
   footer,
-  onSearchFocus,
   effort,
   onPick,
   onManage,
@@ -1091,7 +1078,6 @@ function ModelPanel({
           type="text"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          onFocus={onSearchFocus}
           placeholder="搜索模型"
           aria-label="搜索模型"
           autoCapitalize="none"
