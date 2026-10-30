@@ -509,60 +509,44 @@ app.post('/api/messages', authMiddleware, async (c) => {
 
   const trimmedContent = content.trim();
   const send = async (): Promise<WebSendOutcome> => {
-    if (agentId) {
-      const result = await handleAgentConversationMessage(
-        chatJid,
-        agentId,
-        trimmedContent,
-        authUser.id,
-        authUser.display_name || authUser.username,
-        attachments,
-        followUpBehavior,
-      );
-      if (!result.ok) {
-        return { status: result.status, body: { error: result.error } };
-      }
-      return { status: 200, body: { success: true, ...result } };
-    }
-
-    const result = await handleWebUserMessage(
-      chatJid,
-      trimmedContent,
-      attachments,
-      authUser.id,
-      authUser.display_name || authUser.username,
-      followUpBehavior,
-    );
+    const displayName = authUser.display_name || authUser.username;
+    const result = agentId
+      ? await handleAgentConversationMessage(
+          chatJid,
+          agentId,
+          trimmedContent,
+          authUser.id,
+          displayName,
+          attachments,
+          followUpBehavior,
+        )
+      : await handleWebUserMessage(
+          chatJid,
+          trimmedContent,
+          attachments,
+          authUser.id,
+          displayName,
+          followUpBehavior,
+        );
     if (!result.ok) {
       return { status: result.status, body: { error: result.error } };
     }
-    return {
-      status: 200,
-      body: {
-        success: true,
-        messageId: result.messageId,
-        timestamp: result.timestamp,
-        ingestSequence: result.ingestSequence,
-        disposition: result.disposition,
-        runId: result.runId,
-      },
-    };
+    const { ok: _ok, ...accepted } = result;
+    return { status: 200, body: { success: true, ...accepted } };
   };
 
   const { clientMessageId } = validation.data;
-  if (!clientMessageId) {
-    const outcome = await send();
-    return c.json(outcome.body, outcome.status);
-  }
-  const outcome = await sendOnce(
-    {
-      userId: authUser.id,
-      chatJid,
-      clientMessageId,
-      fingerprint: webSendFingerprint(agentId, trimmedContent, attachments),
-    },
-    send,
-  );
+  const outcome = clientMessageId
+    ? await sendOnce(
+        {
+          userId: authUser.id,
+          chatJid,
+          clientMessageId,
+          fingerprint: webSendFingerprint(agentId, trimmedContent, attachments),
+        },
+        send,
+      )
+    : await send();
   return c.json(outcome.body, outcome.status);
 });
 
@@ -583,16 +567,18 @@ function webSendFingerprint(
   content: string,
   attachments: Array<{ data: string; mimeType?: string }> | undefined,
 ): string {
-  return crypto
-    .createHash('sha256')
-    .update(
-      JSON.stringify([
-        agentId ?? null,
-        content,
-        (attachments ?? []).map((att) => [att.mimeType ?? null, att.data]),
-      ]),
-    )
-    .digest('hex');
+  // Field by field with length prefixes: unambiguous, and the (possibly
+  // tens of MB of) attachment data is hashed without being copied.
+  const hash = crypto.createHash('sha256');
+  const field = (value: string) =>
+    hash.update(`${value.length}:`).update(value);
+  field(agentId ?? '');
+  field(content);
+  for (const att of attachments ?? []) {
+    field(att.mimeType ?? '');
+    field(att.data);
+  }
+  return hash.digest('hex');
 }
 
 const DEDUP_CONFLICT: WebSendOutcome = {

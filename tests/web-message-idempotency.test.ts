@@ -233,6 +233,33 @@ describe('Web send idempotency', () => {
     expect(otherSession.body.deduplicated).toBe(true);
   });
 
+  test('the same id with other images is a conflict too', async () => {
+    const id = uuid();
+    const image = (data: string) => ({
+      type: 'image',
+      data,
+      mimeType: 'image/png',
+    });
+    const first = await post({
+      content: 'with image',
+      attachments: [image('iVBORw0KGgo=')],
+      clientMessageId: id,
+    });
+    const again = await post({
+      content: 'with image',
+      attachments: [image('iVBORw0KGgo=')],
+      clientMessageId: id,
+    });
+    const other = await post({
+      content: 'with image',
+      attachments: [image('iVBORw0KGgoA')],
+      clientMessageId: id,
+    });
+    expect(first.status).toBe(200);
+    expect(again.body.deduplicated).toBe(true);
+    expect(other.status).toBe(409);
+  });
+
   test('a failed first attempt is not remembered, so the resend is processed', async () => {
     const id = uuid();
     failNextResolve = true;

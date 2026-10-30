@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, computeUploadTimeoutMs } from '../api/client';
 import { randomUuid } from '../utils/random-uuid';
+import { sessionJidOf } from '../lib/session-jid';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import {
@@ -364,11 +365,8 @@ const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
 type SendAttachment = { data: string; mimeType: string };
 
 /**
- * The idempotency key of each conversation's last unconfirmed send. A send
- * whose answer never arrived may still have been stored; resending the same
- * message reuses its key, and the server answers from the first attempt
- * instead of storing, running and billing it again. Only the latest send per
- * conversation is kept, so failed sends never pile up attachment data.
+ * Each conversation's last unconfirmed send. Resending the same message
+ * reuses its idempotency key, so the server answers from the first attempt.
  */
 const unconfirmedSends = new Map<
   string,
@@ -398,20 +396,13 @@ function clientMessageIdFor(
   return id;
 }
 
-/**
- * Whether a failed send may still have reached the server: no response
- * (network drop, our timeout) or a gateway that gave up waiting on it.
- */
+/** No answer, or a proxy's: the send may have been stored anyway. */
 function sendMayHaveLanded(err: unknown): boolean {
   const status = (err as { status?: unknown } | null)?.status;
-  return status === 0 || status === 408 || status === 502 || status === 504;
-}
-
-/** Forget a send's key unless a resend may still need it. */
-function settleSend(target: string, err?: unknown): void {
-  if (err === undefined || !sendMayHaveLanded(err)) {
-    unconfirmedSends.delete(target);
-  }
+  return (
+    status === 0 ||
+    (typeof status === 'number' && [408, 502, 503, 504].includes(status))
+  );
 }
 
 const UNCONFIRMED_SEND_HINT = '网络较慢，消息可能已发送；重发不会重复';
@@ -3731,7 +3722,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body,
         attachmentTimeoutMs(body.attachments),
       );
-      settleSend(jid);
+      unconfirmedSends.delete(jid);
       if (!data.success) {
         // Server returned non-success payload — surface as a send failure so caller can retain input.
         const msg = '服务器返回失败，请重试';
@@ -3812,7 +3803,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 返回 false 让调用方（MessageInput）保留输入不清空。
       const message = extractErrorMessage(err);
       set({ error: message });
-      settleSend(jid, err);
+      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(jid);
       showToast(
         '发送失败',
         sendMayHaveLanded(err)
@@ -5160,8 +5151,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
 
-      // Toast + 浏览器通知（仅限后台任务），放在 set() 之后：通知失败不能让
-      // 流式状态停在上一帧。
+      // Toast + 浏览器通知（仅限后台任务）。放在 set() 之后，状态更新不依赖
+      // 通知能否发出（notifyIfHidden 自己也会吞掉 Android 的构造异常）。
       // stream-processor 为前台 Task 合成的 task_notification 不带 isBackground 标记，
       // 仅 SDK 原生的后台完成事件携带 isBackground: true。
       if (
@@ -6188,7 +6179,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments && attachments.length > 0
         ? attachments.map((att) => ({ type: 'image' as const, ...att }))
         : undefined;
-    const runtimeJid = `${jid}#agent:${agentId}`;
+    const runtimeJid = sessionJidOf(jid, agentId);
     try {
       // Conversation sends use the acknowledged HTTP path, just like the
       // main chat. WebSocket remains the push channel for the stored message
@@ -6206,7 +6197,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
-      settleSend(runtimeJid);
+      unconfirmedSends.delete(runtimeJid);
       // /clear and /fresh were handled by the server: no message was stored
       // and no reply is coming, so the session must not wait for one.
       if (isClearedResponse(data)) return true;
@@ -6215,7 +6206,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().handleRunStarted(runtimeJid, data.runId);
       }
     } catch (err) {
-      settleSend(runtimeJid, err);
+      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(runtimeJid);
       const detail = sendMayHaveLanded(err)
         ? UNCONFIRMED_SEND_HINT
         : err instanceof Error
