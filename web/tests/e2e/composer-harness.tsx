@@ -11,6 +11,7 @@ import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import { wsManager } from '../../src/api/ws';
 import { ChatView } from '../../src/components/chat/ChatView';
 import { MessageInput } from '../../src/components/chat/MessageInput';
+import { Toaster } from '../../src/components/ui/sonner';
 import { useVisualViewportVars } from '../../src/hooks/useVisualViewport';
 import { useAuthStore, type UserPublic } from '../../src/stores/auth';
 import {
@@ -332,6 +333,8 @@ const bareComposer =
 createRoot(document.getElementById('root')!).render(
   <MemoryRouter initialEntries={['/chat/e2e-composer']}>
     <SessionSwitcher />
+    {/* showToast renders through the app's sonner Toaster. */}
+    <Toaster position="top-center" />
     <main className="h-[100dvh] overflow-hidden bg-background">
       {bareComposer ? (
         <BareComposer />
