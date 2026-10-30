@@ -10,6 +10,7 @@ import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import { wsManager } from '../../src/api/ws';
 import { ChatView } from '../../src/components/chat/ChatView';
 import { MessageInput } from '../../src/components/chat/MessageInput';
+import { useVisualViewportVars } from '../../src/hooks/useVisualViewport';
 import { useAuthStore, type UserPublic } from '../../src/stores/auth';
 import {
   useChatStore,
@@ -263,6 +264,7 @@ useFileStore.setState({
 /** Switches sessions through `?agent=`, the way the sidebar does. */
 function SessionSwitcher() {
   const [, setSearchParams] = useSearchParams();
+  useVisualViewportVars(); // AppLayout publishes the keyboard vars in the app
   useEffect(() => {
     harness.switchTo = (id) =>
       setSearchParams(
