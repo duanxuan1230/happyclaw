@@ -2640,8 +2640,9 @@ function applySessionChoiceChange(
   ): string => {
     if (!choice?.modelConfigId) return '';
     const provider = providers.find((item) => item.id === choice.modelConfigId);
-    const agentModel =
-      profile?.model_config_id === choice.modelConfigId ? profile.model : null;
+    const agentModel = provider
+      ? agentModelOn(provider, profile, group.folder)
+      : undefined;
     const model = !provider
       ? ''
       : provider.codexOAuthCredentials

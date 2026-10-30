@@ -16906,6 +16906,28 @@ async function processAgentConversation(
     await clearAgentProcessingIndicatorForInput(inputTurnId);
   };
 
+  // AgentProfile 引用的能力或模型连接不可用：确定性配置错误，与主会话一样
+  // 提交游标、不重试，并把原因告诉用户。
+  let agentConfigFailureSettled = false;
+  const settleAgentConfigFailure = async (error: string): Promise<boolean> => {
+    if (agentConfigFailureSettled) return true;
+    if (!error.startsWith('agent_profile_unavailable:')) return false;
+    agentConfigFailureSettled = true;
+    const message = error.replace(/^agent_profile_unavailable:\s*/, '');
+    logger.warn(
+      { chatJid, agentId, error: message },
+      'AgentProfile references an unavailable capability or model connection, skipping retry',
+    );
+    retryUnfinishedTurn = false;
+    await settleAgentDeterministicFailure(
+      'agent-profile-unavailable',
+      'system_error',
+      message,
+      message,
+    );
+    return true;
+  };
+
   // Recall stop: suppress the interrupted query's trailing stream output.
   let agentRecallSuppression = false;
   // Inputs settled as recalled: their late terminal outputs are bookkeeping
@@ -18507,6 +18529,9 @@ async function processAgentConversation(
         `Unrecoverable transcript reset: ${detail}`,
       );
     }
+    if (output.status === 'error' || hadError) {
+      await settleAgentConfigFailure(lastError || output.error || '');
+    }
 
     // Only commit cursor if a reply was actually sent.  Without a reply the
     // messages haven't been "processed" — leaving the cursor behind lets the
@@ -18556,7 +18581,8 @@ async function processAgentConversation(
     }
     if (
       interactionMode === 'proactive' &&
-      (output.status === 'error' || hadError)
+      (output.status === 'error' || hadError) &&
+      !agentConfigFailureSettled
     ) {
       const utteranceDelivered =
         agentPhysicalDeliveryAckByInput.get(activeAgentInputTurnId) === true;
@@ -18570,10 +18596,14 @@ async function processAgentConversation(
   } catch (err) {
     hadError = true;
     logger.error({ agentId, chatJid, err }, 'Agent conversation error');
-    // stopGroup may terminate the child before runContainerAgent can return a
-    // terminal ContainerOutput. Preserve ordinary Stop's discard contract even
-    // on that throw path; mutation-preserve stops deliberately keep the cursor.
-    if (queue.getRecentStopDisposition(virtualChatJid) === 'discard') {
+    const thrown = err instanceof Error ? err.message : String(err);
+    lastError ||= thrown;
+    if (await settleAgentConfigFailure(thrown)) {
+      // Settled as a configuration error: committed, no replay.
+    } else if (queue.getRecentStopDisposition(virtualChatJid) === 'discard') {
+      // stopGroup may terminate the child before runContainerAgent can return a
+      // terminal ContainerOutput. Preserve ordinary Stop's discard contract even
+      // on that throw path; mutation-preserve stops deliberately keep the cursor.
       automationTurns.settle(activeAgentInputTurnId, {
         status: 'cancelled',
         reason: 'break',

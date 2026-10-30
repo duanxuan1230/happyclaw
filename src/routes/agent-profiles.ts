@@ -223,6 +223,24 @@ function agentEffortRejection(
       };
 }
 
+/**
+ * A copied policy whose effort its bound model no longer takes: the copy
+ * inherits instead, rather than refusing to copy what the source runs with.
+ */
+function withRunnableEffort(
+  policy: AgentProfileRuntimePolicy,
+  modelConfigId: string | null,
+  model: string | null,
+): AgentProfileRuntimePolicy {
+  return agentEffortRejection(
+    modelConfigId,
+    model,
+    resolveAgentSdkEffort(policy),
+  )
+    ? { ...policy, reasoning: { ...policy.reasoning, effort: 'inherit' } }
+    : policy;
+}
+
 function modelConfigExists(modelConfigId: string): boolean {
   return getProviders().some((provider) => provider.id === modelConfigId);
 }
@@ -357,12 +375,6 @@ function newProfileRejection(
     const rejection = agentModelRejection(input.modelConfigId, input.model);
     if (rejection) return { status: 400, body: rejection };
   }
-  const effortRejection = agentEffortRejection(
-    input.modelConfigId ?? null,
-    input.model ?? null,
-    resolveAgentSdkEffort(input.runtimePolicy),
-  );
-  if (effortRejection) return { status: 400, body: effortRejection };
   if (hasEmptyCustomHostSkillSelection(input.runtimePolicy)) {
     return {
       status: 400,
@@ -405,6 +417,12 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
         model: parsed.data.model,
       });
       if (rejection) return c.json(rejection.body, rejection.status);
+      const effortRejection = agentEffortRejection(
+        parsed.data.model_config_id ?? null,
+        parsed.data.model ?? null,
+        resolveAgentSdkEffort(runtimePolicy),
+      );
+      if (effortRejection) return c.json(effortRejection, 400);
       const conflict = findAgentProfileNameConflict(user.id, parsed.data.name);
       if (conflict) return c.json(agentNameTaken(conflict), 409);
       const profile = createAgentProfile({
@@ -473,9 +491,14 @@ agentProfileRoutes.post('/:id/duplicate', authMiddleware, async (c) => {
       if (source.is_default) {
         return c.json({ error: '内置 HappyClaw 不能复制' }, 400);
       }
-      const { policy, stripped } = stripHostGrants(
+      const { policy: granted, stripped } = stripHostGrants(
         source.runtime_policy,
         user.role === 'admin',
+      );
+      const policy = withRunnableEffort(
+        granted,
+        source.model_config_id,
+        source.model,
       );
       const rejection = newProfileRejection(user, {
         runtimePolicy: policy,

@@ -967,6 +967,22 @@ describe('model-selection inside a configuration that is not ChatGPT', () => {
     expect(unlisted.body).toMatchObject({ code: 'MODEL_NOT_IN_CONNECTION' });
   });
 
+  test("an Agent model its connection dropped runs the connection's own: naming that is no change", async () => {
+    const main = db.getOrCreateDefaultAgentProfile(OWNER_ID);
+    db.updateAgentProfile(main.id, OWNER_ID, {
+      modelConfigId: 'glm',
+      model: 'glm-5.2-gone',
+    });
+    try {
+      await call('PUT', '', { modelConfigId: 'glm' });
+      mocks.drainCalls = [];
+      await call('PUT', '', { modelConfigId: 'glm', model: 'glm-5.3' });
+      expect(mocks.drainCalls).toEqual([]);
+    } finally {
+      bindOwnerMain(null);
+    }
+  });
+
   test('naming the default model is no change, another model is', async () => {
     await call('PUT', '', { modelConfigId: 'glm' });
     expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: 'glm' }]);
