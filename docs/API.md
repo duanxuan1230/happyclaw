@@ -82,21 +82,24 @@ Public：
 
 ## 访客账号
 
-任何 active 的 admin/member 都可以为自己创建只读访客（`role=guest`），并授权其查看
-自己拥有的部分 `web:*` 工作区（含 Home）。所有路由只作用于调用者自己的访客；
-其他用户的访客和不属于调用者的工作区 JID 一律按不存在处理。访客自身调用这些路由
-返回 403。
+active 的 admin 可以为自己创建只读访客（`role=guest`），并授权其查看自己拥有的部分
+`web:*` 工作区（含 Home）；member 只有在系统设置 `allowMemberGuests` 开启时可以
+创建。所有路由只作用于调用者自己的访客；其他用户的访客和不属于调用者的工作区 JID
+一律按不存在处理。访客自身调用这些路由返回 403。
 
-- `GET /api/guests`：`{ guests, grantable_workspaces }`。每个访客含 `id`、
-  `username`、`display_name`、`status`（`active`/`disabled`）、`created_at`、
-  `last_login_at` 和已授权的 `workspaces[{ jid, name, is_home }]`；
-  `grantable_workspaces` 是调用者自己的工作区。
+- `GET /api/guests`：`{ guests, grantable_workspaces, can_create, max_guests }`。
+  每个访客含 `id`、`username`、`display_name`、`status`（`active`/`disabled`）、
+  `created_at`、`last_login_at` 和已授权的 `workspaces[{ jid, name, is_home }]`；
+  `grantable_workspaces` 是调用者自己的工作区；`can_create` 表示调用者现在能否新建。
 - `POST /api/guests`：`{ username, password, display_name?, workspace_jids[] }`，
   用户名/密码规则与普通账号相同；成功 201 `{ guest }`，工作区无效 400，
-  用户名已存在 409。
+  member 未开放 403，已有 `max_guests`（20）个未删除的访客或用户名已存在 409。
 - `PATCH /api/guests/:id`：`display_name`、`status`、`workspace_jids`（整体替换）、
   `password` 任选；授权变更对下一次请求立即生效，状态或密码变更同时注销访客的会话。
 - `DELETE /api/guests/:id`：标记删除并清除授权、置顶和会话。
+
+`allowMemberGuests` 关闭后，member 仍可列出、编辑和删除自己的访客，但这些访客无法
+登录、请求或接收广播。
 
 访客能看什么、能调用哪些路由见 [ACL 权限矩阵](ACL-MATRIX.md) 的“访客”一节。
 管理员用户管理（`/api/admin/users`）能列出、禁用、删除和重置访客（列表带

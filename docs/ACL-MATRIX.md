@@ -388,38 +388,52 @@ Agent MCP 调用没有 Cookie，但必须携带由主进程创建的运行上下
 
 ## 11. 访客（只读）
 
-访客（`role=guest`）属于一个 owner（`users.guest_owner_id`，必须是 active 的
-admin/member），只能查看 owner 在 `guest_workspace_grants` 中授权的、owner 自己的
-工作区。实现见 `src/guest-access.ts` 与 `src/middleware/guest-guard.ts`。
+访客（`role=guest`）属于一个 owner（`users.guest_owner_id`），只能查看 owner 在
+`guest_workspace_grants` 中授权的、owner 自己的工作区。owner 必须 active，并且能持有
+访客（`canOwnGuests`）：admin 总是可以，member 只在系统设置 `allowMemberGuests`
+开启时可以（默认关闭）。每个 owner 最多 20 个未删除的访客。实现见
+`src/guest-access.ts` 与 `src/middleware/guest-guard.ts`。
 
 - `canAccessGroup`、`canModifyGroup`、`canDeleteGroup` 对访客永远为 false，语义
   不变。读取路径单独使用 `canViewGroup` = Access ∨ 有效授权。有效授权要求：授权行
-  存在；访客 active；owner active 且不是访客；工作区 `created_by` 仍是授权 owner。
+  存在；访客 active；owner active 且能持有访客；工作区 `created_by` 仍是授权 owner。
   IM 行与 `#agent:` 虚拟 JID 先解析到所属 `web:*` 工作区再判断。
 - 全局 Guard 挂在 `/api/*` 所有路由之前（`authMiddleware` 再查一次）：访客请求只放行
   `GUEST_ROUTE_ALLOWLIST` 中的 (方法, 路径)，其余一律 403
   `Guest accounts are read-only`，新路由默认拒绝。每次访客请求都重新读取 owner
-  状态，owner 被禁用/删除后立即 403，登录也失败；owner 被禁用/删除时同时注销其访客
-  的会话。
+  状态，owner 被禁用/删除或 `allowMemberGuests` 关闭（member owner）后立即 403，
+  登录也失败；owner 被禁用/删除时同时注销其访客的会话。
 - 放行清单：Public 登录相关接口、`GET /api/auth/me`、`POST /api/auth/logout`、
   `PUT /api/auth/password`、`GET/DELETE /api/auth/sessions[/:id]`；
   `GET /api/groups`、`GET /api/groups/:jid/{messages,agents,sessions}`、消息附件原图、
   `GET /api/groups/:jid/turn-traces/:turnId`、`GET /api/follow-ups`、
   `GET /api/workspaces[/:jid]`；`GET /api/groups/:jid/files` 与
   `files/{download,preview,content}/:path`；Workspace Memory 的列表、搜索、条目和版本；
-  `GET /api/tasks`、`/api/tasks/:id/runs`、`/api/tasks/runs/:runId`、
-  `/api/tasks/:id/logs`。放行的处理器仍按 `canViewGroup` 判断，未授权返回 404。
+  `GET /api/automations[/:id[/runs]]`。放行的处理器仍按 `canViewGroup` 判断，
+  未授权返回 404。
+- 有意不放行的读取：`/api/groups/:jid/git/*`（diff 可能包含被隐藏的点文件）、
+  `workdir/peers`（其他工作区的运行）、`model-selection`（owner 的模型连接）、
+  `context-usage`（token 用量，只服务于输入框）、`env`、`mcp`、`im-groups`、
+  `delete-impact`、工作区的渠道与运行会话挂载、`/api/automations/for-session`、
+  `/api/status*`、用量与计费。
 - Host：访客对已授权的 Host 工作区（典型是 admin Home）只有读取例外
   （`canViewHostGroup`）；所有执行路径仍要求 admin。
-- 文件：访客看不到、也无法读取任意层级的 `.claude`、`logs`、`conversations` 目录与
-  `.env`/`.env.*` 文件；符号链接按真实路径判断；列表不返回绝对路径。owner 不受影响。
-- 任务：只列出所属工作区已授权的任务，`permissions` 全部为 false。
+- 文件：访客看不到、也无法列出或读取任意层级中以 `.` 开头的条目（`.git`、`.ssh`、
+  `.aws`、`.env*`、`.npmrc`、`.claude` 等）、`*.pem`/`*.key`/`*.p12`/`*.pfx`/
+  `*.keystore`、`id_rsa*`/`id_dsa*`/`id_ecdsa*`/`id_ed25519*`、`credentials.json`，
+  以及 `logs`、`conversations`。名称比较不区分大小写；符号链接按真实路径判断，
+  指向文件根之外的一律隐藏；文件根随 `?agentId=` 解析（独立 worktree 会话为其
+  worktree）。列表不返回绝对路径。owner 不受影响。
+- 自动化：只列出已授权工作区的自动化及其运行记录，前置检查命令、脚本命令和前置检查
+  输出一律去掉（REST 与 WebSocket 相同）；所有写操作 403。
 - Memory：读取用 `canViewGroup`，写入仍是 Modify。
-- WebSocket：访客连接只接收。任何入站消息（`send_message`、`terminal_*` 及未来类型）
-  都以 `ws_error` 拒绝。广播受众（`getGroupAllowedUserIds`）包含持有有效授权的访客，
-  包括 Host 工作区事件、流式思考与工具调用和重连快照。
+- WebSocket：访客连接只接收。除 `ping`（回 `pong`）外，任何入站消息（`send_message`、
+  `terminal_*` 及未来类型）都在分发前以 `ws_error` 拒绝。广播受众
+  （`getGroupAllowedUserIds`）包含持有有效授权的访客，包括 Host 工作区事件、流式思考
+  与工具调用、重连快照和自动化事件；访客看到的过程信息与 owner 相同。
 - 访客没有 Home、Agent Profile、钱包或订阅；计费管理不能给访客分配套餐或调整余额。
-  访客不能创建工作区、会话、任务、Skills、MCP、Plugins、渠道账号或访客。
+  访客不能创建工作区、会话、自动化、Skills、MCP、Plugins、渠道账号或访客，访客没有
+  能触发的轮次，因此也不会写 Workspace Memory。
 - 管理员用户管理能禁用、删除、重置访客，但不能把访客改成其他角色或反之；邀请码和
   注册不会产生访客。删除工作区会删除其授权；删除访客会删除授权与置顶。
 
