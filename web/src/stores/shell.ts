@@ -200,16 +200,18 @@ export const useShellStore = create<ShellState>((set, get) => ({
   requestComposerFocus: () =>
     set((state) => ({ composerFocusNonce: state.composerFocusNonce + 1 })),
   requestComposerDraft: (text, source) =>
-    set((state) => ({
-      composerDraftRequest: {
+    set((state) => {
+      const request: ComposerDraftRequest = {
         text,
         nonce: (state.composerDraftRequest?.nonce ?? 0) + 1,
-        ...(source ? { replaces: state.composerFills[source] } : {}),
-      },
-      ...(source
-        ? { composerFills: { ...state.composerFills, [source]: text } }
-        : {}),
-    })),
+      };
+      if (!source) return { composerDraftRequest: request };
+      request.replaces = state.composerFills[source];
+      return {
+        composerDraftRequest: request,
+        composerFills: { ...state.composerFills, [source]: text },
+      };
+    }),
   forgetComposerFills: (sources) => {
     if (sources.length === 0) return;
     const next = { ...get().composerFills };

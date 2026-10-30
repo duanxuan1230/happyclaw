@@ -4,7 +4,12 @@
  * or `@` run before the caret.
  */
 import type { Editor, JSONContent } from '@tiptap/core';
-import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
+import {
+  Fragment,
+  Slice,
+  type Node as PMNode,
+  type Schema,
+} from '@tiptap/pm/model';
 import { Selection, type EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 
@@ -62,6 +67,13 @@ function inlineNodesFor(view: EditorView, text: string): PMNode[] {
   return nodes;
 }
 
+/** The top-level blocks `text` makes, as the composer fills it. */
+function blocksFor(schema: Schema, text: string): PMNode[] {
+  return (plainTextToComposerDocument(text).content ?? []).map((json) =>
+    schema.nodeFromJSON(json),
+  );
+}
+
 /** Replace the selection with plain text, keeping its line breaks visible. */
 export function insertPlainText(view: EditorView, text: string): void {
   const nodes = inlineNodesFor(view, text);
@@ -111,9 +123,7 @@ export function findFilledBlocks(
   text: string,
 ): { from: number; to: number } | null {
   if (!text) return null;
-  const blocks = (plainTextToComposerDocument(text).content ?? []).map((json) =>
-    doc.type.schema.nodeFromJSON(json),
-  );
+  const blocks = blocksFor(doc.type.schema, text);
   const offsets = [0];
   doc.forEach((child) => offsets.push(offsets.at(-1)! + child.nodeSize));
   for (let start = doc.childCount - blocks.length; start >= 0; start -= 1) {
@@ -139,11 +149,7 @@ export function fillComposerDraft(
     return;
   }
   const { state } = editor;
-  const fragment = Fragment.from(
-    (plainTextToComposerDocument(text).content ?? []).map((json) =>
-      state.schema.nodeFromJSON(json),
-    ),
-  );
+  const fragment = Fragment.from(blocksFor(state.schema, text));
   const tr = state.tr.replaceWith(range.from, range.to, fragment);
   tr.setSelection(
     Selection.near(tr.doc.resolve(range.from + fragment.size), -1),

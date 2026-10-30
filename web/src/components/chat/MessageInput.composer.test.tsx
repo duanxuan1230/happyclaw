@@ -1118,6 +1118,7 @@ describe('answering AskUserQuestion', () => {
   });
 
   // A card fills under its toolUseId; filling again replaces its last text.
+  beforeEach(() => useShellStore.setState({ composerFills: {} }));
   const fill = (value: string) =>
     act(async () =>
       useShellStore.getState().requestComposerDraft(value, 'toolu_1'),
@@ -1125,7 +1126,6 @@ describe('answering AskUserQuestion', () => {
   const fills = () => useShellStore.getState().composerFills;
 
   test("a card's new answer takes the place of its last one", async () => {
-    useShellStore.setState({ composerFills: {} });
     await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
     await type('先说一句');
     await fill('周末去哪？\n答：看展\n带什么？\n答：水');
@@ -1142,7 +1142,6 @@ describe('answering AskUserQuestion', () => {
   });
 
   test('an answer the user edited stays, and the next one is appended', async () => {
-    useShellStore.setState({ composerFills: {} });
     await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
     await fill('甲');
     await typeAtCaret('，但要快');
@@ -1152,7 +1151,6 @@ describe('answering AskUserQuestion', () => {
   });
 
   test('clearing or sending the answer lets the card fill it again', async () => {
-    useShellStore.setState({ composerFills: {} });
     const onSend = vi.fn(() => true);
     await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
     await fill('甲');
