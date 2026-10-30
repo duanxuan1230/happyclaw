@@ -3,12 +3,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Navigate, matchRoutes } from 'react-router-dom';
-import { describe, expect, test } from 'vitest';
+import { afterAll, describe, expect, test } from 'vitest';
 import { createAppRouter } from '../web/src/App';
 import {
   isLegacyHappyClawRegistration,
   isLegacyPwaCacheName,
 } from '../web/src/utils/legacyPwaCleanup';
+
+// Importing App starts preloading the chat page and the app shell (the
+// default route); let those imports settle before the environment is torn
+// down, or a late module load fails the run.
+afterAll(async () => {
+  await Promise.all([
+    import('../web/src/pages/ChatPage'),
+    import('../web/src/components/layout/AppLayout'),
+  ]);
+});
 
 const root = process.cwd();
 const read = (relativePath: string) =>
