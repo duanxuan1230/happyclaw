@@ -150,7 +150,6 @@ export function CreateAgentDialog({
           <SettingsField label="名称" htmlFor="new-agent-name">
             <Input
               id="new-agent-name"
-              autoFocus
               value={name}
               maxLength={80}
               onChange={(event) => {

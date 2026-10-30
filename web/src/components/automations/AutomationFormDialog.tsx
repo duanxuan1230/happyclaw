@@ -8,13 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -62,7 +55,6 @@ import { useAuthStore } from '../../stores/auth';
 import { useChatStore } from '../../stores/chat';
 import { extractErrorMessage } from '../../utils/error';
 import { sessionJidOf } from '../../lib/session-jid';
-import { useIsPhone } from '../layout/phone';
 
 const PRESETS: SchedulePreset[] = [
   'minutes',
@@ -100,46 +92,27 @@ export function AutomationFormDialog({
   prefill,
   onSaved,
 }: AutomationFormDialogProps) {
-  const isPhone = useIsPhone();
   const editing = !!automation;
   const title = editing ? '编辑自动化' : '新建自动化';
   const description = '按计划在会话里运行提示词，每次运行都是一轮真实的对话。';
-  const body = (
-    <AutomationForm
-      automation={automation}
-      prefill={prefill}
-      onCancel={onClose}
-      onSaved={(saved) => {
-        onSaved?.(saved);
-        onClose();
-      }}
-    />
-  );
-
-  if (isPhone) {
-    return (
-      <Sheet open={open} onOpenChange={(value) => !value && onClose()}>
-        <SheetContent
-          side="right"
-          className="w-full gap-0 data-[side=right]:w-full data-[side=right]:max-w-none"
-        >
-          <SheetHeader className="border-b border-surface-border">
-            <SheetTitle>{title}</SheetTitle>
-            <SheetDescription>{description}</SheetDescription>
-          </SheetHeader>
-          {body}
-        </SheetContent>
-      </Sheet>
-    );
-  }
   return (
     <Dialog open={open} onOpenChange={(value) => !value && onClose()}>
-      <DialogContent className="flex max-h-[min(52rem,calc(100dvh-2rem))] flex-col gap-0 p-0 sm:max-w-2xl">
+      {/* A bottom sheet on a phone: the fields scroll between the header and
+          the footer, which carries the home indicator's inset itself. */}
+      <DialogContent className="flex max-h-[min(52rem,calc(100dvh-2rem))] flex-col gap-0 p-0 sm:max-w-2xl phone:not-has-[>[data-slot=dialog-footer]]:pb-0">
         <DialogHeader className="border-b border-surface-border px-5 pt-5 pb-4">
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        {body}
+        <AutomationForm
+          automation={automation}
+          prefill={prefill}
+          onCancel={onClose}
+          onSaved={(saved) => {
+            onSaved?.(saved);
+            onClose();
+          }}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -357,7 +330,6 @@ function AutomationForm({
               maxLength={AUTOMATION_LIMITS.nameMax}
               placeholder="为这个自动化命名"
               onChange={(event) => set('name', event.target.value)}
-              autoFocus={!editing}
             />
           )}
         </Field>
@@ -767,7 +739,7 @@ function AutomationForm({
         )}
       </div>
 
-      <div className="flex shrink-0 flex-col gap-2 border-t border-surface-border px-5 py-3 sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-2 border-t border-surface-border px-5 py-3 sm:flex-row sm:items-center phone:pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <div className="min-w-0 flex-1 space-y-1" aria-live="polite">
           {serverError && (
             <p role="alert" className="text-caption text-error">

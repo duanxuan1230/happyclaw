@@ -18,6 +18,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
+import { useBackDismiss } from '@/hooks/useBackDismiss';
 import { ReviewDiffBody } from './ReviewDiffView';
 import {
   describeReviewFailure,
@@ -86,6 +87,8 @@ function ReviewPanelScope({ groupJid, agentId, className }: ReviewPanelProps) {
       ) ?? selected)
     : null;
   const refreshing = review.statusRefreshing || review.diffRefreshing;
+  // A phone's back steps from a file's diff to the list, not out of the panel.
+  useBackDismiss(!!selected, review.closeFile);
 
   // Move focus into the detail view and back to the row that opened it.
   useEffect(() => {

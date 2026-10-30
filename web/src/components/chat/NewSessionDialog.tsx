@@ -121,7 +121,6 @@ export function NewSessionDialog({
                 }
               }}
               placeholder="留空则根据第一条消息自动命名"
-              autoFocus
             />
           </div>
           <div className="flex items-start gap-3 rounded-lg border border-surface-border p-3">

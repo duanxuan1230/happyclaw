@@ -1,11 +1,7 @@
 import { useMemo } from 'react';
 import { Pause, PanelRight, Play, Timer, Trash2 } from 'lucide-react';
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { InfoTip } from '@/components/common/InfoTip';
 import { cn } from '@/lib/utils';
 import type { Automation } from '../../lib/automation';
 import {
@@ -121,21 +117,11 @@ export function BoundAutomationMark({
 }) {
   if (automations.length === 0) return null;
   const label = `绑定了自动化：${automations.map((item) => item.name).join('、')}`;
+  // Touch has no hover: there a tap on the mark opens the list, so it sits
+  // above a row's stretched link and takes a finger-sized area around it.
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span
-          role="img"
-          aria-label={label}
-          className={cn(
-            'inline-flex shrink-0 text-faint-foreground',
-            className,
-          )}
-        >
-          <Timer className="size-3" />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>
+    <InfoTip
+      content={
         <ul className="space-y-0.5">
           {automations.map((automation) => (
             <li key={automation.id}>
@@ -143,8 +129,19 @@ export function BoundAutomationMark({
             </li>
           ))}
         </ul>
-      </TooltipContent>
-    </Tooltip>
+      }
+    >
+      <span
+        role="img"
+        aria-label={label}
+        className={cn(
+          'inline-flex shrink-0 text-faint-foreground pointer-coarse:relative pointer-coarse:z-10 pointer-coarse:before:absolute pointer-coarse:before:-inset-2.5',
+          className,
+        )}
+      >
+        <Timer className="size-3" />
+      </span>
+    </InfoTip>
   );
 }
 

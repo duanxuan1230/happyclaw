@@ -29,6 +29,7 @@ import {
   Music,
   AlertCircle,
   Copy,
+  Ellipsis,
 } from 'lucide-react';
 import {
   useFileStore,
@@ -53,6 +54,8 @@ import {
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { IconButton } from '@/components/common/IconButton';
+import { ActionSheet } from '@/components/common/ActionSheet';
+import type { MenuAction } from '@/components/common/ResponsiveMenu';
 import {
   SegmentedControl,
   type SegmentedOption,
@@ -64,6 +67,8 @@ import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { useVisibleInterval } from '../../hooks/useVisibleInterval';
+import { useLongPress } from '../../hooks/useLongPress';
+import { useIsPhone } from '../layout/phone';
 import { FileUploadZone } from './FileUploadZone';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { PreviewDialog } from './PreviewDialog';
@@ -224,8 +229,9 @@ const PREVIEW_SHELL_CLASS =
   'flex h-full w-full flex-col bg-surface-raised sm:animate-in sm:rounded-xl sm:shadow-floating sm:ring-1 sm:ring-foreground/10 sm:duration-200 sm:zoom-in-95';
 const PREVIEW_HEADER_CLASS =
   'flex h-12 shrink-0 items-center justify-between gap-2 border-b border-surface-border pr-2 pl-3 sm:pl-4';
+// Keyboard hints only; a phone has no Esc or Ctrl+S to press.
 const PREVIEW_FOOTER_CLASS =
-  'shrink-0 border-t border-surface-border px-3 py-2 text-caption text-muted-foreground sm:px-4';
+  'shrink-0 border-t border-surface-border px-3 py-2 text-caption text-muted-foreground sm:px-4 phone:hidden';
 const PREVIEW_TEXTAREA_CLASS =
   'h-full w-full resize-none font-mono text-body text-foreground md:text-body';
 
@@ -237,6 +243,40 @@ const MARKDOWN_MODE_OPTIONS: SegmentedOption<'preview' | 'edit'>[] = [
 const BREADCRUMB_BUTTON_CLASS =
   'shrink-0 px-1.5 text-caption font-normal pointer-coarse:h-8';
 const FILE_ACTION_CLASS = 'text-muted-foreground pointer-coarse:size-9';
+
+// ─── Phone file row ──────────────────────────────────────────────
+
+/**
+ * A phone's file row: one ⋯ instead of four small buttons, and a long press
+ * on the row does the same. Both open the panel's single action sheet.
+ */
+function PhoneFileRow({
+  onOpenMenu,
+  children,
+}: {
+  onOpenMenu: () => void;
+  children: React.ReactNode;
+}) {
+  const longPress = useLongPress(onOpenMenu);
+  return (
+    <div
+      role="listitem"
+      {...longPress}
+      className="flex h-11 items-center gap-1 rounded-md pr-1 transition-colors active:bg-surface-hover"
+    >
+      {children}
+      <IconButton
+        // The row names the file; the label stays out of its name match.
+        label="更多操作"
+        icon={<Ellipsis />}
+        hideTooltip
+        aria-haspopup="dialog"
+        onClick={onOpenMenu}
+        className="text-muted-foreground"
+      />
+    </div>
+  );
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -864,6 +904,10 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
     navigateTo,
   } = useFileStore();
 
+  const isPhone = useIsPhone();
+  // The file of the phone's action sheet; it stays while the sheet closes.
+  const [menuTarget, setMenuTarget] = useState<FileEntry | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const newDirInputId = useId();
   const [createDirModal, setCreateDirModal] = useState(false);
   const [newDirName, setNewDirName] = useState('');
@@ -980,6 +1024,41 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           err instanceof Error ? err.message : '无法写入剪贴板',
         );
       });
+  };
+
+  const fileActions = (item: FileEntry): MenuAction[][] => {
+    const actions: MenuAction[] = [
+      {
+        label: '复制绝对路径',
+        icon: Copy,
+        onSelect: () => handleCopyPath(item),
+      },
+    ];
+    if (isEntryEditable(item) && TEXT_EXTENSIONS.has(getFileExt(item.name))) {
+      actions.push({
+        label: '编辑文件',
+        icon: Pencil,
+        onSelect: () => setPreview({ kind: 'edit', file: item }),
+      });
+    }
+    if (item.type === 'file') {
+      actions.push({
+        label: '下载文件',
+        icon: Download,
+        onSelect: () => handleDownload(item),
+      });
+    }
+    const remove: MenuAction[] = item.isSystem
+      ? []
+      : [
+          {
+            label: item.type === 'directory' ? '删除文件夹' : '删除文件',
+            icon: Trash2,
+            destructive: true,
+            onSelect: () => handleDeleteClick(item),
+          },
+        ];
+    return [actions, remove];
   };
 
   const handleDeleteClick = (item: FileEntry) => {
@@ -1174,25 +1253,44 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                     )}
                   </>
                 );
+                const main = clickable ? (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(item)}
+                    className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset"
+                  >
+                    {summary}
+                  </button>
+                ) : (
+                  <div className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2">
+                    {summary}
+                  </div>
+                );
+                if (isPhone) {
+                  return (
+                    <PhoneFileRow
+                      key={item.path}
+                      onOpenMenu={() => {
+                        setMenuTarget(item);
+                        setMenuOpen(true);
+                      }}
+                    >
+                      {main}
+                      {item.type === 'file' && (
+                        <span className="shrink-0 px-1 text-micro text-faint-foreground tabular-nums">
+                          {formatSize(item.size)}
+                        </span>
+                      )}
+                    </PhoneFileRow>
+                  );
+                }
                 return (
                   <div
                     key={item.path}
                     role="listitem"
                     className="group/file flex h-8 items-center gap-1 rounded-md pr-1 transition-colors hover:bg-surface-hover pointer-coarse:h-11"
                   >
-                    {clickable ? (
-                      <button
-                        type="button"
-                        onClick={() => handleItemClick(item)}
-                        className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset"
-                      >
-                        {summary}
-                      </button>
-                    ) : (
-                      <div className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2">
-                        {summary}
-                      </div>
-                    )}
+                    {main}
 
                     {/* Size gives way to the actions on hover / focus. */}
                     {item.type === 'file' && (
@@ -1255,19 +1353,32 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
       {/* Footer */}
       <div className="shrink-0 space-y-2 border-t border-surface-border p-3">
-        <Button variant="outline" onClick={handleCreateDir} className="w-full">
+        <Button
+          variant="outline"
+          onClick={handleCreateDir}
+          className="w-full phone:h-11"
+        >
           <FolderPlus />
           新建文件夹
         </Button>
         <FileUploadZone groupJid={groupJid} />
       </div>
 
+      {isPhone && (
+        <ActionSheet
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          title={menuTarget?.name ?? ''}
+          groups={menuTarget ? fileActions(menuTarget) : []}
+        />
+      )}
+
       {/* Create Directory Dialog */}
       <Dialog
         open={createDirModal}
         onOpenChange={(v) => !v && setCreateDirModal(false)}
       >
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" autoFocusOnPhone>
           <DialogHeader>
             <DialogTitle>新建文件夹</DialogTitle>
           </DialogHeader>

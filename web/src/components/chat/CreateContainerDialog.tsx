@@ -460,7 +460,6 @@ export function CreateContainerDialog({
                 if (e.key === 'Enter') handleConfirm();
               }}
               placeholder="输入这个智能体工作区的名称"
-              autoFocus
             />
           </div>
 
@@ -653,6 +652,7 @@ export function CreateContainerDialog({
                                     clearSubmissionErrors();
                                   }}
                                   placeholder="https://github.com/user/repo"
+                                  variant="code"
                                   className="font-mono"
                                 />
                               </div>
