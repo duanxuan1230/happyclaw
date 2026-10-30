@@ -26,14 +26,25 @@ import { getResolvedCodexCatalog } from './codex-gateway/model-catalog-sync.js';
 import { normalizeLegacyCodexModel } from './codex-gateway/convert-request.js';
 import { retiredCodexReauthReason } from './codex-gateway/oauth.js';
 import {
+  buildConnectionModelEnv,
+  CONNECTION_ENV_PREFILL,
+  CONNECTION_MODEL_ENV_KEYS,
   effectiveProviderModels,
+  findModelEntry,
   getModelPreset,
+  isModelEffort,
   isValidModelId,
+  launchModelName,
   MAX_PROVIDER_MODEL_ID_LENGTH,
   MAX_PROVIDER_MODELS,
+  normalizeConnectionModelRoles,
+  normalizeContextWindow,
   normalizeProviderBaseUrl,
   normalizeProviderModels,
+  ONE_MILLION_CONTEXT,
   PROVIDER_ERROR_CODES,
+  splitOneMillionSuffix,
+  type ConnectionModelRoles,
   type ModelEffort,
   type ProviderErrorCode,
   type ProviderModelEntry,
@@ -147,28 +158,20 @@ export function clearInheritedClaudeProviderEnv(
   }
 }
 
-const THIRD_PARTY_CONFIGURABLE_ENV_KEYS = new Set([
-  // These values receive provider-level defaults below, but remain editable
-  // through the provider's advanced settings. Workspace overrides stay
-  // blocked so one workspace cannot silently change provider behavior.
-  'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'CLAUDE_CODE_SUBAGENT_MODEL',
-  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-  'CLAUDE_CODE_EFFORT_LEVEL',
-  'CLAUDE_CODE_NO_FLICKER',
-  'API_TIMEOUT_MS',
-]);
+/** Keys a connection's models and roles decide; never free env. */
+const CONNECTION_MODEL_ENV_KEY_SET: ReadonlySet<string> = new Set(
+  CONNECTION_MODEL_ENV_KEYS,
+);
 
-/** Model-tier mappings that default to the provider model. */
-const THIRD_PARTY_MODEL_ENV_KEYS = [
-  'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'CLAUDE_CODE_SUBAGENT_MODEL',
-] as const;
+/**
+ * Keys a workspace override may not set on a third-party endpoint: the model
+ * environment and the connection's runtime tuning belong to the connection,
+ * so one workspace cannot silently change provider behavior.
+ */
+const THIRD_PARTY_CONFIGURABLE_ENV_KEYS: ReadonlySet<string> = new Set([
+  ...CONNECTION_MODEL_ENV_KEYS,
+  ...Object.keys(CONNECTION_ENV_PREFILL),
+]);
 
 /**
  * Haiku tier behind the ChatGPT subscription gateway: Claude Code's own
@@ -195,17 +198,8 @@ function isCodexGatewayEndpoint(baseUrl: string): boolean {
 
 /** Provider env values that Claude Code parses as positive integers. */
 const POSITIVE_INTEGER_PROVIDER_ENV_KEYS = new Set([
-  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
   'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   'API_TIMEOUT_MS',
-]);
-
-const PROVIDER_EFFORT_LEVELS = new Set([
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
 ]);
 
 /**
@@ -242,36 +236,37 @@ export function validateProviderCustomEnv(
         return `${key} 必须是正整数`;
       }
     }
-    if (
-      key === 'CLAUDE_CODE_EFFORT_LEVEL' &&
-      trimmed &&
-      !PROVIDER_EFFORT_LEVELS.has(trimmed)
-    ) {
-      return `CLAUDE_CODE_EFFORT_LEVEL 只能是 ${[...PROVIDER_EFFORT_LEVELS].join(' / ')}`;
-    }
   }
   return null;
 }
 
-const THIRD_PARTY_RUNTIME_DEFAULTS = {
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-  CLAUDE_CODE_EFFORT_LEVEL: 'max',
-  CLAUDE_CODE_NO_FLICKER: '1',
-  API_TIMEOUT_MS: '3000000',
-} as const;
-
 /**
- * Whether a third-party provider defaults to a 1M auto-compact window.
- *
- * Only an explicit `[1m]` model ID does. Claude Code 2.1.285+ gives 1M-native
- * Claude models (Sonnet 5+, Opus 4.7+, Fable) a 1M window behind a gateway
- * too, but it cannot see a gateway capped at 200K, which then fails with
- * "Prompt is too long" instead of compacting; a provider that serves 1M sets
- * the `[1m]` suffix or its own CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+ * The keys of a connection env that the launch derives from the connection's
+ * models and roles (CONNECTION_MODEL_ENV_KEYS). A write naming one is refused
+ * with RESERVED_ENV_KEY rather than saved and silently ignored.
  */
-export function isOneMillionContextModel(model: string): boolean {
-  return /\[1m\]$/i.test(model.trim());
+export function reservedConnectionEnvKeys(
+  customEnv: Record<string, string>,
+): string[] {
+  return Object.keys(customEnv).filter((key) =>
+    CONNECTION_MODEL_ENV_KEY_SET.has(key),
+  );
 }
+
+/** The 400 body for a connection env naming such a key, or null. */
+export function reservedConnectionEnvError(
+  customEnv: Record<string, string> | undefined,
+): { error: string; code: 'RESERVED_ENV_KEY'; keys: string[] } | null {
+  const keys = reservedConnectionEnvKeys(customEnv ?? {});
+  return keys.length > 0
+    ? {
+        error: `${keys.join(', ')} 由模型设置决定，请在模型列表里配置`,
+        code: 'RESERVED_ENV_KEY',
+        keys,
+      }
+    : null;
+}
+
 const DANGEROUS_ENV_VARS = new Set([
   // Code execution / preload attacks
   'LD_PRELOAD',
@@ -430,6 +425,13 @@ export interface ClaudeProviderConfig {
   claudeCodeOauthToken: string;
   claudeOAuthCredentials: ClaudeOAuthCredentials | null;
   anthropicModel: string;
+  /**
+   * The connection's model list and roles, from which a third-party launch
+   * derives its tiers, `[1m]` and compact window (buildClaudeEnvLines).
+   * Absent for configurations that are not a saved connection.
+   */
+  models?: ProviderModelEntry[];
+  roles?: ConnectionModelRoles;
   updatedAt: string | null;
 }
 
@@ -584,6 +586,7 @@ interface ClaudeStoredStateV3Resolved {
 
 // ─── V5 模型配置（每项都是一套完整 Provider 运行环境）──────────
 
+/** @deprecated removed in the model-connections rework (no automatic pool). */
 export interface BalancingConfig {
   strategy: 'round-robin' | 'weighted-round-robin' | 'failover';
   unhealthyThreshold: number;
@@ -601,6 +604,11 @@ interface StoredProviderV4 {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  /**
+   * Legacy pool membership and weight. Kept as stored so the one-time binding
+   * backfill (readLegacyModelDefaults) and older releases can read them; this
+   * release decides nothing by them.
+   */
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
@@ -621,6 +629,14 @@ interface StoredProviderV4 {
   presetId?: string;
   /** The last connection test; written only by the test route. */
   lastTest?: ProviderTestRecord;
+  /** Which of the connection's models Claude Code uses besides the turn's. */
+  roles?: ConnectionModelRoles;
+  /**
+   * Set once CONNECTION_ENV_PREFILL has been given to the connection (by the
+   * add wizard, or by the read-time migration for older connections), so a
+   * key the user deleted afterwards stays deleted.
+   */
+  envPrefill?: 1;
   /**
    * Which Claude login the OAuth credentials come from: a new one on every
    * login or pasted credential, kept through token renewals. Random, so it
@@ -658,7 +674,9 @@ export interface UnifiedProvider {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  /** @deprecated removed in the model-connections rework; see StoredProviderV4. */
   enabled: boolean;
+  /** @deprecated removed in the model-connections rework; see StoredProviderV4. */
   weight: number;
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
@@ -676,6 +694,9 @@ export interface UnifiedProvider {
   codexOAuthLastRefreshError?: CodexOAuthRefreshErrorState | null;
   /** See StoredProviderV4.models; read through effectiveProviderModels. */
   models?: ProviderModelEntry[];
+  /** Only roles naming one of `models`; absent when none is set. */
+  roles?: ConnectionModelRoles;
+  envPrefill?: 1;
   presetId?: string;
   lastTest?: ProviderTestRecord | null;
   claudeOAuthGrantId?: string;
@@ -688,6 +709,7 @@ export interface UnifiedProviderPublic {
   id: string;
   name: string;
   type: 'official' | 'third_party';
+  /** Legacy fields; they mean nothing and the Web ignores them. */
   enabled: boolean;
   weight: number;
   anthropicBaseUrl: string;
@@ -732,11 +754,12 @@ export interface UnifiedProviderPublic {
    */
   codexDefaultEffort: string | null;
   /**
-   * What the connection offers: the default model first when the list does
-   * not name it, never hidden. Empty for ChatGPT subscriptions (the Web reads
+   * What the connection offers: the connection's own model first when the
+   * list does not name it. Empty for ChatGPT subscriptions (the Web reads
    * their catalog) and for a pass-through relay without models.
    */
   models: ProviderModelEntry[];
+  roles: ConnectionModelRoles;
   presetId: string | null;
   lastTest: ProviderTestRecord | null;
   customEnv: Record<string, string>;
@@ -875,9 +898,19 @@ function normalizeProfileId(input: unknown): string {
   return value;
 }
 
+/**
+ * A stored or submitted env map with invalid keys refused and dangerous ones
+ * dropped. An empty value is dropped too: a key the user left blank is not
+ * injected. `skipConnectionModelKeys` also drops the keys a connection's
+ * models decide; reads keep them until migrateConnectionModelFields moves
+ * them into the model list.
+ */
 function sanitizeCustomEnvMap(
   input: Record<string, string>,
-  options?: { skipReservedClaudeKeys?: boolean },
+  options?: {
+    skipReservedClaudeKeys?: boolean;
+    skipConnectionModelKeys?: boolean;
+  },
 ): Record<string, string> {
   const entries = Object.entries(input);
   if (entries.length > MAX_CUSTOM_ENV_ENTRIES) {
@@ -894,13 +927,35 @@ function sanitizeCustomEnvMap(
     if (options?.skipReservedClaudeKeys && RESERVED_CLAUDE_ENV_KEYS.has(key)) {
       continue;
     }
+    if (
+      options?.skipConnectionModelKeys &&
+      CONNECTION_MODEL_ENV_KEY_SET.has(key)
+    ) {
+      continue;
+    }
     if (isDangerousEnvKey(key)) continue;
-    out[key] = sanitizeCustomEnvValue(
+    const value = sanitizeCustomEnvValue(
       key,
       typeof rawValue === 'string' ? rawValue : String(rawValue),
     );
+    if (value.trim()) out[key] = value;
   }
   return out;
+}
+
+/** The env options every write of a connection's own env uses. */
+const CONNECTION_ENV_WRITE = {
+  skipReservedClaudeKeys: true,
+  skipConnectionModelKeys: true,
+} as const;
+
+/** Whether a launch leaves a connection env key out (see CONNECTION_ENV_WRITE). */
+function isSkippedConnectionEnvKey(key: string): boolean {
+  return (
+    RESERVED_CLAUDE_ENV_KEYS.has(key) ||
+    CONNECTION_MODEL_ENV_KEY_SET.has(key) ||
+    isDangerousEnvKey(key)
+  );
 }
 
 function normalizeConfig(
@@ -1453,9 +1508,10 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
     claudeOAuthLastRefreshAt: provider.claudeOAuthLastRefreshAt ?? null,
     claudeOAuthLastRefreshError: provider.claudeOAuthLastRefreshError ?? null,
   };
-  const sanitizedEnv = sanitizeCustomEnvMap(provider.customEnv || {}, {
-    skipReservedClaudeKeys: true,
-  });
+  const sanitizedEnv = sanitizeCustomEnvMap(
+    provider.customEnv || {},
+    CONNECTION_ENV_WRITE,
+  );
   return {
     id: provider.id,
     name: provider.name,
@@ -1475,6 +1531,7 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
       ? { codexOAuthLastRefreshError: provider.codexOAuthLastRefreshError }
       : {}),
     ...connectionListFields(provider),
+    ...(provider.envPrefill === 1 ? { envPrefill: 1 as const } : {}),
     ...(provider.claudeOAuthCredentials && provider.claudeOAuthGrantId
       ? { claudeOAuthGrantId: provider.claudeOAuthGrantId }
       : {}),
@@ -1491,12 +1548,25 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
  */
 function connectionListFields(provider: {
   anthropicBaseUrl: string;
+  anthropicModel: string;
   models?: unknown;
+  roles?: unknown;
   presetId?: unknown;
   lastTest?: unknown;
-}): Pick<StoredProviderV4, 'models' | 'presetId' | 'lastTest'> {
+}): Pick<StoredProviderV4, 'models' | 'roles' | 'presetId' | 'lastTest'> {
   const chatGpt = isCodexGatewayProvider(provider);
   const models = chatGpt ? null : normalizeProviderModels(provider.models);
+  // Roles name models of this connection; one whose model left the list
+  // follows the turn's model again.
+  const roles = chatGpt
+    ? {}
+    : normalizeConnectionModelRoles(
+        provider.roles,
+        effectiveProviderModels({
+          anthropicModel: provider.anthropicModel,
+          models: models ?? undefined,
+        }),
+      );
   // A preset describes one vendor endpoint; moved elsewhere, it no longer
   // applies (its model list address, its models).
   const preset =
@@ -1512,6 +1582,7 @@ function connectionListFields(provider: {
   // Absent fields stay undefined, which JSON leaves out of the file.
   return {
     models: models ?? undefined,
+    roles: Object.keys(roles).length > 0 ? roles : undefined,
     presetId: presetId ?? undefined,
     lastTest: normalizeProviderTestRecord(provider.lastTest) ?? undefined,
   };
@@ -1623,12 +1694,136 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     ...connectionListFields({
       ...stored,
       anthropicBaseUrl: stored.anthropicBaseUrl || '',
+      anthropicModel: stored.anthropicModel || '',
     }),
+    ...(stored.envPrefill === 1 ? { envPrefill: 1 as const } : {}),
     ...(typeof stored.claudeOAuthGrantId === 'string'
       ? { claudeOAuthGrantId: stored.claudeOAuthGrantId }
       : {}),
     updatedAt: stored.updatedAt || '',
   };
+}
+
+/** Legacy env keys that named a role, and the role each becomes. */
+const LEGACY_ROLE_ENV_KEYS: ReadonlyArray<
+  readonly [string, keyof ConnectionModelRoles]
+> = [
+  ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'smallFast'],
+  ['CLAUDE_CODE_SUBAGENT_MODEL', 'subagent'],
+  ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'opus'],
+  ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'sonnet'],
+];
+
+/** `models` with `id`'s entry given `field`, unless it already has one. */
+function withEntryDefault<K extends 'contextWindow' | 'defaultEffort'>(
+  models: ProviderModelEntry[],
+  id: string,
+  field: K,
+  value: NonNullable<ProviderModelEntry[K]>,
+): ProviderModelEntry[] {
+  return models.map((entry) =>
+    entry.id === id && !entry[field] ? { ...entry, [field]: value } : entry,
+  );
+}
+
+/**
+ * Moves what a connection saved before models carried their window and
+ * efforts into the structured fields, in place; true when anything changed.
+ * `[1m]` on the connection's model becomes its entry's 1M window; legacy
+ * model keys in the env become roles (when they name another model of the
+ * connection), the model's window and its default effort, and leave the env.
+ * A connection with an endpoint gets CONNECTION_ENV_PREFILL once, where its
+ * env has no value, so the runtime defaults it ran with keep applying. Run
+ * again on its own output it changes nothing.
+ */
+function migrateConnectionModelFields(provider: UnifiedProvider): boolean {
+  const env = provider.customEnv;
+  const legacyKeys = CONNECTION_MODEL_ENV_KEYS.filter((key) =>
+    Object.hasOwn(env, key),
+  );
+  const { model, oneMillion } = splitOneMillionSuffix(provider.anthropicModel);
+  const needsPrefill = provider.envPrefill !== 1;
+  if (!oneMillion && legacyKeys.length === 0 && !needsPrefill) return false;
+
+  if (!isCodexGatewayProvider(provider) && model) {
+    let models = effectiveProviderModels({
+      anthropicModel: model,
+      models: provider.models,
+    });
+    if (oneMillion)
+      models = withEntryDefault(
+        models,
+        model,
+        'contextWindow',
+        ONE_MILLION_CONTEXT,
+      );
+    const compact = normalizeContextWindow(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+    if (compact)
+      models = withEntryDefault(models, model, 'contextWindow', compact);
+    const effort = env.CLAUDE_CODE_EFFORT_LEVEL?.trim();
+    if (isModelEffort(effort)) {
+      models = withEntryDefault(models, model, 'defaultEffort', effort);
+    }
+    const legacyRoles: Record<string, string> = {};
+    for (const [key, role] of LEGACY_ROLE_ENV_KEYS) {
+      const value = env[key]?.trim();
+      if (!value) continue;
+      const named = splitOneMillionSuffix(value);
+      if (named.model === model) continue;
+      legacyRoles[role] = named.model;
+      if (named.oneMillion) {
+        models = withEntryDefault(
+          models,
+          named.model,
+          'contextWindow',
+          ONE_MILLION_CONTEXT,
+        );
+      }
+    }
+    const roles = {
+      ...normalizeConnectionModelRoles(legacyRoles, models),
+      ...(provider.roles ?? {}),
+    };
+    if (provider.models || legacyKeys.length > 0 || oneMillion) {
+      provider.models = models;
+    }
+    provider.roles = Object.keys(roles).length > 0 ? roles : undefined;
+  }
+  provider.anthropicModel = model;
+  for (const key of legacyKeys) delete env[key];
+  if (needsPrefill) {
+    if (provider.anthropicBaseUrl) {
+      for (const [key, value] of Object.entries(CONNECTION_ENV_PREFILL)) {
+        if (!env[key]?.trim()) env[key] = value;
+      }
+    }
+    provider.envPrefill = 1;
+  }
+  return true;
+}
+
+/**
+ * Runs migrateConnectionModelFields over every provider; true when the file
+ * should be rewritten: a provider changed, or a stored model list or roles
+ * were in an older shape than they read as (`[1m]` ids, `hidden`, `effort`).
+ */
+function migrateConnectionsInPlace(
+  providers: UnifiedProvider[],
+  stored?: ReadonlyArray<StoredProviderV4>,
+): boolean {
+  let changed = false;
+  providers.forEach((provider, index) => {
+    const raw = stored?.[index];
+    if (
+      raw &&
+      (JSON.stringify(raw.models) !== JSON.stringify(provider.models) ||
+        JSON.stringify(raw.roles) !== JSON.stringify(provider.roles))
+    ) {
+      changed = true;
+    }
+    if (migrateConnectionModelFields(provider)) changed = true;
+  });
+  return changed;
 }
 
 /** Migrate V3 stored state to V4 unified provider list */
@@ -1865,6 +2060,10 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
     if (parsed.version === 5) {
       const v5 = parsed as unknown as StoredClaudeProviderConfigV5;
       const providers = v5.providers.map(fromStoredProviderV4);
+      const modelFieldsMigrated = migrateConnectionsInPlace(
+        providers,
+        v5.providers,
+      );
       const state: StoredStateV5 = {
         providers,
         defaultModelConfigId: normalizeDefaultModelConfigId(
@@ -1885,6 +2084,7 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
         ensureCodexGatewayIdentifiers(providers);
       if (
         repairedGatewayIdentifiers ||
+        modelFieldsMigrated ||
         Object.hasOwn(v5, 'defaultProviderId')
       ) {
         // Tidying a readable file must not make the whole configuration
@@ -1915,12 +2115,18 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
           'Removed legacy default model pointer from Claude model configuration',
         );
       }
+      if (modelFieldsMigrated) {
+        logger.info(
+          'Moved model settings of Claude model connections into their model lists',
+        );
+      }
       return state;
     }
 
     if (parsed.version === 4) {
       const v4 = parsed as unknown as StoredClaudeProviderConfigV4;
       const providers = v4.providers.map(fromStoredProviderV4);
+      migrateConnectionsInPlace(providers, v4.providers);
       const migrated: StoredStateV5 = {
         providers,
         defaultModelConfigId: null,
@@ -1947,6 +2153,7 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
       ...migrateV3toV4(v3),
       defaultModelConfigId: null,
     };
+    migrateConnectionsInPlace(migrated.providers);
 
     // Auto-save as V5 on first read (lazy migration)
     writeStoredStateV4(migrated.providers, migrated.balancing, null);
@@ -2002,24 +2209,25 @@ export function getProviders(): UnifiedProvider[] {
   return state?.providers ?? [];
 }
 
+/**
+ * @deprecated removed in the model-connections rework: `enabled` decides
+ * nothing any more. Kept for callers not yet moved off the automatic pool.
+ */
 export function getEnabledProviders(): UnifiedProvider[] {
   return getProviders().filter((p) => p.enabled);
 }
 
 /**
- * The configuration conversations run on when nothing more specific (a
- * conversation pick, an Agent binding, a Workspace environment) chose one;
- * null when the automatic pool decides.
+ * @deprecated removed in the model-connections rework: there is no global
+ * default model. The one-time backfill reads readLegacyModelDefaults().
  */
 export function getDefaultModelConfigId(): string | null {
   return readStoredStateV4()?.defaultModelConfigId ?? null;
 }
 
 /**
- * The default configuration when it can serve a launch right now. One that
- * lost its credential or was switched off behind the pointer's back does not
- * pin anything: the conversation falls through to the automatic pool rather
- * than failing every turn on it.
+ * @deprecated removed in the model-connections rework: there is no global
+ * default model. The one-time backfill reads readLegacyModelDefaults().
  */
 export function getUsableDefaultProvider(): UnifiedProvider | null {
   const state = readStoredStateV4();
@@ -2032,15 +2240,29 @@ export function getUsableDefaultProvider(): UnifiedProvider | null {
     : null;
 }
 
-export const DEFAULT_MODEL_DISABLE_ERROR =
-  '默认模型配置不能禁用，请先取消默认或改选其他默认模型';
+/**
+ * What the file still says about the retired global default and pool, for
+ * the one-time binding backfill: the legacy default (only while it names a
+ * connection with a credential) and the connections that were enabled, in
+ * file order. Nothing else reads these.
+ */
+export function readLegacyModelDefaults(): {
+  defaultModelConfigId: string | null;
+  enabledIds: string[];
+} {
+  const state = readStoredStateV4();
+  return {
+    defaultModelConfigId: state?.defaultModelConfigId ?? null,
+    enabledIds: (state?.providers ?? [])
+      .filter((provider) => provider.enabled)
+      .map((provider) => provider.id),
+  };
+}
 
 /**
- * Make a configuration the default, or clear the choice with null so the
- * automatic pool decides again. The pool is what a default replaces, so the
- * default has to be a member of it: a disabled configuration is switched on
- * together with being chosen, and the default cannot be switched off while it
- * is the default.
+ * @deprecated removed in the model-connections rework: there is no global
+ * default model and no route writes one. Kept for callers of the retired
+ * pool. A configuration chosen while switched off is switched on with it.
  */
 export function setDefaultModelConfig(
   id: string | null,
@@ -2053,31 +2275,33 @@ export function setDefaultModelConfig(
     }
     return null;
   }
-
   const idx = state.providers.findIndex((p) => p.id === id);
   if (idx < 0) throw new Error('未找到指定供应商');
-  const provider = state.providers[idx];
-  if (!providerHasCredentials(provider)) {
+  if (!providerHasCredentials(state.providers[idx])) {
     throw new Error('该模型配置还没有可用的凭据，请先填写密钥或完成授权');
   }
-  if (state.defaultModelConfigId === id && provider.enabled) return provider;
-
-  if (!provider.enabled) {
-    state.providers[idx] = {
-      ...provider,
-      enabled: true,
-      updatedAt: new Date().toISOString(),
-    };
-  }
+  state.providers[idx] = { ...state.providers[idx], enabled: true };
   writeStoredStateV4(state.providers, state.balancing, id);
   return state.providers[idx];
 }
 
+/** Drops the legacy default pointer from the file once it has been backfilled. */
+export function clearLegacyDefaultModelConfigId(): void {
+  const state = readStoredStateV4();
+  if (!state || state.defaultModelConfigId === null) return;
+  writeStoredStateV4(state.providers, state.balancing, null);
+}
+
+/** @deprecated removed in the model-connections rework (no automatic pool). */
 export function getBalancingConfig(): BalancingConfig {
   const state = readStoredStateV4();
   return state?.balancing ?? { ...DEFAULT_BALANCING_CONFIG };
 }
 
+/**
+ * @deprecated removed in the model-connections rework (no automatic pool);
+ * no route writes it. Kept for callers of the retired pool.
+ */
 export function saveBalancingConfig(
   config: Partial<BalancingConfig>,
 ): BalancingConfig {
@@ -2086,12 +2310,31 @@ export function saveBalancingConfig(
     defaultModelConfigId: null,
     balancing: { ...DEFAULT_BALANCING_CONFIG },
   };
-  const merged: BalancingConfig = {
-    ...state.balancing,
-    ...config,
-  };
+  const merged: BalancingConfig = { ...state.balancing, ...config };
   writeStoredStateV4(state.providers, merged, state.defaultModelConfigId);
   return merged;
+}
+
+/**
+ * @deprecated removed in the model-connections rework: `enabled` decides
+ * nothing and no route writes it. Kept for callers of the retired pool.
+ */
+export function setProviderEnabled(
+  id: string,
+  enabled: boolean,
+): UnifiedProvider {
+  const state = readStoredStateV4();
+  if (!state) throw new Error('Claude 配置不存在');
+  const idx = state.providers.findIndex((p) => p.id === id);
+  if (idx < 0) throw new Error('未找到指定供应商');
+  if (state.providers[idx].enabled === enabled) return state.providers[idx];
+  state.providers[idx] = { ...state.providers[idx], enabled };
+  writeStoredStateV4(
+    state.providers,
+    state.balancing,
+    state.defaultModelConfigId,
+  );
+  return state.providers[idx];
 }
 
 type ClaudeAuthKind = 'oauth' | 'setup_token' | 'api_key';
@@ -2157,11 +2400,12 @@ function applyClaudeAuthKind(
 }
 
 /**
- * The model list a write leaves a connection with, the default model first
- * and visible. Without a new list, a new default model joins the current
- * list instead of replacing the old default, so changing the default never
- * drops a model by itself. Undefined leaves a connection without a list
- * (`anthropicModel` alone), as connections saved before lists existed are.
+ * The model list a write leaves a connection with, the connection's own
+ * model first. Without a new list, a new connection model joins the current
+ * list instead of replacing the old one, so changing it never drops a model
+ * by itself. A `[1m]` on the model (an older client) gives its entry the 1M
+ * window. Undefined leaves a connection without a list (`anthropicModel`
+ * alone), as connections saved before lists existed are.
  */
 export function nextProviderModelList(
   current: Pick<
@@ -2170,25 +2414,34 @@ export function nextProviderModelList(
   > | null,
   next: { anthropicModel: string; models?: readonly ProviderModelEntry[] },
 ): ProviderModelEntry[] | undefined {
+  const { model, oneMillion } = splitOneMillionSuffix(next.anthropicModel);
   const list =
     next.models !== undefined
       ? next.models
-      : current && current.anthropicModel !== next.anthropicModel
+      : current && splitOneMillionSuffix(current.anthropicModel).model !== model
         ? effectiveProviderModels(current)
         : current?.models;
-  if (!list) return undefined;
-  const models = effectiveProviderModels({
-    anthropicModel: next.anthropicModel,
-    models: list,
+  if (!list && !oneMillion) return undefined;
+  let models = effectiveProviderModels({
+    anthropicModel: model,
+    models: list ?? [],
   });
+  if (oneMillion)
+    models = withEntryDefault(
+      models,
+      model,
+      'contextWindow',
+      ONE_MILLION_CONTEXT,
+    );
   if (models.length > MAX_PROVIDER_MODELS) {
     throw new Error(
-      `一个模型配置最多 ${MAX_PROVIDER_MODELS} 个模型，请先移除不用的模型再设置默认模型`,
+      `一个模型配置最多 ${MAX_PROVIDER_MODELS} 个模型，请先移除不用的模型`,
     );
   }
   return models;
 }
 
+/** A connection's model as submitted: '' or a valid id, `[1m]` still on. */
 function normalizeDefaultModel(input: unknown): string {
   const model = normalizeModel(input);
   if (model && !isValidModelId(model)) {
@@ -2197,14 +2450,14 @@ function normalizeDefaultModel(input: unknown): string {
   return model;
 }
 
-/** Provider env a connection test sends or probes with. */
-const TESTED_CUSTOM_ENV_KEYS = [
-  'ANTHROPIC_CUSTOM_HEADERS',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-] as const;
-
-function testedCustomEnv(provider: Pick<UnifiedProvider, 'customEnv'>) {
-  return TESTED_CUSTOM_ENV_KEYS.map((key) => provider.customEnv?.[key] ?? '');
+/** What a connection test sends or probes with besides the endpoint and key. */
+function testedConnectionExtras(
+  provider: Pick<UnifiedProvider, 'customEnv' | 'roles'>,
+): [string, string] {
+  return [
+    provider.customEnv?.ANTHROPIC_CUSTOM_HEADERS ?? '',
+    provider.roles?.smallFast ?? '',
+  ];
 }
 
 /**
@@ -2226,7 +2479,7 @@ function testedConnectionIdentity(provider: UnifiedProvider): string {
         ]
       : null,
     provider.codexOAuthCredentials?.accountId ?? null,
-    testedCustomEnv(provider),
+    testedConnectionExtras(provider),
   ]);
 }
 
@@ -2279,13 +2532,19 @@ export function createProvider(input: {
   claudeOAuthAccount?: ClaudeOAuthAccountInfo | null;
   codexOAuthCredentials?: CodexOAuthCredentials | null;
   customEnv?: Record<string, string>;
-  weight?: number;
-  enabled?: boolean;
   models?: ProviderModelEntry[];
+  /** Raw roles; those not naming one of the connection's models are dropped. */
+  roles?: unknown;
   presetId?: string;
+  /**
+   * @deprecated removed in the model-connections rework. Legacy pool
+   * membership for callers of the retired pool; the HTTP routes never pass it.
+   */
+  enabled?: boolean;
 }): UnifiedProvider {
   const authKind = selectedClaudeAuthKind(input.type, input);
-  const anthropicModel = normalizeDefaultModel(input.anthropicModel ?? '');
+  const requestedModel = normalizeDefaultModel(input.anthropicModel ?? '');
+  const anthropicModel = splitOneMillionSuffix(requestedModel).model;
   const state: StoredStateV5 = readStoredStateV4() || {
     providers: [],
     defaultModelConfigId: null,
@@ -2301,8 +2560,10 @@ export function createProvider(input: {
     id: crypto.randomBytes(8).toString('hex'),
     name: normalizeProfileName(input.name),
     type: input.type,
+    // Legacy fields: off unless a retired-pool caller says, so a rollback
+    // does not add a connection made here to its automatic pool.
     enabled: input.enabled ?? false,
-    weight: Math.max(1, Math.min(100, input.weight ?? 1)),
+    weight: 1,
     anthropicBaseUrl: input.anthropicBaseUrl
       ? normalizeBaseUrl(input.anthropicBaseUrl)
       : '',
@@ -2324,19 +2585,24 @@ export function createProvider(input: {
     claudeOAuthAccount: input.claudeOAuthAccount ?? null,
     claudeOAuthLastRefreshAt: null,
     claudeOAuthLastRefreshError: null,
-    customEnv: sanitizeCustomEnvMap(input.customEnv || {}, {
-      skipReservedClaudeKeys: true,
-    }),
+    customEnv: sanitizeCustomEnvMap(
+      input.customEnv || {},
+      CONNECTION_ENV_WRITE,
+    ),
+    // The caller's env is the whole env: the prefill is the wizard's to offer.
+    envPrefill: 1,
     updatedAt: now,
   };
   Object.assign(
     provider,
     connectionListFields({
       anthropicBaseUrl: provider.anthropicBaseUrl,
+      anthropicModel,
       models: nextProviderModelList(null, {
-        anthropicModel,
+        anthropicModel: requestedModel,
         models: input.models,
       }),
+      roles: input.roles,
       presetId: input.presetId,
     }),
   );
@@ -2363,8 +2629,9 @@ export function updateProvider(
     anthropicAuthMode?: ProviderAuthMode | null;
     anthropicModel?: string;
     customEnv?: Record<string, string>;
-    weight?: number;
     models?: ProviderModelEntry[];
+    /** Raw roles replacing the current ones; absent keeps them. */
+    roles?: unknown;
     /** Null forgets the preset (the endpoint no longer is the vendor's). */
     presetId?: string | null;
   },
@@ -2376,10 +2643,11 @@ export function updateProvider(
   if (idx < 0) throw new Error('未找到指定供应商');
 
   const current = state.providers[idx];
-  const anthropicModel =
+  const requestedModel =
     patch.anthropicModel !== undefined
       ? normalizeDefaultModel(patch.anthropicModel)
       : current.anthropicModel;
+  const anthropicModel = splitOneMillionSuffix(requestedModel).model;
   const updated: UnifiedProvider = {
     ...current,
     ...(patch.name !== undefined
@@ -2394,13 +2662,11 @@ export function updateProvider(
     anthropicModel,
     ...(patch.customEnv !== undefined
       ? {
-          customEnv: sanitizeCustomEnvMap(patch.customEnv, {
-            skipReservedClaudeKeys: true,
-          }),
+          customEnv: sanitizeCustomEnvMap(
+            patch.customEnv,
+            CONNECTION_ENV_WRITE,
+          ),
         }
-      : {}),
-    ...(patch.weight !== undefined
-      ? { weight: Math.max(1, Math.min(100, patch.weight)) }
       : {}),
     updatedAt: new Date().toISOString(),
   };
@@ -2408,22 +2674,24 @@ export function updateProvider(
     updated,
     connectionListFields({
       anthropicBaseUrl: updated.anthropicBaseUrl,
+      anthropicModel,
       models: nextProviderModelList(current, {
-        anthropicModel,
+        anthropicModel: requestedModel,
         models: patch.models,
       }),
+      roles: patch.roles === undefined ? current.roles : patch.roles,
       presetId:
         patch.presetId === undefined ? current.presetId : patch.presetId,
-      // A test describes the endpoint, header and env it ran against.
-      lastTest:
-        updated.anthropicBaseUrl === current.anthropicBaseUrl &&
-        updated.anthropicAuthMode === current.anthropicAuthMode &&
-        JSON.stringify(testedCustomEnv(updated)) ===
-          JSON.stringify(testedCustomEnv(current))
-          ? current.lastTest
-          : null,
     }),
   );
+  // A test describes the endpoint, header, env and probe it ran against.
+  updated.lastTest =
+    updated.anthropicBaseUrl === current.anthropicBaseUrl &&
+    updated.anthropicAuthMode === current.anthropicAuthMode &&
+    JSON.stringify(testedConnectionExtras(updated)) ===
+      JSON.stringify(testedConnectionExtras(current))
+      ? current.lastTest
+      : undefined;
 
   state.providers[idx] = updated;
   writeStoredStateV4(
@@ -2784,43 +3052,9 @@ export function providerHasCredentials(provider: UnifiedProvider): boolean {
   );
 }
 
-export function setProviderEnabled(
-  id: string,
-  enabled: boolean,
-): UnifiedProvider {
-  const state = readStoredStateV4();
-  if (!state) throw new Error('Claude 配置不存在');
-
-  const idx = state.providers.findIndex((p) => p.id === id);
-  if (idx < 0) throw new Error('未找到指定供应商');
-
-  const provider = state.providers[idx];
-  if (provider.enabled === enabled) return provider;
-  if (!enabled && state.defaultModelConfigId === id) {
-    throw new Error(DEFAULT_MODEL_DISABLE_ERROR);
-  }
-  // An enabled provider joins the automatic pool at once; without a
-  // credential every turn routed to it would fail authentication.
-  if (enabled && !providerHasCredentials(provider)) {
-    throw new Error('该模型配置还没有可用的凭据，请先填写密钥或完成授权');
-  }
-
-  state.providers[idx] = {
-    ...provider,
-    enabled,
-    updatedAt: new Date().toISOString(),
-  };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
-  return state.providers[idx];
-}
-
 /**
- * Copy a provider together with its encrypted secrets, disabled, right after
- * the original. OAuth providers are refused: two configurations rotating one
+ * Copy a provider together with its encrypted secrets right after the
+ * original. OAuth providers are refused: two configurations rotating one
  * refresh token would invalidate each other on the first refresh.
  */
 export function duplicateProvider(id: string): UnifiedProvider {
@@ -2886,6 +3120,8 @@ export function providerToConfig(
     claudeCodeOauthToken: provider.claudeCodeOauthToken,
     claudeOAuthCredentials: provider.claudeOAuthCredentials,
     anthropicModel: provider.anthropicModel,
+    ...(provider.models ? { models: provider.models } : {}),
+    ...(provider.roles ? { roles: provider.roles } : {}),
     updatedAt: provider.updatedAt,
   };
 }
@@ -2950,6 +3186,7 @@ export function toPublicProvider(
       ? resolveCodexProviderDefaultEffort(provider)
       : null,
     models: providerModels(provider),
+    roles: provider.roles ?? {},
     presetId: provider.presetId ?? null,
     lastTest: provider.lastTest ?? null,
     customEnv: provider.customEnv || {},
@@ -2958,20 +3195,21 @@ export function toPublicProvider(
 }
 
 /**
- * The effort a connection's own environment runs Claude Code at:
- * CLAUDE_CODE_EFFORT_LEVEL when set, else the level a third-party endpoint
- * gets by default. Undefined lets the model choose.
+ * The default effort the connection declares for its own model, or null when
+ * it declares none (the model's registry default then applies, if any).
+ * Nothing is implied by the endpoint: a third-party connection no longer runs
+ * at max unless asked to.
  */
 export function providerEffortLevel(
-  provider: Pick<UnifiedProvider, 'anthropicBaseUrl' | 'customEnv'>,
-): ModelEffort | undefined {
-  const configured = provider.customEnv?.CLAUDE_CODE_EFFORT_LEVEL?.trim();
-  if (configured && PROVIDER_EFFORT_LEVELS.has(configured)) {
-    return configured as ModelEffort;
-  }
-  return provider.anthropicBaseUrl && !isCodexGatewayProvider(provider)
-    ? THIRD_PARTY_RUNTIME_DEFAULTS.CLAUDE_CODE_EFFORT_LEVEL
-    : undefined;
+  provider: Pick<
+    UnifiedProvider,
+    'anthropicBaseUrl' | 'anthropicModel' | 'models'
+  >,
+): ModelEffort | null {
+  if (!provider.anthropicModel) return null;
+  return (
+    findProviderModel(provider, provider.anthropicModel)?.defaultEffort ?? null
+  );
 }
 
 /**
@@ -2990,7 +3228,7 @@ export function providerModels(
     : effectiveProviderModels(provider);
 }
 
-/** The entry for `model` in a connection's list, hidden ones included. */
+/** The entry for `model` (with or without `[1m]`) in a connection's list. */
 export function findProviderModel(
   provider: Pick<
     UnifiedProvider,
@@ -2998,7 +3236,7 @@ export function findProviderModel(
   >,
   model: string,
 ): ProviderModelEntry | null {
-  return providerModels(provider).find((entry) => entry.id === model) ?? null;
+  return findModelEntry(providerModels(provider), model) ?? null;
 }
 
 function claudeAuthKindOf(
@@ -3026,7 +3264,7 @@ export function resolveProviderById(providerId: string): {
   if (!provider) {
     logger.warn(
       { providerId },
-      'resolveProviderById: provider not found, falling back to the default or first enabled',
+      'resolveProviderById: provider not found, falling back to the global connection',
     );
     const fallback = selectGlobalProvider(state) || state.providers[0];
     if (!fallback) return { config: defaultsFromEnv(), customEnv: {} };
@@ -3287,27 +3525,48 @@ export function toPublicClaudeProviderConfig(
   };
 }
 
+/** Picks the connection host-side calls use; see setGlobalModelConfigResolver. */
+let globalModelConfigResolver: (() => string | null) | null = null;
+
 /**
- * The configuration the host's own, non-conversation Claude calls use: the
- * default while it can serve (the same test as getUsableDefaultProvider),
- * else the first enabled one.
+ * Tell the configuration which connection the host's own, non-conversation
+ * Claude calls (titles, recall, bug reports, a launch nothing else chose a
+ * connection for) run on, e.g. the system main HappyClaw's binding. Without
+ * one, or when it names a connection that is gone or has no credential, the
+ * first connection holding a credential is used.
  */
+export function setGlobalModelConfigResolver(
+  resolver: (() => string | null) | null,
+): void {
+  globalModelConfigResolver = resolver;
+}
+
 function selectGlobalProvider(
   state: StoredStateV5,
 ): UnifiedProvider | undefined {
+  let wanted: string | null = null;
+  try {
+    wanted = globalModelConfigResolver?.() ?? null;
+  } catch (err) {
+    logger.warn({ err }, 'Global model connection resolver failed');
+  }
+  const usable = state.providers.filter(providerHasCredentials);
   return (
-    state.providers.find(
-      (p) =>
-        p.enabled &&
-        p.id === state.defaultModelConfigId &&
-        providerHasCredentials(p),
-    ) ?? state.providers.find((p) => p.enabled)
+    usable.find((provider) => provider.id === wanted) ??
+    usable[0] ??
+    state.providers[0]
   );
 }
 
-class NoEnabledModelConfigError extends Error {
+/** The connection getClaudeProviderConfig() describes, if there is one. */
+export function getGlobalProvider(): UnifiedProvider | null {
+  const state = readStoredStateV4();
+  return (state && selectGlobalProvider(state)) ?? null;
+}
+
+class NoModelConnectionError extends Error {
   constructor() {
-    super('没有启用的模型配置，请先在模型配置页面打开一个模型');
+    super('还没有模型连接，请先在设置里添加模型');
   }
 }
 
@@ -3317,10 +3576,10 @@ export function getClaudeProviderConfig(): ClaudeProviderConfig {
     if (state) {
       const selected = selectGlobalProvider(state);
       if (selected) return providerToConfig(selected);
-      throw new NoEnabledModelConfigError();
+      throw new NoModelConnectionError();
     }
   } catch (err) {
-    if (err instanceof NoEnabledModelConfigError) throw err;
+    if (err instanceof NoModelConnectionError) throw err;
     // Ignore corrupted files and use the legacy environment fallback.
   }
   return defaultsFromEnv();
@@ -3352,6 +3611,20 @@ export function shellQuoteEnvLines(lines: string[]): string[] {
   });
 }
 
+/**
+ * The Claude environment of one launch on `config`. `config.anthropicModel`
+ * is the model this launch runs on (callers replace it with a conversation's
+ * or an Agent's pick); `config.models` and `config.roles` are the
+ * connection's.
+ *
+ * A third-party endpoint gets the model environment buildConnectionModelEnv
+ * derives (tiers, sub-agent model, `[1m]`, compact window) and nothing else
+ * implicitly. The official endpoint gets `[1m]` only for an entry that
+ * declares a window above 200K: there the suffix is the billed 1M opt-in,
+ * which a registry window must not turn on. The connection's env follows,
+ * minus empty values, reserved keys and the keys the models decide;
+ * CLAUDE_CODE_EFFORT_LEVEL is the effort logic's to add.
+ */
 export function buildClaudeEnvLines(
   config: ClaudeProviderConfig,
   profileCustomEnv?: Record<string, string>,
@@ -3390,57 +3663,47 @@ export function buildClaudeEnvLines(
         : `ANTHROPIC_AUTH_TOKEN=${sanitizeEnvValue(token)}`,
     );
   }
-  if (config.anthropicModel) {
-    lines.push(`ANTHROPIC_MODEL=${sanitizeEnvValue(config.anthropicModel)}`);
-  }
 
-  // Use explicit profileCustomEnv if provided (pool mode), otherwise active profile.
-  const customEnv = profileCustomEnv ?? getActiveProfileCustomEnv();
-
-  // Anthropic-compatible third-party endpoints need a predictable Claude Code
-  // runtime. Prefill the implementation-level environment from the model and
-  // [1m] suffix, while allowing provider-level advanced settings to replace
-  // any default explicitly.
-  if (config.anthropicBaseUrl) {
-    // A blank override means "use the default": an empty model mapping would
-    // send Claude Code back to first-party model IDs the gateway lacks.
-    const configuredValue = (key: string, fallback: string): string =>
-      Object.hasOwn(customEnv, key) && customEnv[key].trim()
-        ? sanitizeCustomEnvValue(key, customEnv[key])
-        : fallback;
-
-    // Every model tier follows the provider model by default. A pass-through
-    // relay leaves the model empty, so only explicit per-tier mappings apply.
-    // The Codex gateway keeps a Claude haiku id so it can tell Claude Code's
-    // background calls apart from agent turns.
+  const models = effectiveProviderModels({
+    anthropicModel: config.anthropicModel,
+    models: config.models,
+  });
+  if (isCodexGatewayEndpoint(config.anthropicBaseUrl)) {
+    // A ChatGPT subscription keeps no model list: every tier runs the turn's
+    // Codex model as named, except a Claude haiku id that lets the gateway
+    // tell Claude Code's background calls apart from agent turns.
     const model = sanitizeEnvValue(config.anthropicModel);
-    const codexGateway = isCodexGatewayEndpoint(config.anthropicBaseUrl);
-    for (const key of THIRD_PARTY_MODEL_ENV_KEYS) {
-      const value = configuredValue(
-        key,
-        codexGateway && key === 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-          ? CODEX_GATEWAY_HAIKU_MODEL
-          : model,
+    if (model) {
+      lines.push(
+        `ANTHROPIC_MODEL=${model}`,
+        `ANTHROPIC_DEFAULT_OPUS_MODEL=${model}`,
+        `ANTHROPIC_DEFAULT_SONNET_MODEL=${model}`,
+        `CLAUDE_CODE_SUBAGENT_MODEL=${model}`,
       );
-      if (value) lines.push(`${key}=${value}`);
     }
-
+    lines.push(`ANTHROPIC_DEFAULT_HAIKU_MODEL=${CODEX_GATEWAY_HAIKU_MODEL}`);
+  } else if (config.anthropicBaseUrl) {
+    const modelEnv = buildConnectionModelEnv({
+      model: config.anthropicModel,
+      models,
+      roles: config.roles,
+    });
+    for (const [key, value] of Object.entries(modelEnv)) {
+      lines.push(`${key}=${sanitizeEnvValue(value)}`);
+    }
+  } else if (config.anthropicModel) {
+    const declared = findModelEntry(models, config.anthropicModel);
     lines.push(
-      `CLAUDE_CODE_AUTO_COMPACT_WINDOW=${configuredValue(
-        'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-        isOneMillionContextModel(config.anthropicModel) ? '1000000' : '200000',
+      `ANTHROPIC_MODEL=${sanitizeEnvValue(
+        launchModelName(config.anthropicModel, declared?.contextWindow),
       )}`,
     );
-    for (const [key, value] of Object.entries(THIRD_PARTY_RUNTIME_DEFAULTS)) {
-      lines.push(`${key}=${configuredValue(key, value)}`);
-    }
   }
 
+  // The selected connection's env when given, else the global connection's.
+  const customEnv = profileCustomEnv ?? getActiveProfileCustomEnv();
   for (const [key, value] of Object.entries(customEnv)) {
-    if (RESERVED_CLAUDE_ENV_KEYS.has(key) || isDangerousEnvKey(key)) continue;
-    if (config.anthropicBaseUrl && THIRD_PARTY_CONFIGURABLE_ENV_KEYS.has(key)) {
-      continue;
-    }
+    if (!value.trim() || isSkippedConnectionEnvKey(key)) continue;
     lines.push(`${key}=${sanitizeCustomEnvValue(key, value)}`);
   }
 
@@ -3454,9 +3717,7 @@ export function getActiveProfileCustomEnv(): Record<string, string> {
   const selected = selectGlobalProvider(state);
   if (!selected) return {};
 
-  return sanitizeCustomEnvMap(selected.customEnv || {}, {
-    skipReservedClaudeKeys: true,
-  });
+  return sanitizeCustomEnvMap(selected.customEnv || {}, CONNECTION_ENV_WRITE);
 }
 
 export function appendClaudeConfigAudit(
@@ -3686,6 +3947,13 @@ export function mergeClaudeEnvConfig(
       ? null
       : (override.claudeOAuthCredentials ?? global.claudeOAuthCredentials),
     anthropicModel: override.anthropicModel || global.anthropicModel,
+    // The connection's models and roles describe its own endpoint only.
+    ...(!override.anthropicBaseUrl && global.models
+      ? { models: global.models }
+      : {}),
+    ...(!override.anthropicBaseUrl && global.roles
+      ? { roles: global.roles }
+      : {}),
     updatedAt: global.updatedAt,
   };
 

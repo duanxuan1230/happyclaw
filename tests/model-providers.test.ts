@@ -27,7 +27,6 @@ import {
   splitOneMillionSuffix,
   withOneMillionSuffix,
 } from '../shared/model-providers.js';
-import { isOneMillionContextModel } from '../src/runtime-config.js';
 
 describe('model ids', () => {
   test('the [1m] suffix splits and joins like the runtime reads it', () => {
@@ -38,11 +37,6 @@ describe('model ids', () => {
     expect(withOneMillionSuffix('glm-5.3[1m]', false)).toBe('glm-5.3');
     expect(withOneMillionSuffix('glm-5.3', true)).toBe('glm-5.3[1m]');
     expect(withOneMillionSuffix('', true)).toBe('');
-    for (const id of ['glm-5.3[1m]', 'glm-5.3']) {
-      expect(isOneMillionContextModel(id)).toBe(
-        splitOneMillionSuffix(id).oneMillion,
-      );
-    }
   });
 
   test('ids that would break an env file are refused', () => {
@@ -530,8 +524,12 @@ describe('connection model env', () => {
   test('a pass-through connection only gets the roles it names', () => {
     expect(buildConnectionModelEnv({ model: '', models })).toEqual({});
     expect(
-      buildConnectionModelEnv({ model: '', models, smallFastFallback: 'h' }),
-    ).toEqual({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'h' });
+      buildConnectionModelEnv({
+        model: '',
+        models,
+        roles: { smallFast: 'small' },
+      }),
+    ).toEqual({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' });
   });
 
   test('a choice saved with [1m] keeps its 1M window', () => {

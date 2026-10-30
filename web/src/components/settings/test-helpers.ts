@@ -1,18 +1,16 @@
 import { act } from 'react';
 
-import type { ProviderWithHealth } from './types';
+import type { UnifiedProviderPublic } from './types';
 
 /** Shared fixtures and DOM helpers for the model-connection tests. */
 
 export function makeProvider(
-  overrides: Partial<ProviderWithHealth> = {},
-): ProviderWithHealth {
+  overrides: Partial<UnifiedProviderPublic> = {},
+): UnifiedProviderPublic {
   return {
     id: 'p1',
     name: '连接 p1',
     type: 'third_party',
-    enabled: true,
-    weight: 1,
     anthropicBaseUrl: 'https://relay.example.test',
     anthropicModel: 'relay-model',
     anthropicAuthMode: 'bearer',
@@ -31,10 +29,10 @@ export function makeProvider(
     codexOAuthCredentialsPlanType: null,
     customEnv: {},
     models: [{ id: 'relay-model' }],
+    roles: {},
     presetId: null,
     lastTest: null,
     updatedAt: '2026-10-01T00:00:00.000Z',
-    health: null,
     ...overrides,
   };
 }

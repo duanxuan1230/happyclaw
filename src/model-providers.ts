@@ -342,11 +342,6 @@ export interface ConnectionModelEnvInput {
   model: string;
   models: readonly ProviderModelEntry[];
   roles?: ConnectionModelRoles | null;
-  /**
-   * The haiku-tier name to keep when no small/fast role is set, e.g. the
-   * ChatGPT gateway's marker for Claude Code's background calls.
-   */
-  smallFastFallback?: string;
 }
 
 /**
@@ -367,7 +362,7 @@ export function buildConnectionModelEnv(
   if (current) env.ANTHROPIC_MODEL = current;
   const opus = named(roles.opus) ?? current;
   const sonnet = named(roles.sonnet) ?? current;
-  const haiku = named(roles.smallFast) ?? input.smallFastFallback ?? current;
+  const haiku = named(roles.smallFast) ?? current;
   const subagent = named(roles.subagent) ?? current;
   if (opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
   if (sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
@@ -1930,8 +1925,19 @@ export function modelCapabilities(id: string): ModelCapabilities | null {
  * older generation (`gpt-6.1-terra` → `gpt-5.6-terra`). Only GPT and Claude
  * names, whose families share their efforts, are inferred.
  */
+const familyCache = new Map<string, ModelCapabilities | null>();
+
 function inferredFamilyCapabilities(id: string): ModelCapabilities | null {
   const { model } = splitOneMillionSuffix(id);
+  if (!familyCache.has(model)) {
+    // Bounded: a picker lists at most a few hundred distinct ids.
+    if (familyCache.size > 2000) familyCache.clear();
+    familyCache.set(model, computeFamilyCapabilities(model));
+  }
+  return familyCache.get(model) ?? null;
+}
+
+function computeFamilyCapabilities(model: string): ModelCapabilities | null {
   const key = model.toLowerCase();
   const bare = key.includes('/') ? key.slice(key.lastIndexOf('/') + 1) : key;
   const gpt = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/.exec(bare);
