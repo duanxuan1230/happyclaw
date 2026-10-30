@@ -3496,7 +3496,9 @@ export function findForwardBundleCommentTail(
              AND json_extract(channel_context, '$.message.contentLink.bundleId') = ?
              AND json_extract(channel_context, '$.message.contentLink.role') = 'forwarder_comment'
            ) OR (
-             json_extract(channel_context, '$.message.rootId') = ?
+             -- Main-chat quote replies carry only parentId.
+             IFNULL(json_extract(channel_context, '$.message.rootId'),
+                    json_extract(channel_context, '$.message.parentId')) = ?
              AND json_extract(channel_context, '$.message.parentId') = ?
              AND json_extract(channel_context, '$.message.type') IN ('text', 'post')
            )
