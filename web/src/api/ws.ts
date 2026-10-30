@@ -4,15 +4,6 @@ type WsHandler = (data: any) => void;
 
 /** A handshake still pending after this long is abandoned and retried. */
 export const WS_HANDSHAKE_TIMEOUT_MS = 15_000;
-/**
- * Back from at least this long in the background, an open socket that has
- * also received nothing for this long is presumed dead. Mobile browsers freeze
- * background pages and often never deliver the close of a socket the server
- * or network dropped, and the server's heartbeat pings are invisible to page
- * JS, so silence is the only signal. Replacing a healthy socket costs one
- * reconnect sync, so a quick tab switch never does.
- */
-export const WS_FOREGROUND_STALE_MS = 30_000;
 
 class WsManager {
   private ws: WebSocket | null = null;
@@ -26,10 +17,6 @@ class WsManager {
   private failedBeforeOpen = false;
   /** connect() was called and disconnect() has not been since. */
   private wanted = false;
-  /** Last open or received message on the current socket. */
-  private lastActivityAt = 0;
-  /** When the page was last hidden; null while visible. */
-  private hiddenAt: number | null = null;
 
   connect() {
     this.wanted = true;
@@ -58,7 +45,6 @@ class WsManager {
       if (this.ws !== ws) return;
       this.clearHandshakeTimer();
       this.reconnectDelay = 1000;
-      this.lastActivityAt = Date.now();
       // Listeners reconcile state missed while the socket was down; the
       // page's first open follows the initial HTTP loads, so it says so.
       // A failed attempt before the first open (e.g. the server was
@@ -70,7 +56,6 @@ class WsManager {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
-      this.lastActivityAt = Date.now();
       let data: any;
       try {
         data = JSON.parse(event.data);
@@ -104,7 +89,11 @@ class WsManager {
   disconnect() {
     this.wanted = false;
     this.clearReconnectTimer();
-    this.dropSocket();
+    this.clearHandshakeTimer();
+    const ws = this.ws;
+    // Detach first so its close is not taken for an outage to recover from.
+    this.ws = null;
+    ws?.close();
   }
 
   isConnected() {
@@ -146,14 +135,6 @@ class WsManager {
     this.handshakeTimer = null;
   }
 
-  /** Forget the current socket without treating its close as a disconnect. */
-  private dropSocket() {
-    this.clearHandshakeTimer();
-    const ws = this.ws;
-    this.ws = null;
-    ws?.close();
-  }
-
   private scheduleReconnect() {
     if (this.reconnectTimer) return;
     // ±30% jitter so tabs dropped together (e.g. a server restart) don't
@@ -173,49 +154,36 @@ class WsManager {
   }
 
   /**
-   * Reconnect now unless the socket is open and either recently heard from
-   * or only briefly away (`awayMs`). A replaced socket's close is ignored;
-   * the new socket's open reports `reconnect: true`, which runs the usual
-   * missed-state sync.
+   * Reconnect now unless the socket is open or its handshake is pending
+   * (resume often fires pageshow, online and visibilitychange together; the
+   * handshake deadline covers one that hangs). An open socket is trusted:
+   * the server's heartbeat pings are invisible to page JS and there is no
+   * app-level probe, so silence on an idle conversation proves nothing, and
+   * the server terminates a dead peer, which ends in a close here. A
+   * replaced socket's close is ignored; the new socket's open reports
+   * `reconnect: true`, which runs the usual missed-state sync.
    */
-  private ensureLive(awayMs = Infinity) {
+  private ensureLive() {
     if (!this.wanted) return;
-    // A pending handshake is already a fresh attempt (resume often fires
-    // pageshow, online and visibilitychange together); its deadline covers
-    // one that hangs.
-    if (this.ws?.readyState === WebSocket.CONNECTING) return;
-    if (
-      this.ws?.readyState === WebSocket.OPEN &&
-      (awayMs < WS_FOREGROUND_STALE_MS ||
-        Date.now() - this.lastActivityAt < WS_FOREGROUND_STALE_MS)
-    ) {
-      return;
-    }
+    const state = this.ws?.readyState;
+    if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
     if (this.ws && !this.openedBefore) this.failedBeforeOpen = true;
     this.clearReconnectTimer();
     this.reconnectDelay = 1000;
-    this.dropSocket();
     this.connect();
   }
 
   /** Watch page lifecycle and network changes to recover a lost connection. */
   setupNetworkListeners() {
-    // Network restored or page back in front: the socket may have died
-    // unnoticed, and any pending backoff is no longer worth waiting out.
-    // A network change and a back/forward cache restore are away for an
-    // unknown time, so silence alone decides. Going offline leaves the
-    // backoff running; nothing ever cancels it.
+    // Network restored or page back in front: a socket that closed while the
+    // page was frozen or offline need not wait out its backoff. Going
+    // offline leaves the backoff running; nothing ever cancels it.
     window.addEventListener('online', () => this.ensureLive());
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState !== 'visible') {
-        this.hiddenAt = Date.now();
-        return;
-      }
-      const awayMs = this.hiddenAt === null ? 0 : Date.now() - this.hiddenAt;
-      this.hiddenAt = null;
-      this.ensureLive(awayMs);
+      if (document.visibilityState === 'visible') this.ensureLive();
     });
-    // A page kept in the back/forward cache was frozen with its socket.
+    // A page restored from the back/forward cache resumes with whatever
+    // became of its socket while frozen.
     window.addEventListener('pageshow', (event) => {
       if (event.persisted) this.ensureLive();
     });
