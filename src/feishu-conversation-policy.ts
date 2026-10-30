@@ -32,7 +32,7 @@ export interface FeishuConversationPlan {
   independentContext: boolean;
   /** Canonical, durable context identity used by im_context_bindings. */
   contextId?: string;
-  /** Feishu message used as the reply_in_thread anchor. */
+  /** Topic root used as the reply_in_thread anchor of an independent context. */
   rootMessageId?: string;
   reason:
     | 'disabled'
@@ -145,14 +145,14 @@ export function resolveFeishuConversationPlan(
     };
   }
 
-  // Ordinary group threads are reply locations within the bound session.
+  // Ordinary group threads are reply locations within the bound session, and
+  // their anchor comes from the message itself, not from this plan.
   // Neither mentions nor historical topic bindings may allocate a new session
   // or bypass the current mention gate.
   return {
     disabled: false,
     allowWithoutMention: !mentionRequired,
     independentContext: false,
-    ...(input.rootId ? { rootMessageId: input.rootId } : {}),
     reason:
       mentionRequired && !input.mentionedBot
         ? 'mention_required'
