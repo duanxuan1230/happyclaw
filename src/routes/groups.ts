@@ -45,6 +45,11 @@ import {
 } from '../session-worktree.js';
 import { listSessionWorktreesByFolder } from '../session-worktree-store.js';
 import {
+  canViewGroup,
+  canViewHostGroup,
+  withoutUsageForGuest,
+} from '../guest-access.js';
+import {
   clearSessionChannelOwner,
   getRegisteredGroup,
   setRegisteredGroup,
@@ -92,6 +97,7 @@ import {
   getUserById,
   getSessionModelSelectionDetail,
   setSessionModelSelection,
+  listActiveGuestGrantJids,
   type SessionModelSelectionDetail,
 } from '../db.js';
 import { releaseOwner, persistGroupUpdate } from '../group-owner.js';
@@ -426,6 +432,8 @@ interface GroupPayloadItem {
   is_home?: boolean;
   is_my_home?: boolean;
   can_modify?: boolean;
+  /** Set for read-only guest views of a granted workspace. */
+  read_only?: boolean;
   pinned_at?: string;
   activation_mode?:
     | 'auto'
@@ -454,10 +462,21 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
   );
 
   const result: Record<string, GroupPayloadItem> = {};
+  const isGuest = user.role === 'guest';
+  const guestGrants = isGuest
+    ? new Set(listActiveGuestGrantJids(user.id))
+    : null;
 
   // 先过滤出要显示的群组 jid
   const visibleEntries: Array<[string, (typeof groups)[string]]> = [];
   for (const [jid, group] of Object.entries(groups)) {
+    if (guestGrants) {
+      // Guests see exactly the owner's workspaces they were granted
+      // (including a host-mode Home). IM rows are merged into their
+      // workspace's message view, so they are not listed separately.
+      if (guestGrants.has(jid)) visibleEntries.push([jid, group]);
+      continue;
+    }
     const isHome = !!group.is_home;
     const isWeb = jid.startsWith('web:');
     const isHost = isHostExecutionGroup(group);
@@ -505,8 +524,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       folder: group.folder,
       added_at: group.added_at,
       kind: isHome ? 'home' : isWeb ? 'web' : 'feishu',
-      editable: isWeb,
-      deletable: isWeb && !isHome,
+      editable: isWeb && !isGuest,
+      deletable: isWeb && !isHome && !isGuest,
       lastMessage: latest?.content,
       lastMessageTime:
         latest?.timestamp ||
@@ -523,6 +542,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       is_home: isHome || undefined,
       is_my_home: (isHome && group.created_by === user.id) || undefined,
       can_modify: canModifyGroup(user, { ...group, jid }),
+      read_only: isGuest || undefined,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
       conversation_source: group.conversation_source ?? 'manual',
@@ -2994,9 +3014,20 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   }
 });
 
-/** Thumbnails, and automation inputs without their hidden run context. */
-function presentWebMessages<T extends NewMessage>(rows: T[]): Promise<T[]> {
-  return presentMessagesForWeb(rows.map(presentAutomationMessage));
+/**
+ * Thumbnails, and automation inputs without their hidden run context; for a
+ * guest also without token usage and cost.
+ */
+async function presentWebMessages<T extends NewMessage>(
+  rows: T[],
+  viewer: AuthUser,
+): Promise<T[]> {
+  const presented = await presentMessagesForWeb(
+    rows.map(presentAutomationMessage),
+  );
+  return viewer.role === 'guest'
+    ? presented.map(withoutUsageForGuest)
+    : presented;
 }
 
 // GET /api/groups/:jid/messages - 获取消息历史
@@ -3013,10 +3044,11 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   }
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  // Read path: owners, plus guests holding an active grant (src/guest-access.ts).
+  if (!canViewGroup({ id: authUser.id, role: authUser.role }, group)) {
     return c.json({ error: 'Group not found' }, 404);
   }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+  if (isHostExecutionGroup(group) && !canViewHostGroup(authUser, group)) {
     return c.json(
       { error: 'Insufficient permissions for host execution mode' },
       403,
@@ -3059,6 +3091,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
           ),
           agentExposure,
         ),
+        authUser,
       );
       return c.json({ messages });
     }
@@ -3072,6 +3105,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         }),
         agentExposure,
       ),
+      authUser,
     );
     return c.json({ messages, hasMore });
   }
@@ -3095,6 +3129,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
           ),
           exposure,
         ),
+        authUser,
       );
       return c.json({ messages });
     }
@@ -3108,6 +3143,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         }),
         exposure,
       ),
+      authUser,
     );
     return c.json({ messages, hasMore });
   }
@@ -3122,6 +3158,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         ),
         exposure,
       ),
+      authUser,
     );
     return c.json({ messages });
   }
@@ -3140,6 +3177,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
       }),
       exposure,
     ),
+    authUser,
   );
   return c.json({ messages, hasMore });
 });
@@ -3252,17 +3290,14 @@ groupRoutes.get(
 
     const authUser = c.get('user') as AuthUser;
     if (
-      !canAccessGroup(
-        { id: authUser.id, role: authUser.role },
-        physicalGroup,
-      ) ||
-      !canAccessGroup({ id: authUser.id, role: authUser.role }, executionGroup)
+      !canViewGroup({ id: authUser.id, role: authUser.role }, physicalGroup) ||
+      !canViewGroup({ id: authUser.id, role: authUser.role }, executionGroup)
     ) {
       return c.json({ error: 'Group not found' }, 404);
     }
     if (
       isHostExecutionGroup(executionGroup) &&
-      !hasHostExecutionPermission(authUser)
+      !canViewHostGroup(authUser, executionGroup)
     ) {
       return c.json(
         { error: 'Insufficient permissions for host execution mode' },

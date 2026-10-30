@@ -53,7 +53,12 @@ import {
 import { SlashCommandDecoration } from './cindy/SlashCommandDecoration';
 import { WindowsSelectionReplacement } from './cindy/WindowsSelectionReplacement';
 import { MAX_MESSAGE_CHARS } from '../composer-helpers';
-import { insertPlainText, readComposerTrigger } from './composerDocument';
+import { useShellStore } from '../../../stores/shell';
+import {
+  findFilledBlocks,
+  insertPlainText,
+  readComposerTrigger,
+} from './composerDocument';
 
 interface ComposerEditorHandlers {
   /** Keys the composer acts on; return true to consume the event. */
@@ -260,6 +265,7 @@ export function useComposerEditor({
           }
         });
       }
+      forgetEditedFills(current.state.doc);
       handlersRef.current.onDocChange(current);
     },
   }));
@@ -340,6 +346,16 @@ export function useComposerEditor({
     setPopupAria,
     snapshot: snapshot ?? snapshotOf(editor.state),
   };
+}
+
+/** Fills the composer no longer holds as filled stop being replaceable. */
+function forgetEditedFills(doc: PMNode): void {
+  const { composerFills, forgetComposerFills } = useShellStore.getState();
+  forgetComposerFills(
+    Object.keys(composerFills).filter(
+      (source) => !findFilledBlocks(doc, composerFills[source]),
+    ),
+  );
 }
 
 /**

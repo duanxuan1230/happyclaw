@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, apiFetch } from '../api/client';
+import { useIsGuest } from '../stores/auth';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { cn } from '@/lib/utils';
 import { randomUuid } from '@/utils/random-uuid';
@@ -332,7 +333,9 @@ export function MemoryPage() {
       workspaces.find((workspace) => workspace.jid === selectedWorkspaceJid),
     [selectedWorkspaceJid, workspaces],
   );
-  const canModify = selectedWorkspace?.can_modify === true;
+  // Read-only guests view memory but never create, edit or forget it.
+  const isGuest = useIsGuest();
+  const canModify = !isGuest && selectedWorkspace?.can_modify === true;
   const proposedView = statusView === 'proposed';
   // The proposals view holds the list the counter would count.
   const proposals = proposedView
@@ -1333,12 +1336,14 @@ export function MemoryPage() {
     <PhonePageHeader
       title="记忆"
       action={
-        <PhoneBarButton
-          label="新建记忆"
-          icon={<Plus className="size-5" />}
-          onClick={openCreate}
-          disabled={!selectedWorkspaceJid || !canModify}
-        />
+        !isGuest && (
+          <PhoneBarButton
+            label="新建记忆"
+            icon={<Plus className="size-5" />}
+            onClick={openCreate}
+            disabled={!selectedWorkspaceJid || !canModify}
+          />
+        )
       }
       menu={{
         title: '记忆',
@@ -1391,13 +1396,15 @@ export function MemoryPage() {
                   工作区
                 </Label>
                 {workspaceSelect('w-48 sm:w-56')}
-                <Button
-                  onClick={openCreate}
-                  disabled={!selectedWorkspaceJid || !canModify}
-                >
-                  <Plus />
-                  新建记忆
-                </Button>
+                {!isGuest && (
+                  <Button
+                    onClick={openCreate}
+                    disabled={!selectedWorkspaceJid || !canModify}
+                  >
+                    <Plus />
+                    新建记忆
+                  </Button>
+                )}
               </>
             }
           />

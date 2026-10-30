@@ -1146,23 +1146,24 @@ function planFeishuRoute(
   target: FeishuRouteTarget;
 } {
   const { threadId, rootId, messageId } = meta;
+  // A quote-reply in an ordinary group or a private chat has root_id = parent_id
+  // but no thread_id. It is answered in the main chat (a thread under the quoted
+  // message hides the answer); the quote still reaches the agent via parentId.
+  // Only a real thread or topic context keeps a root, in the routed meta as
+  // well as the delivery target.
+  const inThread = !!plan?.independentContext || !!threadId;
   const routedMeta: FeishuMessageMeta = {
     ...meta,
     nativeContextType:
       plan?.independentContext || (!plan && !!threadId) ? 'thread' : undefined,
     contextId: plan?.contextId || threadId,
-    rootId: plan?.rootMessageId || rootId,
+    rootId: inThread ? plan?.rootMessageId || rootId : undefined,
   };
   const deliveryRootMessageId = plan?.independentContext
     ? plan.rootMessageId
     : threadId
-      ? plan?.rootMessageId || rootId || messageId
-      : rootId;
-  // A quote-reply in an ordinary (non-topic) group or a private chat has
-  // root_id = parent_id but no thread_id. It still yields a root target,
-  // so the answer is posted with reply_in_thread under the quoted message
-  // (Feishu falls back to a plain reply where threads are unsupported).
-  // This is the current product behaviour, kept deliberately.
+      ? routedMeta.rootId || messageId
+      : undefined;
   return {
     routedMeta,
     deliveryRootMessageId,

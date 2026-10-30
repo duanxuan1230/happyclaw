@@ -23,6 +23,7 @@ import {
 } from '../session-worktree-store.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { canAccessGroup, canModifyGroup } from '../group-acl.js';
+import { canViewGroup } from '../guest-access.js';
 import {
   getRegisteredGroup,
   getAllRegisteredGroups,
@@ -184,6 +185,16 @@ function unbindError(result: { reason: string }): string {
     : 'IM group no longer exists';
 }
 
+/** Guests get 404 so an ungranted workspace's existence is not revealed. */
+function guestAwareForbidden(
+  c: Context<{ Variables: Variables }>,
+  user: Pick<AuthUser, 'role'>,
+) {
+  return user.role === 'guest'
+    ? c.json({ error: 'Group not found' }, 404)
+    : c.json({ error: 'Forbidden' }, 403);
+}
+
 // GET /api/groups/:jid/agents — list all agents for a group
 /**
  * Names of the user's automations in a workspace, for labelling their run
@@ -234,8 +245,8 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
     return c.json({ error: 'Group not found' }, 404);
   }
 
-  if (!canAccessGroup(user, { ...group, jid })) {
-    return c.json({ error: 'Forbidden' }, 403);
+  if (!canViewGroup(user, { ...group, jid })) {
+    return guestAwareForbidden(c, user);
   }
 
   const agents = listAgentsByJid(jid);
@@ -247,7 +258,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   const linkedByAgent = getGroupsByTargetAgents(
     agents.filter((a) => a.kind === 'conversation').map((a) => a.id),
   );
-  const worktrees = worktreesBySession(group.folder);
+  const worktrees = worktreesBySession(group.folder, user);
   return c.json({
     agents: agents.map((a) => {
       const base = {
@@ -298,8 +309,8 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
   if (!group) {
     return c.json({ error: 'Group not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
-    return c.json({ error: 'Forbidden' }, 403);
+  if (!canViewGroup(user, { ...group, jid })) {
+    return guestAwareForbidden(c, user);
   }
 
   const agents = listAgentsByJid(jid).filter((a) => a.kind === 'conversation');
@@ -312,7 +323,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
       [...mountsBySession.values()].flat().map((mount) => mount.channel_jid),
     ),
   ]);
-  const worktrees = worktreesBySession(group.folder);
+  const worktrees = worktreesBySession(group.folder, user);
 
   return c.json({
     sessions: [
@@ -440,7 +451,12 @@ async function createRequestedWorktree(
 
 /** The workspace's worktrees, rechecked on disk so the list shows broken and
  * recovered checkouts as they are now. */
-function worktreesBySession(folder: string): Map<string, SessionWorktree> {
+/** Each session's worktree; none for guests, who get no repository details. */
+function worktreesBySession(
+  folder: string,
+  user: { role: string },
+): Map<string, SessionWorktree> {
+  if (user.role === 'guest') return new Map();
   return new Map(
     listSessionWorktreesByFolder(folder).map((record) => [
       record.agent_id,

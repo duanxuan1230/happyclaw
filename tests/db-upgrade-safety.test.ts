@@ -215,6 +215,8 @@ describe('schema version head', () => {
     // v85: scheduled tasks become automations (automations, automation_runs,
     // automation_failure_streaks); scheduled_tasks, task_runs, task_run_logs
     // and task_failure_notices are dropped (automation-migration.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(85);
+    // v86: users.guest_owner_id and guest_workspace_grants, read-only guest
+    // accounts (schema-v86-guest-accounts.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(86);
   });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ChevronsUpDown, Menu, Search, SquarePen } from 'lucide-react';
-import { useAuthStore } from '../../stores/auth';
+import { useAuthStore, useIsGuest } from '../../stores/auth';
 import { useBillingStore } from '../../stores/billing';
 import { useShellStore } from '../../stores/shell';
 import { useNewConversation } from '../../hooks/useNewConversation';
@@ -20,7 +20,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { AccountMenuItems } from './AccountMenu';
+import { AccountMenuItems, GuestBadge } from './AccountMenu';
 import { filterNavItems } from './nav-items';
 
 const BugReportDialog = lazyBugReportDialog.Component;
@@ -118,14 +118,15 @@ export function NavDrawer() {
   const setOpen = useShellStore((s) => s.setNavDrawerOpen);
   const location = useLocation();
   const user = useAuthStore((s) => s.user);
+  const isGuest = useIsGuest();
   const billingEnabled = useBillingStore((s) => s.billingEnabled);
   const setPaletteOpen = useShellStore((s) => s.setPaletteOpen);
   const { startNewConversation, creatingSession } = useNewConversation();
   const [showBugReport, setShowBugReport] = useState(false);
   const bugReportMounted = useOpenedOnce(showBugReport);
   const navItems = useMemo(
-    () => filterNavItems(billingEnabled),
-    [billingEnabled],
+    () => filterNavItems(billingEnabled, isGuest),
+    [billingEnabled, isGuest],
   );
   const userInitial = (user?.display_name ||
     user?.username ||
@@ -177,6 +178,7 @@ export function NavDrawer() {
                   <span className="block truncate text-label text-muted-foreground">
                     @{user?.username}
                   </span>
+                  <GuestBadge className="mt-1" />
                 </span>
                 <ChevronsUpDown className="size-4 shrink-0 text-faint-foreground" />
               </button>
@@ -206,18 +208,20 @@ export function NavDrawer() {
               <Search />
               搜索
             </button>
-            <button
-              type="button"
-              className={drawerRowClass}
-              disabled={creatingSession}
-              onClick={() => {
-                setOpen(false);
-                void startNewConversation({ inHome: true });
-              }}
-            >
-              <SquarePen />
-              新对话
-            </button>
+            {!isGuest && (
+              <button
+                type="button"
+                className={drawerRowClass}
+                disabled={creatingSession}
+                onClick={() => {
+                  setOpen(false);
+                  void startNewConversation({ inHome: true });
+                }}
+              >
+                <SquarePen />
+                新对话
+              </button>
+            )}
             <div className="mx-3 my-1.5 h-px bg-surface-border" />
             {navItems.map(({ path, icon: Icon, label }) => {
               const active = location.pathname.startsWith(path);

@@ -341,6 +341,30 @@ describe('automations page', () => {
     expect(router.state.location.search).toBe('?agent=s1');
   });
 
+  test('a read-only guest sees the detail without any action', async () => {
+    useAuthStore.setState({
+      user: { id: 'g1', username: 'guest', role: 'guest' },
+    } as never);
+    list = [automation({ unreadRuns: 1, lastRunStatus: 'success' })];
+    runsById = { a1: [run({ status: 'running', finishedAt: null })] };
+    await render('/automations/a1');
+
+    expect(text()).toContain('最近运行 · 1');
+    for (const name of [
+      '新建',
+      '立即运行',
+      '编辑',
+      '更多操作',
+      '暂停自动化',
+      /终止/,
+    ]) {
+      expect([String(name), button(name)]).toEqual([String(name), undefined]);
+    }
+    expect(container.querySelector('[role="switch"]')).toBeNull();
+    // Opening the detail does not try to mark runs read.
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
   test('WS run updates and changes refresh the list live', async () => {
     list = [automation()];
     await render('/automations/a1');

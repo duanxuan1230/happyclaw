@@ -15,6 +15,7 @@ import {
   User,
   UserCog,
   UserPlus,
+  Users,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -30,6 +31,7 @@ import { SearchInput } from '@/components/common/SearchInput';
 import { sidebarRowClass } from '@/components/layout/sidebar/SidebarItem';
 import { cn } from '@/lib/utils';
 import type { SettingsTab } from './types';
+import { isGuestSettingsTab } from '../../lib/guest';
 
 export interface SettingsNavItem {
   key: SettingsTab;
@@ -96,6 +98,12 @@ const accountItems: NavItem[] = [
     label: '安全与设备',
     icon: Shield,
     keywords: ['密码', '登录设备', '会话', '退出登录'],
+  },
+  {
+    key: 'guests',
+    label: '访客',
+    icon: Users,
+    keywords: ['访客', '只读', '分享', '授权', 'Guest'],
   },
 ];
 
@@ -188,6 +196,8 @@ export interface SettingsPermissions {
   canManageBilling: boolean;
   canManageUsers: boolean;
   isAdmin: boolean;
+  /** Read-only guests only see their own account sections. */
+  isGuest?: boolean;
 }
 
 /** Settings sections visible to the current user (also used by ⌘K). */
@@ -196,7 +206,16 @@ export function getSettingsSections({
   canManageBilling,
   canManageUsers,
   isAdmin,
+  isGuest = false,
 }: SettingsPermissions): { label: string; items: NavItem[] }[] {
+  if (isGuest) {
+    return [
+      {
+        label: '账户设置',
+        items: accountItems.filter((item) => isGuestSettingsTab(item.key)),
+      },
+    ];
+  }
   const system = systemItems.filter((item) => {
     if (item.key === 'billing') return canManageBilling;
     if (item.key === 'main-agent' || item.key === 'host-integration') {
@@ -222,6 +241,7 @@ interface SettingsNavProps {
   canManageBilling: boolean;
   canManageUsers: boolean;
   isAdmin: boolean;
+  isGuest?: boolean;
   mustChangePassword: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -241,6 +261,7 @@ export function SettingsNav({
   canManageBilling,
   canManageUsers,
   isAdmin,
+  isGuest = false,
   mustChangePassword,
   open,
   onOpenChange,
@@ -252,6 +273,7 @@ export function SettingsNav({
     canManageBilling,
     canManageUsers,
     isAdmin,
+    isGuest,
   });
 
   const keyword = query.trim().toLowerCase();

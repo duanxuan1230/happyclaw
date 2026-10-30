@@ -379,6 +379,8 @@ preset 的身份和默认风格，只低于平台的安全、权限、工具和�
 - 整个群共享已绑定的那一个 Session（可以是 Main Session）。
 - `always` 与 `when_mentioned` 只决定消息是否需要 @ 才激活；提及或激活策略
   不会为普通群新建话题 Session，也不会把它变成工作区绑定。
+- 引用回复（带 root_id 但没有 thread_id，私聊同样）在主聊天作答，不在被引用消息下
+  开话题；被引用内容作为引用上下文交给 Agent。普通群里真实话题内的消息仍回到该话题。
 
 飞书话题群：
 
@@ -514,7 +516,8 @@ data/
 
 核心表族：
 
-- 用户与认证：`users`、`user_sessions`、`invite_codes`、`auth_audit_log`
+- 用户与认证：`users`、`user_sessions`、`invite_codes`、`auth_audit_log`、
+  `guest_workspace_grants`
 - 工作区与会话：`registered_groups`、`sessions`、`workspaces`、
   `workspace_runtime_sessions`、`session_model_selections`、`session_worktrees`、
   `session_history_reinjections`
@@ -544,6 +547,17 @@ Channel Reliability 的 Inbox/Turn/Outbox/Card 表由
 - 系统配置、用户、邀请、审计和计费使用独立 Permission Middleware。
 - 敏感写操作必须先停止或暂停相关 Runner，并在提交失败时恢复队列。
 - API 返回资源不存在时通常使用 404 隐藏其他用户资源是否存在。
+- 只读访客（`role=guest`）由 admin 通过 `/api/guests` 创建并授权查看自己的部分
+  工作区；member 只有在系统设置 `allowMemberGuests` 开启时可以（默认关闭，关闭时
+  member 的访客一并失效），每个 owner 最多 20 个。不要放宽 `canAccessGroup`：读取
+  路径单独使用 `canViewGroup`，全局 Guard（`src/middleware/guest-guard.ts`）按显式
+  白名单放行访客的 GET，新路由默认拒绝；访客 WebSocket 只接收（`ping` 除外）。
+  文件路由对访客隐藏所有点开头的条目、常见密钥文件和 `logs`/`conversations`，按
+  会话的文件根和真实路径判断。访客看到的思考和工具调用与 owner 相同，但看不到
+  git diff 与 worktree、模型选择、上下文用量、token 用量与费用和自动化的前置检查，
+  REST 与 WebSocket 一致（广播用 `getGroupAudience` 区分 owner 与访客）。Host
+  工作区的授权只在 owner 仍是 admin 时生效。访客没有 Home、Agent、记忆写入、钱包或
+  订阅。
 
 完整边界见 `docs/ACL-MATRIX.md`。
 

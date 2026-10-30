@@ -37,6 +37,7 @@
 | `/api/usage`                       | `src/routes/usage.ts`            | Token 用量                    |
 | `/api/billing`                     | `src/routes/billing.ts`          | 订阅、余额和计费管理          |
 | `/api/admin`                       | `src/routes/admin.ts`            | 用户、邀请和审计              |
+| `/api/guests`                      | `src/routes/guests.ts`           | 只读访客账号与工作区授权      |
 | `/api/bug-report`                  | `src/routes/bug-report.ts`       | 脱敏问题报告                  |
 | `/api/browse`                      | `src/routes/browse.ts`           | Host 目录选择                 |
 | `/api`                             | `src/routes/monitor.ts`          | 健康、状态和 Docker 构建      |
@@ -78,6 +79,34 @@ Public：
 `happyclaw_session`；每次下发会话都会同时让另一个名称过期。`POST /api/auth/logout`
 让两个名称都过期，并删除该请求在两个名称下携带、且属于同一用户的全部会话；
 其他设备的会话不受影响。
+
+## 访客账号
+
+active 的 admin 可以为自己创建只读访客（`role=guest`），并授权其查看自己拥有的部分
+`web:*` 工作区（含 Home）；member 只有在系统设置 `allowMemberGuests` 开启时可以
+创建。所有路由只作用于调用者自己的访客；其他用户的访客和不属于调用者的工作区 JID
+一律按不存在处理。访客自身调用这些路由返回 403。
+
+- `GET /api/guests`：`{ guests, grantable_workspaces, can_create, max_guests }`。
+  每个访客含 `id`、`username`、`display_name`、`status`（`active`/`disabled`）、
+  `created_at`、`last_login_at` 和已授权的 `workspaces[{ jid, name, is_home }]`；
+  `grantable_workspaces` 是调用者自己的工作区；`can_create` 表示调用者现在能否新建。
+- `POST /api/guests`：`{ username, password, display_name?, workspace_jids[] }`，
+  用户名/密码规则与普通账号相同；成功 201 `{ guest }`，工作区无效 400，
+  member 未开放 403，已有 `max_guests`（20）个未删除的访客或用户名已存在 409。
+- `PATCH /api/guests/:id`：`display_name`、`status`、`workspace_jids`（整体替换）、
+  `password` 任选；授权变更对下一次请求立即生效，状态或密码变更同时注销访客的会话。
+  被管理员通过用户管理禁用的访客（列表里 `disabled_by_admin: true`）返回 403，
+  owner 只能删除它。
+- `DELETE /api/guests/:id`：标记删除并清除授权、置顶和会话。
+
+`allowMemberGuests` 关闭后，member 仍可列出、编辑和删除自己的访客，但这些访客无法
+登录、请求或接收广播。
+
+访客能看什么、能调用哪些路由见 [ACL 权限矩阵](ACL-MATRIX.md) 的“访客”一节。
+管理员用户管理（`/api/admin/users`）能列出、禁用、删除和重置访客（列表带
+`guest_owner_username`，支持 `role=guest` 过滤），但不能创建访客或改变访客角色；
+邀请码和注册永远不会产生访客。
 
 ## 工作区、消息和运行控制
 

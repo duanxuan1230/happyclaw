@@ -3,13 +3,42 @@ import {
   getChannelMount,
   getJidsByFolder,
   getRegisteredGroup,
+  getUserById,
+  listActiveGuestIdsForWorkspace,
+  workspaceHasGuestGrants,
 } from './db.js';
+import { canOwnGuests } from './guest-accounts.js';
+import { stripVirtualJidSuffix } from './utils.js';
 import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
 } from './workspace-attribution.js';
 
-export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
+/** Who may receive a chat's output: its owner and the guests watching it. */
+export interface GroupAudience {
+  ownerId: string;
+  guestIds: string[];
+}
+
+/**
+ * The users a chat's output may reach, or null when its ownership cannot be
+ * resolved (default-deny). Guests are included; pass `includeGuests: false`
+ * for data read-only guests may not see (it mirrors what REST denies them).
+ */
+export function getGroupAllowedUserIds(
+  chatJid: string,
+  options: { includeGuests?: boolean } = {},
+): Set<string> | null {
+  const audience = getGroupAudience(chatJid);
+  if (!audience) return null;
+  return new Set(
+    options.includeGuests === false
+      ? [audience.ownerId]
+      : [audience.ownerId, ...audience.guestIds],
+  );
+}
+
+export function getGroupAudience(chatJid: string): GroupAudience | null {
   const agentSep = chatJid.indexOf('#agent:');
   const baseChatJid = agentSep < 0 ? chatJid : chatJid.slice(0, agentSep);
   const group = getRegisteredGroup(baseChatJid);
@@ -54,5 +83,60 @@ export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
   // Ownership and binding are security-sensitive mutable state. Resolve them
   // on every broadcast instead of retaining a raw-JID cache that can outlive a
   // rebind or ownership transfer.
-  return new Set<string>([ownerId]);
+
+  // Read-only guests with an active grant on the workspace this output is
+  // attributed to also receive it. The grant must come from the same owner
+  // that owns the workspace now (checked in SQL together with both accounts'
+  // status), so a stale grant never leaks a re-owned workspace. An owner who
+  // may no longer hold guests (allowMemberGuests off) shares with nobody.
+  const workspaceJid = resolveAudienceWorkspaceJid(
+    baseChatJid,
+    boundJid,
+    hasBinding,
+    group.folder,
+  );
+  if (!workspaceJid) return { ownerId, guestIds: [] };
+  const workspace =
+    workspaceJid === baseChatJid ? group : getRegisteredGroup(workspaceJid);
+  return {
+    ownerId,
+    guestIds:
+      workspace?.created_by === ownerId
+        ? listViewingGuestIds(workspaceJid, ownerId)
+        : [],
+  };
+}
+
+/**
+ * Guests currently allowed to watch `workspaceJid`, a workspace `ownerId`
+ * owns: active grants from that owner, while the owner may hold guests.
+ */
+export function listViewingGuestIds(
+  workspaceJid: string,
+  ownerId: string,
+): string[] {
+  // Every broadcast comes through here; most workspaces have no grants.
+  if (!workspaceHasGuestGrants(workspaceJid)) return [];
+  const guestIds = listActiveGuestIdsForWorkspace(workspaceJid, ownerId);
+  if (guestIds.length === 0) return guestIds;
+  const owner = getUserById(ownerId);
+  return owner && canOwnGuests(owner) ? guestIds : [];
+}
+
+function resolveAudienceWorkspaceJid(
+  baseChatJid: string,
+  boundJid: string | null,
+  hasBinding: boolean,
+  folder: string,
+): string | null {
+  if (boundJid) {
+    const base = stripVirtualJidSuffix(boundJid);
+    return base.startsWith('web:') ? base : null;
+  }
+  if (baseChatJid.startsWith('web:')) return baseChatJid;
+  if (hasBinding) return null;
+  for (const siblingJid of getJidsByFolder(folder)) {
+    if (siblingJid.startsWith('web:')) return siblingJid;
+  }
+  return null;
 }

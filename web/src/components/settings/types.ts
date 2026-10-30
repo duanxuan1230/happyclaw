@@ -89,6 +89,7 @@ export interface SystemSettings {
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   fallbackModel: string;
+  allowMemberGuests: boolean;
 }
 
 export interface HostIntegrationSettings {
@@ -195,6 +196,7 @@ export type SettingsTab =
   | 'preferences'
   | 'my-channels'
   | 'security'
+  | 'guests'
   | 'groups'
   | 'agent-profiles'
   | 'memory'

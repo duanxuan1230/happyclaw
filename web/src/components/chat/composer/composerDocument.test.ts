@@ -19,6 +19,7 @@ import { plainTextToComposerDocument } from './cindy/composerListDocument';
 import {
   appendComposerText,
   composerDocFor,
+  findFilledBlocks,
   isComposerDocJSON,
   readComposerTrigger,
 } from './composerDocument';
@@ -122,6 +123,21 @@ describe('appendComposerText', () => {
     appendComposerText(ed, '- 一\n- 二', { gap: 1, focus: false });
     expect(ed.state.doc.firstChild?.type.name).toBe('bulletList');
     expect(serializeEditorContent(ed).text).toBe('- 一\n- 二');
+  });
+});
+
+describe('findFilledBlocks', () => {
+  it('finds the last unchanged run of the blocks a text makes', () => {
+    const ed = create('甲\n问\n答：乙\n问\n答：乙');
+    const { doc } = ed.state;
+    const range = findFilledBlocks(doc, '问\n答：乙');
+    expect(range).toEqual({
+      from:
+        doc.child(0).nodeSize + doc.child(1).nodeSize + doc.child(2).nodeSize,
+      to: doc.content.size,
+    });
+    expect(findFilledBlocks(doc, '答')).toBeNull();
+    expect(findFilledBlocks(doc, '')).toBeNull();
   });
 });
 

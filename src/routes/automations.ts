@@ -3,6 +3,8 @@
 // Thin layer over AutomationService: it owns permissions (owner isolation,
 // 404 for other users' automations, Host workspaces need an admin) and the
 // Chinese error texts. index.ts injects the service once the runtime is up.
+// Read-only guests act as `viewer`s of the workspaces they are granted; the
+// guest guard lets them reach only the list and detail reads.
 
 import { Hono, type Context } from 'hono';
 import type { ZodType } from 'zod';
@@ -20,6 +22,7 @@ import {
   AutomationMarkReadSchema,
   AutomationPatchSchema,
 } from '../schemas.js';
+import { listActiveGuestGrantJids } from '../db.js';
 import type { AuthUser } from '../types.js';
 import type { Variables } from '../web-context.js';
 
@@ -35,6 +38,8 @@ automationRoutes.use('*', authMiddleware);
 
 function actorOf(c: Context<{ Variables: Variables }>): AutomationActor {
   const user = c.get('user') as AuthUser;
+  if (user.role === 'guest')
+    return { kind: 'viewer', workspaceJids: listActiveGuestGrantJids(user.id) };
   return { kind: 'web', userId: user.id, isAdmin: user.role === 'admin' };
 }
 

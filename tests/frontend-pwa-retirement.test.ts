@@ -1,6 +1,10 @@
+// @vitest-environment happy-dom
+
 import fs from 'node:fs';
 import path from 'node:path';
+import { Navigate, matchRoutes } from 'react-router-dom';
 import { describe, expect, test } from 'vitest';
+import { createAppRouter } from '../web/src/App';
 import {
   isLegacyHappyClawRegistration,
   isLegacyPwaCacheName,
@@ -45,6 +49,47 @@ describe('PWA cache retirement', () => {
     );
     expect(manifest.icons).toContainEqual(
       expect.objectContaining({ sizes: '512x512', purpose: 'maskable' }),
+    );
+  });
+
+  test('manifest shortcuts open real routes in the existing window', () => {
+    const { routes } = createAppRouter(false);
+    const manifest = JSON.parse(read('web/public/manifest.webmanifest')) as {
+      launch_handler?: { client_mode: string | string[] };
+      shortcuts?: Array<{ name: string; url: string }>;
+    };
+
+    // Not navigate-existing: useLaunchQueue routes in place (see there).
+    expect([manifest.launch_handler?.client_mode].flat()[0]).toBe(
+      'focus-existing',
+    );
+    expect(manifest.shortcuts?.length).toBeGreaterThan(0);
+    for (const shortcut of manifest.shortcuts ?? []) {
+      // Relative to the scope, so a sub-path deployment keeps working.
+      expect(shortcut.url).toMatch(/^\.\/[a-z-]+$/);
+      // The route the router would render; unknown paths hit the catch-all.
+      const element = matchRoutes(routes, shortcut.url.slice(1))?.at(-1)?.route
+        .element as { type?: unknown } | undefined;
+      expect(
+        element?.type ?? Navigate,
+        `${shortcut.url} is not a page route`,
+      ).not.toBe(Navigate);
+    }
+  });
+
+  test('turns off iOS data detectors for dates and addresses too', () => {
+    const html = read('web/index.html');
+    const detection = html.match(
+      /name="format-detection"\s+content="([^"]+)"/,
+    )?.[1];
+
+    expect(detection?.split(/,\s*/)).toEqual(
+      expect.arrayContaining([
+        'telephone=no',
+        'email=no',
+        'date=no',
+        'address=no',
+      ]),
     );
   });
 

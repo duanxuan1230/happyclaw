@@ -26,6 +26,8 @@ import type {
  *   own automation.
  * - `other_turn`: any other agent turn (group members, mixed batches). It
  *   may only list.
+ * - `viewer`: a read-only guest (REST). It may list and read the automations
+ *   of the workspaces it is granted, nothing else.
  */
 export type AutomationActor =
   | { kind: 'web'; userId: string; isAdmin: boolean }
@@ -47,7 +49,8 @@ export type AutomationActor =
       automationId: string;
       runId: string;
     }
-  | { kind: 'other_turn'; workspaceJid: string; sessionJid: string };
+  | { kind: 'other_turn'; workspaceJid: string; sessionJid: string }
+  | { kind: 'viewer'; workspaceJids: readonly string[] };
 
 export class AutomationError extends Error {
   constructor(

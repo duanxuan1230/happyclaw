@@ -46,6 +46,8 @@ interface QueuedFollowUpsPanelProps {
   saveFollowUpEdit: (item: QueuedFollowUp) => Promise<void>;
   onEditChange: (value: string) => void;
   onCancelEdit: () => void;
+  /** View-only queue (read-only guests): no reorder, edit, steer or delete. */
+  readOnly?: boolean;
 }
 
 /**
@@ -66,6 +68,7 @@ export const QueuedFollowUpsPanel = memo(function QueuedFollowUpsPanel({
   saveFollowUpEdit,
   onEditChange,
   onCancelEdit,
+  readOnly = false,
 }: QueuedFollowUpsPanelProps) {
   const listId = useId();
   const [expanded, setExpanded] = useState(false);
@@ -143,9 +146,10 @@ export const QueuedFollowUpsPanel = memo(function QueuedFollowUpsPanel({
               saveFollowUpEdit={saveFollowUpEdit}
               onEditChange={onEditChange}
               onCancelEdit={onCancelEdit}
+              readOnly={readOnly}
             />
           ))}
-          {touch && !steering && (
+          {touch && !steering && !readOnly && (
             <p
               data-testid="queued-follow-ups-hint"
               className="px-2 pt-1 pb-1.5 text-micro text-faint-foreground"
@@ -172,6 +176,7 @@ interface QueuedFollowUpRowProps {
   saveFollowUpEdit: QueuedFollowUpsPanelProps['saveFollowUpEdit'];
   onEditChange: QueuedFollowUpsPanelProps['onEditChange'];
   onCancelEdit: QueuedFollowUpsPanelProps['onCancelEdit'];
+  readOnly: boolean;
 }
 
 const ROW_ICON_BUTTON =
@@ -196,6 +201,7 @@ function QueuedFollowUpRow({
   saveFollowUpEdit,
   onEditChange,
   onCancelEdit,
+  readOnly,
 }: QueuedFollowUpRowProps) {
   const steering = item.delivery_mode === 'steer';
   const locked = steering || item.delivery_status === 'promoting';
@@ -308,7 +314,7 @@ function QueuedFollowUpRow({
             images={images}
             touch={touch}
           />
-          {touch ? (
+          {readOnly ? null : touch ? (
             // One row per item on touch: the primary action inline, the
             // rest behind a menu instead of a second row of buttons.
             <div className="flex shrink-0 items-center gap-0.5 -mr-1.5">

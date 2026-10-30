@@ -4,7 +4,12 @@
  * or `@` run before the caret.
  */
 import type { Editor, JSONContent } from '@tiptap/core';
-import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
+import {
+  Fragment,
+  Slice,
+  type Node as PMNode,
+  type Schema,
+} from '@tiptap/pm/model';
 import { Selection, type EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 
@@ -62,6 +67,13 @@ function inlineNodesFor(view: EditorView, text: string): PMNode[] {
   return nodes;
 }
 
+/** The top-level blocks `text` makes, as the composer fills it. */
+function blocksFor(schema: Schema, text: string): PMNode[] {
+  return (plainTextToComposerDocument(text).content ?? []).map((json) =>
+    schema.nodeFromJSON(json),
+  );
+}
+
 /** Replace the selection with plain text, keeping its line breaks visible. */
 export function insertPlainText(view: EditorView, text: string): void {
   const nodes = inlineNodesFor(view, text);
@@ -100,6 +112,50 @@ export function appendComposerText(
       return true;
     });
   }
+}
+
+/**
+ * Where the composer holds `text` as it was filled: the last run of
+ * top-level blocks equal to the ones `text` makes, or null once edited.
+ */
+export function findFilledBlocks(
+  doc: PMNode,
+  text: string,
+): { from: number; to: number } | null {
+  if (!text) return null;
+  const blocks = blocksFor(doc.type.schema, text);
+  const offsets = [0];
+  doc.forEach((child) => offsets.push(offsets.at(-1)! + child.nodeSize));
+  for (let start = doc.childCount - blocks.length; start >= 0; start -= 1) {
+    if (blocks.every((block, i) => doc.child(start + i).eq(block))) {
+      return { from: offsets[start], to: offsets[start + blocks.length] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Fill a draft request into the composer: in place of the text it replaces
+ * when that is still there unchanged, otherwise after what the composer
+ * holds. The caret lands at the end of the filled text.
+ */
+export function fillComposerDraft(
+  editor: Editor,
+  { text, replaces }: { text: string; replaces?: string },
+): void {
+  const range = replaces ? findFilledBlocks(editor.state.doc, replaces) : null;
+  if (!range) {
+    appendComposerText(editor, text, { gap: 0, focus: true });
+    return;
+  }
+  const { state } = editor;
+  const fragment = Fragment.from(blocksFor(state.schema, text));
+  const tr = state.tr.replaceWith(range.from, range.to, fragment);
+  tr.setSelection(
+    Selection.near(tr.doc.resolve(range.from + fragment.size), -1),
+  );
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.commands.focus();
 }
 
 /**

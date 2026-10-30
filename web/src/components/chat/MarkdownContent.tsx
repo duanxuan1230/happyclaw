@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { useIsPhone } from '../layout/phone';
 import { DetailSheet } from './DetailSheet';
-import { downloadFromUrl } from '../../utils/download';
+import { downloadFromUrl, downloadTextFile } from '../../utils/download';
 import { ImageLightbox } from './ImageLightbox';
 import {
   resolveMarkdownImageSrc,
@@ -28,6 +28,12 @@ import {
 import { cn } from '@/lib/utils';
 import { REMARK_REHYPE_OPTIONS } from '../../lib/markdown/pipeline';
 import { useCopyFeedback } from '../../lib/markdown/use-copy-feedback';
+import {
+  csvFileName,
+  readTable,
+  toCsv,
+  toTsv,
+} from '../../lib/markdown/table-data';
 import {
   RENDERED_CACHE_MAX_CHARS,
   rememberRendered,
@@ -62,6 +68,18 @@ export interface MarkdownRendererProps {
   trimEdges?: boolean;
   /** Fade the words in as they arrive (the open block of a stream). */
   fade?: StreamFade;
+  /**
+   * The whole reply is final, so its text may wrap for looks (default:
+   * neither streaming nor fading). A block that closed while the rest of
+   * its reply streams is not: re-breaking its lines can change its height
+   * and move the text arriving under it.
+   */
+  settled?: boolean;
+  /**
+   * Show 复制 and 下载 CSV under each table (default). A view that never
+   * settles, such as a sub-agent's text tail, leaves them out.
+   */
+  tableTools?: boolean;
 }
 
 interface MarkdownContentProps extends MarkdownRendererProps {
@@ -216,6 +234,88 @@ function extractText(node: React.ReactNode): string {
     return extractText((node.props as { children?: React.ReactNode }).children);
   }
   return '';
+}
+
+/**
+ * On a phone a wide table scrolls sideways under its first column, so the
+ * row it is reading stays named. Not in a shared image, which does not scroll.
+ * The pinned cells paint `--md-table-bg`, the surface the reply sits on: a
+ * container that is not the page background (a card, a sheet) sets it.
+ */
+const STICKY_FIRST_CELL =
+  'phone:first:sticky phone:first:left-0 phone:first:z-1 phone:first:shadow-[inset_-1px_0_0_var(--surface-border)] [.share-card-content_&]:static';
+const TH_CLASS = cn(
+  'border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75',
+  STICKY_FIRST_CELL,
+  'phone:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--md-table-bg,var(--background)))]',
+);
+const TABLE_TOOL_CLASS =
+  'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5';
+
+/** Whether tables show their tools (`MarkdownRendererProps.tableTools`). */
+const MarkdownTableToolsContext = createContext(true);
+
+/**
+ * A reply's table, with 复制 (tab-separated, so a spreadsheet paste splits it
+ * into cells) and 下载 CSV under it, usable once the reply has settled.
+ */
+function MarkdownTable({ children }: { children: React.ReactNode }) {
+  const streaming = useContext(MarkdownStreamingContext);
+  const tools = useContext(MarkdownTableToolsContext);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const { copied, copy } = useCopyFeedback();
+  const rows = () => (tableRef.current ? readTable(tableRef.current) : []);
+  const download = () =>
+    downloadTextFile(toCsv(rows()), csvFileName(), 'text/csv;charset=utf-8');
+  return (
+    <div data-md-table="" className="group/table my-4">
+      <HorizontalScroll
+        as="div"
+        className="max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-lg border border-surface-border [-webkit-overflow-scrolling:touch] [touch-action:pan-x_pan-y]"
+      >
+        <table
+          ref={tableRef}
+          className="min-w-full border-separate border-spacing-0 font-sans"
+        >
+          {children}
+        </table>
+      </HorizontalScroll>
+      {/* Held, not left out, while the reply streams: the text under the
+          table does not move down when the tools appear. */}
+      {tools && (
+        <div
+          data-md-table-tools=""
+          inert={streaming}
+          className={cn(
+            'mt-1 flex justify-end gap-0.5 font-sans text-caption text-muted-foreground opacity-0 transition-opacity select-none group-hover/table:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 [.share-card-content_&]:hidden',
+            streaming && 'invisible',
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => copy(toTsv(rows()))}
+            aria-label="复制表格，可直接粘贴到表格软件"
+            className={TABLE_TOOL_CLASS}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            {copied ? '已复制' : '复制'}
+          </button>
+          <span className="sr-only" aria-live="polite">
+            {copied ? '已复制表格' : ''}
+          </span>
+          <button
+            type="button"
+            onClick={download}
+            aria-label="下载为 CSV"
+            className={TABLE_TOOL_CLASS}
+          >
+            <Download size={13} />
+            CSV
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 type ScrollFade = 'none' | 'start' | 'end' | 'both';
@@ -574,16 +674,7 @@ function markdownComponents(
         {children}
       </MarkdownLink>
     ),
-    table: ({ children }) => (
-      <HorizontalScroll
-        as="div"
-        className="my-4 max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-lg border border-surface-border [-webkit-overflow-scrolling:touch] [touch-action:pan-x_pan-y]"
-      >
-        <table className="min-w-full border-separate border-spacing-0 font-sans">
-          {children}
-        </table>
-      </HorizontalScroll>
-    ),
+    table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
     thead: ({ children }) => <thead className="bg-muted/60">{children}</thead>,
     tbody: ({ children }) => <tbody>{children}</tbody>,
     tr: ({ children }) => (
@@ -593,10 +684,7 @@ function markdownComponents(
     ),
     // GFM column alignment arrives as an inline `text-align` style.
     th: ({ children, style }) => (
-      <th
-        style={style}
-        className="border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75"
-      >
+      <th style={style} className={TH_CLASS}>
         {children}
       </th>
     ),
@@ -606,6 +694,8 @@ function markdownComponents(
         className={cn(
           'min-w-[6rem] max-w-[28rem] px-3 py-2 text-start align-top whitespace-normal text-foreground [overflow-wrap:anywhere]',
           tableTextClass,
+          STICKY_FIRST_CELL,
+          'phone:first:bg-[var(--md-table-bg,var(--background))]',
         )}
       >
         {children}
@@ -742,6 +832,8 @@ export function MarkdownContent({
   streaming = false,
   trimEdges = true,
   fade,
+  settled = !streaming && !fade,
+  tableTools = true,
   remarkPlugins,
   rehypePlugins,
   pipeline,
@@ -810,10 +902,16 @@ export function MarkdownContent({
         // card lets wide tables overflow so it can grow to fit them.
         'overflow-clip [overflow-clip-margin:0.25rem] [.share-card-content_&]:overflow-visible',
         trimEdges && '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+        // A settled reply wraps like edited text: no lone character or
+        // punctuation on a paragraph's last line, headings in even lines.
+        settled &&
+          '[&_li]:text-pretty [&_p]:text-pretty [&_:is(h1,h2,h3,h4)]:text-balance',
       )}
     >
       <MarkdownStreamingContext.Provider value={streaming}>
-        {rendered}
+        <MarkdownTableToolsContext.Provider value={tableTools}>
+          {rendered}
+        </MarkdownTableToolsContext.Provider>
       </MarkdownStreamingContext.Provider>
     </div>
   );

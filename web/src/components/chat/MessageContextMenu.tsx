@@ -7,6 +7,7 @@ import {
 import { useIsPhone } from '../layout/phone';
 import { DetailSheet } from './DetailSheet';
 import { useChatStore } from '../../stores/chat';
+import { useIsGuest } from '../../stores/auth';
 import { confirmDialog } from '../../stores/confirm';
 import { mediumTap } from '../../hooks/useHaptic';
 import { copyToClipboard } from '../../utils/clipboard';
@@ -52,6 +53,8 @@ export function MessageContextMenu({
 }: MessageContextMenuProps) {
   const isPhone = useIsPhone();
   const [selecting, setSelecting] = useState(false);
+  // Read-only guests may copy and share, never delete records.
+  const canDelete = !useIsGuest() && !!chatJid && !!messageId;
   const handleDelete = async () => {
     if (!chatJid || !messageId) return;
     const confirmed = await confirmDialog({
@@ -92,17 +95,16 @@ export function MessageContextMenu({
   const share: MenuAction[] = onShareImage
     ? [{ label: '生成分享图片', icon: ImageDown, onSelect: onShareImage }]
     : [];
-  const remove: MenuAction[] =
-    chatJid && messageId
-      ? [
-          {
-            label: '删除聊天记录',
-            icon: Trash2,
-            destructive: true,
-            onSelect: () => void handleDelete(),
-          },
-        ]
-      : [];
+  const remove: MenuAction[] = canDelete
+    ? [
+        {
+          label: '删除聊天记录',
+          icon: Trash2,
+          destructive: true,
+          onSelect: () => void handleDelete(),
+        },
+      ]
+    : [];
 
   return (
     <>

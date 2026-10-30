@@ -18,7 +18,8 @@ import {
   type Message,
   type QueuedFollowUp,
 } from '../../stores/chat';
-import { useAuthStore } from '../../stores/auth';
+import { useAuthStore, useIsGuest } from '../../stores/auth';
+import { GUEST_READ_ONLY_NOTICE } from '../../lib/guest';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useIsPhone } from '../layout/phone';
 import { isMessageVisibleInTimeline } from '../../lib/message-timeline';
@@ -29,6 +30,7 @@ import {
 } from './composer/EmptyConversation';
 import { MessageInput } from './LazyMessageInput';
 import type { MessageInputHandle } from './MessageInput';
+import { ReadOnlyComposer } from './composer/ReadOnlyComposer';
 import { ModelSelector } from './ModelSelector';
 import { SharedWorkdirNotice, useWorkdirPeers } from './SharedWorkdirNotice';
 import { WorktreeBranchTag } from './WorktreeBranchTag';
@@ -389,14 +391,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const markChatRead = useChatStore((s) => s.markChatRead);
 
   const currentUser = useAuthStore((s) => s.user);
-  const canUseTerminal = group?.execution_mode !== 'host';
+  const isGuest = useIsGuest();
+  // Guests view granted workspaces only: no composer, terminal, uploads,
+  // session changes or workspace configuration.
+  const readOnly = isGuest;
+  const canUseTerminal = group?.execution_mode !== 'host' && !readOnly;
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const isHome = !!group?.is_home;
   // Workspace config (skills + MCP) write permission. Backend `canModifyGroup`
   // ACL result is propagated via the `can_modify` field; trust it as the
   // single source of truth to avoid frontend/backend divergence.
-  const canModifyWorkspaceConfig = !!group?.can_modify;
+  const canModifyWorkspaceConfig = !!group?.can_modify && !readOnly;
   const interactionMode = normalizeInteractionMode(group?.interaction_mode);
   const processVisibility = normalizeProcessVisibility(
     group?.process_visibility,
@@ -407,16 +413,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       setContextPanelView('files');
     }
   }, [canModifyWorkspaceConfig, contextPanelView]);
-  // Git runs only for Host workspaces (see src/routes/git-review.ts).
-  const isHostWorkspace = group?.execution_mode === 'host';
+  // Git runs only for Host workspaces (see src/routes/git-review.ts). Guests
+  // never see diffs: they could show the dot files the file panel hides.
+  const canReview = group?.execution_mode === 'host' && !readOnly;
   useEffect(() => {
-    if (!isHostWorkspace && contextPanelView === 'review') {
+    if (!canReview && contextPanelView === 'review') {
       setContextPanelView('files');
     }
-  }, [isHostWorkspace, contextPanelView]);
+  }, [canReview, contextPanelView]);
 
   // Fetch IM connection status for home groups
   const isOwnHome =
+    !readOnly &&
     isHome &&
     ((!!group?.created_by && group.created_by === currentUser?.id) ||
       (currentUser?.role === 'admin' && group?.folder === 'main'));
@@ -604,11 +612,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   useEffect(() => {
     useFileStore.getState().setFileScopeSession(groupJid, worktreeSessionId);
   }, [groupJid, worktreeSessionId]);
-  // A worktree belongs to one session: nothing else runs there.
+  // A worktree belongs to one session: nothing else runs there. Guests do
+  // not learn about other workspaces' runs.
   const workdirPeers = useWorkdirPeers(
     groupJid,
     composerAgentId,
-    !!group && !activeWorktree,
+    !!group && !activeWorktree && !readOnly,
   );
   const showWorkdirNotice =
     workdirPeers.peers.length + workdirPeers.hiddenCount > 0;
@@ -649,10 +658,17 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   );
   const loadContextUsage = useChatStore((s) => s.loadContextUsage);
   useEffect(() => {
-    if (!headerSheetOpen) return;
+    if (!headerSheetOpen || readOnly) return;
     if (useChatStore.getState().contextUsage[usageKey] !== undefined) return;
     void loadContextUsage(groupJid, composerAgentId);
-  }, [headerSheetOpen, usageKey, loadContextUsage, groupJid, composerAgentId]);
+  }, [
+    headerSheetOpen,
+    readOnly,
+    usageKey,
+    loadContextUsage,
+    groupJid,
+    composerAgentId,
+  ]);
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     group?.conversation_source === 'native_thread' ||
@@ -685,7 +701,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     '(min-width: 640px) and (hover: hover) and (pointer: fine)',
   );
   const composerKey = sessionTab ? followUpChatJid : groupJid;
-  const heroCentered = emptyConversation && centersEmptyState;
+  // Read-only viewers have no composer to centre.
+  const heroCentered = emptyConversation && centersEmptyState && !readOnly;
   const agentProfileLabel = group?.agent_profile_name
     ? getAgentProfileDisplayName(group.agent_profile_name)
     : group?.is_home
@@ -1141,7 +1158,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       chevron: true,
       onClick: () => setContextPanelView('files'),
     },
-    ...(isHostWorkspace
+    ...(canReview
       ? [
           {
             key: 'review',
@@ -1258,7 +1275,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         {contextPanelView === 'env' && canModifyWorkspaceConfig ? (
           <ContainerEnvPanel groupJid={groupJid} />
-        ) : contextPanelView === 'review' && isHostWorkspace ? (
+        ) : contextPanelView === 'review' && canReview ? (
           <ReviewPanel groupJid={groupJid} agentId={composerAgentId} />
         ) : (
           <FilePanel groupJid={groupJid} />
@@ -1349,7 +1366,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     const fallback = window.setTimeout(afterClose, 300);
   };
   const contextFigures = contextUsageFigures(phoneContextUsage);
-  if (isPhone) {
+  // The model sheet lives in the composer, which read-only viewers lack.
+  if (isPhone && !readOnly) {
     headerActions.push([
       { label: '切换模型', icon: Cpu, onSelect: openModelSheet },
       ...(contextFigures
@@ -1375,7 +1393,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       ref={containerRef}
       data-hc-chat-view
       className="h-full flex overflow-hidden bg-background"
-      {...dropZoneProps}
+      {...(readOnly ? {} : dropZoneProps)}
     >
       <div
         className={cn(
@@ -1443,6 +1461,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               )}
             </nav>
             <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden md:flex">
+              {readOnly && <Badge variant="neutral">只读</Badge>}
               <SessionAutomationBadge
                 sessionJid={runtimeSessionJid}
                 generatedBy={sessionTab ? activeAgent?.automation_id : null}
@@ -1614,7 +1633,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             data-composer-dock-host
             className="relative flex min-w-0 flex-1 flex-col overflow-x-hidden"
           >
-            {isDragOver && (
+            {isDragOver && !readOnly && (
               <div
                 data-testid="chat-drop-overlay"
                 className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5 backdrop-blur-[2px] dark:bg-primary/10"
@@ -1649,7 +1668,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                     sessionLabel={sessionTab ? currentContextName : undefined}
                     {...agentLook}
                   />
-                  {!heroCentered && (
+                  {!heroCentered && !readOnly && (
                     <ConversationStarters className="mt-8 max-w-3xl" />
                   )}
                 </div>
@@ -1686,34 +1705,42 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             )}
             {/* One place in the tree for both layouts, so docking after the
                 first message keeps the composer (and what it holds). */}
-            <MessageInput
-              // One instance per conversation: draft and pending
-              // attachments never carry over to another session.
-              key={composerKey}
-              ref={composerRef}
-              layout={heroCentered ? 'centered' : 'docked'}
-              draftKey={composerKey}
-              placeholder={`向 ${agentProfileLabel} 发送消息…`}
-              onSend={sessionTab ? sendActiveAgent : sendMain}
-              groupJid={groupJid}
-              isRunning={currentContextWaiting}
-              onStop={
-                sessionTab
-                  ? activeAgentInterrupted
-                    ? undefined
-                    : stopActiveAgent
-                  : mainInterrupted
-                    ? undefined
-                    : stopMain
-              }
-              queuedFollowUps={queuedFollowUps}
-              onFollowUpAction={handleFollowUpAction}
-              onResetSession={resetCurrent}
-              onToggleTerminal={toggleTerminal}
-              modelSelector={modelSelector}
-              contextUsage={contextUsage}
-              statusBar={statusBar}
-            />
+            {readOnly ? (
+              <ReadOnlyComposer
+                key={composerKey}
+                notice={GUEST_READ_ONLY_NOTICE}
+                queuedFollowUps={queuedFollowUps}
+              />
+            ) : (
+              <MessageInput
+                // One instance per conversation: draft and pending
+                // attachments never carry over to another session.
+                key={composerKey}
+                ref={composerRef}
+                layout={heroCentered ? 'centered' : 'docked'}
+                draftKey={composerKey}
+                placeholder={`向 ${agentProfileLabel} 发送消息…`}
+                onSend={sessionTab ? sendActiveAgent : sendMain}
+                groupJid={groupJid}
+                isRunning={currentContextWaiting}
+                onStop={
+                  sessionTab
+                    ? activeAgentInterrupted
+                      ? undefined
+                      : stopActiveAgent
+                    : mainInterrupted
+                      ? undefined
+                      : stopMain
+                }
+                queuedFollowUps={queuedFollowUps}
+                onFollowUpAction={handleFollowUpAction}
+                onResetSession={resetCurrent}
+                onToggleTerminal={toggleTerminal}
+                modelSelector={modelSelector}
+                contextUsage={contextUsage}
+                statusBar={statusBar}
+              />
+            )}
             {heroCentered && (
               <div
                 data-hc-empty-state
@@ -1811,7 +1838,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         </SheetContent>
       </Sheet>
 
-      {interactionModeDialogMounted && (
+      {interactionModeDialogMounted && !readOnly && (
         <WorkspaceInteractionModeDialog
           open={showInteractionModeDialog}
           groupJid={groupJid}
@@ -1837,32 +1864,34 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       />
 
       {/* Mobile: Terminal sheet */}
-      <Sheet
-        open={mobileTerminal}
-        onOpenChange={(v) => !v && setMobileTerminal(false)}
-      >
-        <SheetContent
-          side="bottom"
-          className="gap-0 p-0 data-[side=bottom]:h-[min(85dvh,calc(var(--vvh,100dvh)-3rem))]"
+      {canUseTerminal && (
+        <Sheet
+          open={mobileTerminal}
+          onOpenChange={(v) => !v && setMobileTerminal(false)}
         >
-          <SheetHeader className="px-4 pt-4 pb-2">
-            <SheetTitle>终端</SheetTitle>
-            <SheetDescription className="sr-only">
-              使用当前工作区的终端。
-            </SheetDescription>
-          </SheetHeader>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <Suspense fallback={null}>
-              <TerminalPanel
-                groupJid={groupJid}
-                visible
-                onHide={() => setMobileTerminal(false)}
-                onDelete={() => setMobileTerminal(false)}
-              />
-            </Suspense>
-          </div>
-        </SheetContent>
-      </Sheet>
+          <SheetContent
+            side="bottom"
+            className="gap-0 p-0 data-[side=bottom]:h-[min(85dvh,calc(var(--vvh,100dvh)-3rem))]"
+          >
+            <SheetHeader className="px-4 pt-4 pb-2">
+              <SheetTitle>终端</SheetTitle>
+              <SheetDescription className="sr-only">
+                使用当前工作区的终端。
+              </SheetDescription>
+            </SheetHeader>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <Suspense fallback={null}>
+                <TerminalPanel
+                  groupJid={groupJid}
+                  visible
+                  onHide={() => setMobileTerminal(false)}
+                  onDelete={() => setMobileTerminal(false)}
+                />
+              </Suspense>
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
 
       {/* Reset session confirm dialog */}
       <ConfirmDialog
@@ -1881,7 +1910,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       />
 
       {/* IM binding dialog */}
-      {bindingAgentId && (
+      {bindingAgentId && !readOnly && (
         <ImBindingDialog
           open={!!bindingAgentId}
           groupJid={groupJid}
