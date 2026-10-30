@@ -1930,8 +1930,19 @@ export function modelCapabilities(id: string): ModelCapabilities | null {
  * older generation (`gpt-6.1-terra` → `gpt-5.6-terra`). Only GPT and Claude
  * names, whose families share their efforts, are inferred.
  */
+const familyCache = new Map<string, ModelCapabilities | null>();
+
 function inferredFamilyCapabilities(id: string): ModelCapabilities | null {
   const { model } = splitOneMillionSuffix(id);
+  if (!familyCache.has(model)) {
+    // Bounded: a picker lists at most a few hundred distinct ids.
+    if (familyCache.size > 2000) familyCache.clear();
+    familyCache.set(model, computeFamilyCapabilities(model));
+  }
+  return familyCache.get(model) ?? null;
+}
+
+function computeFamilyCapabilities(model: string): ModelCapabilities | null {
   const key = model.toLowerCase();
   const bare = key.includes('/') ? key.slice(key.lastIndexOf('/') + 1) : key;
   const gpt = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/.exec(bare);
