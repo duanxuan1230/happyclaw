@@ -39,6 +39,18 @@ describe('Agent effort runtime contracts', () => {
     );
   });
 
+  test('host and container starts hand the launch effort to the runner', () => {
+    const host = read('src/container-runner.ts');
+    expect(
+      host.match(
+        /input = prepareLaunchInput\(input, (?:hostPoolResult|poolResult), sessionAgentId\);/g,
+      ),
+    ).toHaveLength(2);
+    expect(read('container/agent-runner/src/index.ts')).toContain(
+      'const agentEffort = resolveRunSdkEffort(containerInput);',
+    );
+  });
+
   test('runner passes the resolved value through the supported SDK option', () => {
     const runner = read('container/agent-runner/src/index.ts');
     expect(runner).toContain('...(agentEffort ? { effort: agentEffort } : {})');

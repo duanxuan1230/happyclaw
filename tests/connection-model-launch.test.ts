@@ -245,12 +245,20 @@ describe('an Agent runs the model it is bound to', () => {
     });
   });
 
-  test('a conversation pick outranks it, even one of the same configuration without a model', () => {
-    pick(glm.id);
-    expect(
-      select({ modelConfigId: glm.id, model: 'glm-5-air' }).resolved.config
-        .anthropicModel,
-    ).toBe('glm-5');
+  test('a conversation pick outranks it; one on its own connection without a model keeps its model', () => {
+    // Only the effort was picked: the Agent's model stays, and the session.
+    legacySession(glm.id);
+    db.setSessionModel(FOLDER, null, 'glm-5-air');
+    pick(glm.id, undefined, 'medium');
+    const sameConnection = launch({
+      modelConfigId: glm.id,
+      model: 'glm-5-air',
+    });
+    expect(sameConnection.selection.resolved.config.anthropicModel).toBe(
+      'glm-5-air',
+    );
+    expect(sameConnection.selection.resolved.launchEffort).toBe('medium');
+    expect(sameConnection).toMatchObject({ predicted: false, reset: false });
     pick(kimi.id);
     expect(
       select({ modelConfigId: glm.id, model: 'glm-5-air' }).resolved.config
@@ -258,8 +266,50 @@ describe('an Agent runs the model it is bound to', () => {
     ).toBe('kimi-k3');
   });
 
-  test('a model without the binding that offers it runs nothing', () => {
-    expect(select({ model: 'glm-5-air' })).toBeNull();
+  test('nothing bound while connections exist fails instead of picking one', () => {
+    expect(() => select({ model: 'glm-5-air' })).toThrow(
+      /还没有为主 HappyClaw 选择模型/,
+    );
+  });
+
+  test('a set binding whose connection is gone fails, never moving accounts', () => {
+    expect(() => select({ modelConfigId: 'deleted-connection' })).toThrow(
+      /^agent_profile_unavailable: 智能体绑定的模型连接已删除或缺少凭据/,
+    );
+    // A conversation pick that went stale reads as no pick.
+    pick('deleted-connection');
+    expect(select({ modelConfigId: glm.id }).profileId).toBe(glm.id);
+  });
+
+  test('the runner is told the launch effort, null for none', () => {
+    const tellsNone = select({ modelConfigId: glm.id, effort: 'high' });
+    expect(tellsNone.launchEffort).toBeNull();
+    const input = {
+      prompt: 'next',
+      groupFolder: FOLDER,
+      chatJid: `web:${FOLDER}`,
+      isMain: true,
+    };
+    expect(
+      runner.prepareLaunchInput(input, tellsNone, undefined),
+    ).toHaveProperty('launchEffort', null);
+    // No connection: the runner keeps sending the Agent's own effort.
+    expect(
+      runner.prepareLaunchInput(input, null, undefined),
+    ).not.toHaveProperty('launchEffort');
+    const tells = select({ modelConfigId: kimi.id, effort: 'high' });
+    expect(tells.launchEffort).toBe('high');
+  });
+
+  test('leaving every connection for the Workspace env starts a new session once', () => {
+    legacySession(glm.id);
+    const left = runner.leaveSessionConnection(FOLDER, null);
+    expect(left).toEqual({
+      profileId: '',
+      previousProviderId: glm.id,
+      resetSession: true,
+    });
+    expect(runner.leaveSessionConnection(FOLDER, null)).toBeNull();
   });
 
   test('a model the configuration dropped runs its default and says why', () => {

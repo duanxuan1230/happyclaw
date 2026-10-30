@@ -5,7 +5,10 @@ import {
   normalizeAgentEffort,
   resolveAgentSdkEffort,
 } from '../src/agent-effort.js';
-import { resolveAgentSdkEffort as resolveRunnerAgentSdkEffort } from '../container/agent-runner/src/agent-effort.js';
+import {
+  resolveAgentSdkEffort as resolveRunnerAgentSdkEffort,
+  resolveRunSdkEffort,
+} from '../container/agent-runner/src/agent-effort.js';
 describe('Agent effort resolution', () => {
   test('normalizes legacy, missing, and invalid values to inherit', () => {
     expect(normalizeAgentEffort(undefined)).toBe('inherit');
@@ -60,5 +63,21 @@ describe('Agent effort resolution', () => {
     const explicit = ['CLAUDE_CODE_EFFORT_LEVEL=max'];
     applyLaunchEffortEnv(explicit, 'medium', undefined);
     expect(explicit).toEqual([]);
+  });
+
+  test("the runner sends the host's launch effort, and none when it says none", () => {
+    const agentProfile = { runtimePolicy: { reasoning: { effort: 'high' } } };
+    // A model that takes no effort: not even the Agent's goes out.
+    expect(
+      resolveRunSdkEffort({ launchEffort: null, agentProfile }),
+    ).toBeUndefined();
+    expect(resolveRunSdkEffort({ launchEffort: 'low', agentProfile })).toBe(
+      'low',
+    );
+    expect(
+      resolveRunSdkEffort({ launchEffort: 'turbo', agentProfile }),
+    ).toBeUndefined();
+    // No connection decided (the Workspace's own environment): as before.
+    expect(resolveRunSdkEffort({ agentProfile })).toBe('high');
   });
 });

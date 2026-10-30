@@ -260,6 +260,7 @@ describe('GET /:jid/model-selection', () => {
     expect(body.default).toEqual({
       source: 'none',
       modelConfigId: null,
+      connectionMissing: false,
       model: null,
       effort: null,
     });
@@ -277,7 +278,8 @@ describe('GET /:jid/model-selection', () => {
             id: 'opus',
             efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
             defaultEffort: 'medium',
-            contextWindow: 1_000_000,
+            // Only a declared window counts; the registry's is a suggestion.
+            contextWindow: null,
             effortsSource: 'registry',
           },
         ],
@@ -331,7 +333,7 @@ describe('GET /:jid/model-selection', () => {
             id: 'glm-5.3',
             efforts: ['low', 'high', 'max'],
             defaultEffort: 'high',
-            contextWindow: 1_000_000,
+            contextWindow: null,
             effortsSource: 'registry',
           },
         ],
@@ -352,8 +354,18 @@ describe('GET /:jid/model-selection', () => {
     expect(body.default).toEqual({
       source: 'agent',
       modelConfigId: 'glm',
+      connectionMissing: false,
       model: 'glm-5.3',
       effort: 'high',
+    });
+    // The bound connection lost its key: the row says so, nothing else runs.
+    bindOwnerMain('copy');
+    expect((await call('GET')).body.default).toEqual({
+      source: 'agent',
+      modelConfigId: 'copy',
+      connectionMissing: true,
+      model: null,
+      effort: null,
     });
     expect(body.selectedModelConfigId).toBeNull();
   });

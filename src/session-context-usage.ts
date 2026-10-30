@@ -17,9 +17,7 @@ import {
 } from './db.js';
 import {
   CLAUDE_CODE_DEFAULT_CONTEXT,
-  ONE_MILLION_CONTEXT,
   effectiveProviderModels,
-  findModelEntry,
   resolveModelCapabilities,
   splitOneMillionSuffix,
   windowOf,
@@ -143,11 +141,10 @@ async function lastRequest(transcript: string): Promise<LastRequest | null> {
 
 /**
  * The window Claude Code works with, best known first: what it reported for
- * this conversation's model in this process; on a third-party connection the
- * window the launch derived `[1m]` and the compact window from (windowOf);
- * on an official connection the model's own window (Claude Code runs
- * 1M-native Claude models at 1M there); without a connection 1M for a `[1m]`
- * model, else the model's window capped at Claude Code's default.
+ * this conversation's model in this process; else the window the launch
+ * derived `[1m]` and the compact window from (windowOf: the connection
+ * model's declared window, 1M for a name saved with `[1m]`); else Claude
+ * Code's default.
  */
 function contextWindowFor(
   groupFolder: string,
@@ -163,26 +160,11 @@ function contextWindowFor(
   if (reported) return reported;
   const providerId = getSessionProviderId(groupFolder, agentId);
   const provider = providerId ? getProviderById(providerId) : null;
-  const runs = launchModel || model;
-  if (provider && !provider.codexOAuthCredentials) {
-    const models = effectiveProviderModels(provider);
-    if (provider.anthropicBaseUrl) {
-      return windowOf(models, runs) ?? CLAUDE_CODE_DEFAULT_CONTEXT;
-    }
-    const { model: id, oneMillion } = splitOneMillionSuffix(runs);
-    return (
-      resolveModelCapabilities(findModelEntry(models, id) ?? { id })
-        .contextWindow ??
-      (oneMillion ? ONE_MILLION_CONTEXT : CLAUDE_CODE_DEFAULT_CONTEXT)
-    );
-  }
-  if (launchModel && splitOneMillionSuffix(launchModel).oneMillion) {
-    return ONE_MILLION_CONTEXT;
-  }
-  return Math.min(
-    windowOf([], runs) ?? CLAUDE_CODE_DEFAULT_CONTEXT,
-    CLAUDE_CODE_DEFAULT_CONTEXT,
-  );
+  const models =
+    provider && !provider.codexOAuthCredentials
+      ? effectiveProviderModels(provider)
+      : [];
+  return windowOf(models, launchModel || model) ?? CLAUDE_CODE_DEFAULT_CONTEXT;
 }
 
 /**
@@ -214,7 +196,9 @@ export async function readSessionContextUsage(
   if (last.usedTokens > contextWindow) {
     contextWindow = Math.max(
       contextWindow,
-      windowOf([], launchModel || last.model) ?? 0,
+      resolveModelCapabilities({
+        id: splitOneMillionSuffix(launchModel || last.model).model,
+      }).suggestedContextWindow ?? 0,
     );
   }
   return {

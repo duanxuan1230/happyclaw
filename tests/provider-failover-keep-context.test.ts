@@ -20,7 +20,8 @@ vi.mock('../src/logger.js', () => ({
 
 const runtimeConfig = await import('../src/runtime-config.js');
 const db = await import('../src/db.js');
-const { trySelectPoolProvider } = await import('../src/container-runner.js');
+const { leaveSessionConnection, trySelectPoolProvider } =
+  await import('../src/container-runner.js');
 const { applyProviderSwitchToInput } =
   await import('../src/provider-switch-context.js');
 
@@ -140,6 +141,31 @@ describe('provider failover keeps conversation context', () => {
     expect(prepared.prompt).toContain('当前用户消息');
     expect(prepared.prompt).not.toContain('继续刚才的计划');
     expect(db.getSessionProviderId(groupFolder, null)).toBe(created[1]);
+  });
+
+  test("moving to the Workspace's own environment starts a new session with history", () => {
+    const groupFolder = 'failover-to-workspace-env';
+    const chatJid = 'web:failover-to-workspace-env';
+    db.setSession(groupFolder, 'sess-on-a', null);
+    db.setSessionProviderId(groupFolder, null, created[0]);
+    persistTurn(
+      chatJid,
+      'env-user',
+      '记住代号 Atlas',
+      false,
+      '2026-08-18T12:00:00.000Z',
+    );
+    const prepared = applyProviderSwitchToInput(
+      conversationInput({ groupFolder, chatJid, sessionId: 'sess-on-a' }),
+      leaveSessionConnection(groupFolder, null),
+      null,
+    );
+    expect(prepared.sessionId).toBeUndefined();
+    expect(prepared.prompt).toContain('记住代号 Atlas');
+    expect(db.getSession(groupFolder, null)).toBeFalsy();
+    expect(db.getSessionProviderId(groupFolder, null)).toBeFalsy();
+    // Once: the next launch has nothing bound to leave.
+    expect(leaveSessionConnection(groupFolder, null)).toBeNull();
   });
 
   test('the same connection keeps the resume token and does not rewrite the prompt', () => {

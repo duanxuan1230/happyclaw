@@ -120,6 +120,7 @@ import {
   listConnectionModels,
   readStoredChoice,
   readStoredConnectionChoice,
+  resolveAgentLaunchModel,
   validateSessionChoice,
   type CodexSelectionView,
 } from '../session-model-overrides.js';
@@ -2482,6 +2483,22 @@ function resolveSessionModelSelectionScope(
   return { group, agentId };
 }
 
+/**
+ * The model a pick without a model runs on `provider`: the Agent's, when the
+ * pick is on the Agent's own connection and it still offers that model.
+ */
+function agentModelOn(
+  provider: ReturnType<typeof getProviders>[number],
+  profile: { model_config_id: string | null; model: string | null } | undefined,
+  groupFolder: string,
+): string | undefined {
+  if (profile?.model_config_id !== provider.id) return undefined;
+  return resolveAgentLaunchModel(provider, profile.model, {
+    groupFolder,
+    warn: false,
+  });
+}
+
 function buildSessionModelSelectionPayload(
   group: RegisteredGroup,
   agentId: string | null,
@@ -2551,7 +2568,11 @@ function buildSessionModelSelectionPayload(
     stored && view
       ? readStoredChoice(view, stored, canExceedCeiling)
       : stored && selectedProvider
-        ? readStoredConnectionChoice(selectedProvider, stored)
+        ? readStoredConnectionChoice(
+            selectedProvider,
+            stored,
+            agentModelOn(selectedProvider, profile, group.folder),
+          )
         : { model: null, effort: null };
 
   // A ChatGPT default runs at the effort its gateway resolves: the Agent's,
@@ -2571,7 +2592,9 @@ function buildSessionModelSelectionPayload(
     selectedEffort: selected.effort,
     default: {
       source: summary.source,
-      modelConfigId: summary.provider?.id ?? null,
+      modelConfigId: summary.modelConfigId,
+      // A set binding whose connection is gone: runs fail until it is fixed.
+      connectionMissing: summary.connectionMissing,
       model: summary.model,
       effort: defaultCodexView
         ? (defaultCodexView.models.find(
@@ -2609,17 +2632,21 @@ function applySessionChoiceChange(
   },
 ): { drained: number; liveUpdated: number } {
   const providers = getProviders();
-  // The model a configuration actually runs: its pick, else its own.
+  const profile = peekAgentProfileForWorkspace(group.folder, group.created_by);
+  // The model a configuration actually runs: its pick, else the Agent's on
+  // the Agent's own connection, else the connection's own.
   const launchKey = (
     choice: { modelConfigId: string | null; model: string | null } | null,
   ): string => {
     if (!choice?.modelConfigId) return '';
     const provider = providers.find((item) => item.id === choice.modelConfigId);
+    const agentModel =
+      profile?.model_config_id === choice.modelConfigId ? profile.model : null;
     const model = !provider
       ? ''
       : provider.codexOAuthCredentials
-        ? (choice.model ?? chatGptDefaultModel(provider))
-        : (choice.model ?? provider.anthropicModel);
+        ? (choice.model ?? agentModel ?? chatGptDefaultModel(provider))
+        : (choice.model ?? agentModel ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
   const jids = agentId
@@ -2628,10 +2655,6 @@ function applySessionChoiceChange(
   const effortChanged = (previous?.effort ?? null) !== next.effort;
   let drained = 0;
   if (launchKey(previous) !== launchKey(next)) {
-    const profile = peekAgentProfileForWorkspace(
-      group.folder,
-      group.created_by,
-    );
     const ranAgentModel =
       !previous && !!profile?.model_config_id && !!profile.model;
     const target =
@@ -2727,6 +2750,11 @@ groupRoutes.put('/:jid/model-selection', authMiddleware, async (c) => {
         target,
         { model: requestedModel, effort: requestedEffort },
         authUser,
+        agentModelOn(
+          target,
+          peekAgentProfileForWorkspace(group.folder, group.created_by),
+          group.folder,
+        ),
       );
       if (!checked.ok) return c.json(checked.rejection, 400);
       ({ model, effort } = checked);

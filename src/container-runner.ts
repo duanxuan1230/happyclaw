@@ -95,7 +95,6 @@ import {
   effectiveProviderModels,
   findModelEntry,
   launchModelName,
-  splitOneMillionSuffix,
   windowOf,
   type ModelEffort,
 } from './model-providers.js';
@@ -658,6 +657,14 @@ function ensureSettingsJson(
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  /**
+   * The effort the host resolved for this launch: Claude Code runs at it, and
+   * null means none is sent at all, not even the Agent's own effort as the
+   * SDK option. Absent without a connection (the Workspace's own
+   * environment) or on a ChatGPT subscription, whose gateway applies it:
+   * the Agent's effort then goes as before.
+   */
+  launchEffort?: string | null;
   /** Exact GroupQueue query attempt for Web stream fencing. */
   queryRunId?: string;
   groupFolder: string;
@@ -1251,11 +1258,23 @@ export interface AgentModelBinding {
 
 export interface ModelBinding {
   source: ModelBindingSource;
-  /** The connection the run uses; null for `workspace_env` and `none`. */
-  provider: UnifiedProvider | null;
   /**
-   * The model the profile that supplied the connection names in it. Null for
-   * a conversation pick, whose model comes with the pick.
+   * The connection the run uses; null for `workspace_env` and `none`, and
+   * for a binding whose connection is gone (connectionMissing).
+   */
+  provider: UnifiedProvider | null;
+  /** The connection the step names, also when it is missing. */
+  modelConfigId: string | null;
+  /**
+   * The step's binding names a connection that was deleted or has no
+   * credential. A set binding is authoritative: the run fails rather than
+   * moving to another connection.
+   */
+  connectionMissing?: boolean;
+  /**
+   * The model the profile that supplied the connection names in it. For a
+   * conversation pick, the Agent's own model when the pick is on the
+   * Agent's connection: it runs when the pick names no model.
    */
   model: string | null;
   /** The explicit effort of the main Agent the connection was inherited from. */
@@ -1272,32 +1291,55 @@ export function usableProvider(
   return provider && providerHasCredentials(provider) ? provider : null;
 }
 
+/** A set binding: its connection if usable, else marked missing. */
+function boundStep(
+  source: ModelBindingSource,
+  modelConfigId: string,
+  model: string | null,
+  providers: readonly UnifiedProvider[],
+): ModelBinding {
+  const provider = usableProvider(modelConfigId, providers);
+  return provider
+    ? { source, provider, modelConfigId, model }
+    : {
+        source,
+        provider: null,
+        modelConfigId,
+        model: null,
+        connectionMissing: true,
+      };
+}
+
 /**
  * The binding a main Agent hands down to Agents without their own: its
- * connection if usable, its model, its explicit effort.
+ * connection, its model, its explicit effort. Null when it binds nothing.
  */
 export function bindingFromMainProfile(
   source: 'owner_main' | 'system_main',
   profile: AgentProfile | undefined,
   providers: readonly UnifiedProvider[] = getProviders(),
 ): ModelBinding | null {
-  const provider = usableProvider(profile?.model_config_id, providers);
-  if (!profile || !provider) return null;
-  const inheritedEffort = resolveAgentSdkEffort(profile.runtime_policy);
-  return {
+  if (!profile?.model_config_id) return null;
+  const binding = boundStep(
     source,
-    provider,
-    model: profile.model,
-    ...(inheritedEffort ? { inheritedEffort } : {}),
-  };
+    profile.model_config_id,
+    profile.model,
+    providers,
+  );
+  const inheritedEffort = resolveAgentSdkEffort(profile.runtime_policy);
+  return binding.provider && inheritedEffort
+    ? { ...binding, inheritedEffort }
+    : binding;
 }
 
 /**
  * The connection a run uses, most specific first: the conversation's pick,
  * the Agent's own binding, the Workspace's own provider environment, the
  * owner's main Agent, the system main HappyClaw (main Agent of the earliest
- * active admin), none. A binding to a deleted connection or one without a
- * credential is skipped, never replaced by another connection. An inherited
+ * admin), none. A step that binds nothing is skipped. A conversation pick
+ * whose connection is gone reads as no pick; any other binding is
+ * authoritative, so a deleted or credential-less connection stops there
+ * (connectionMissing) instead of running on another account. An inherited
  * connection brings the model its profile names in it.
  *
  * Every launch, the chat picker's default and the Agent page call this, so
@@ -1315,13 +1357,31 @@ export function resolveModelBinding(
       getSessionModelSelection(session.groupFolder, session.agentId),
       providers,
     );
-    if (picked) return { source: 'session', provider: picked, model: null };
+    if (picked) {
+      return {
+        source: 'session',
+        provider: picked,
+        modelConfigId: picked.id,
+        model:
+          agent?.modelConfigId === picked.id ? (agent.model ?? null) : null,
+      };
+    }
   }
-  const own = usableProvider(agent?.modelConfigId, providers);
-  if (own)
-    return { source: 'agent', provider: own, model: agent?.model ?? null };
+  if (agent?.modelConfigId) {
+    return boundStep(
+      'agent',
+      agent.modelConfigId,
+      agent.model ?? null,
+      providers,
+    );
+  }
   if (session && workspaceHasProviderEnv(session.groupFolder)) {
-    return { source: 'workspace_env', provider: null, model: null };
+    return {
+      source: 'workspace_env',
+      provider: null,
+      modelConfigId: null,
+      model: null,
+    };
   }
   if (isDatabaseInitialized()) {
     const ownerMain = options.ownerUserId
@@ -1338,7 +1398,28 @@ export function resolveModelBinding(
       );
     if (inherited) return inherited;
   }
-  return { source: 'none', provider: null, model: null };
+  return { source: 'none', provider: null, modelConfigId: null, model: null };
+}
+
+/**
+ * Why a launch cannot run, or null: a set binding whose connection is gone,
+ * or no binding anywhere while connections exist. Prefixed so the host
+ * treats it as a deterministic configuration error, not a retry.
+ */
+export function modelBindingError(binding: ModelBinding): string | null {
+  if (binding.connectionMissing) {
+    const whose =
+      binding.source === 'agent'
+        ? '智能体'
+        : binding.source === 'owner_main'
+          ? '主智能体'
+          : '主 HappyClaw';
+    return `agent_profile_unavailable: ${whose}绑定的模型连接已删除或缺少凭据，请在智能体页重新选择`;
+  }
+  if (binding.source === 'none' && getProviders().length > 0) {
+    return 'agent_profile_unavailable: 还没有为主 HappyClaw 选择模型，请在设置或智能体页选择';
+  }
+  return null;
 }
 
 /** Whether the Workspace brings its own provider environment. */
@@ -1396,19 +1477,22 @@ export function resolveModelLaunch(
   options: { warn?: boolean } = {},
 ): ModelLaunch {
   const { provider } = binding;
+  // The profile's model; for a pick without a model on the Agent's own
+  // connection, the Agent's. A name saved with `[1m]` stays as it is: the
+  // launch reads it as 1M.
+  const profileModel = resolveAgentLaunchModel(provider, binding.model, {
+    groupFolder,
+    agentId,
+    warn: options.warn,
+  });
   const overrides: SessionLaunchOverrides =
     binding.source === 'session'
-      ? resolveSessionLaunchOverrides(groupFolder, agentId, provider, options)
-      : {
-          model: resolveAgentLaunchModel(provider, binding.model, {
-            groupFolder,
-            agentId,
-            warn: options.warn,
-          }),
-        };
-  const model = overrides.model
-    ? splitOneMillionSuffix(overrides.model).model
-    : undefined;
+      ? resolveSessionLaunchOverrides(groupFolder, agentId, provider, {
+          ...options,
+          unpickedModel: profileModel ?? provider.anthropicModel,
+        })
+      : {};
+  const model = overrides.model ?? profileModel;
   if (provider.codexOAuthCredentials) {
     const gatewayAgentEffort = agentEffort ?? binding.inheritedEffort;
     return {
@@ -1432,6 +1516,10 @@ export function resolveModelLaunch(
 export interface ModelBindingSummary {
   source: ModelBindingSource;
   provider: UnifiedProvider | null;
+  /** The connection the binding names, also when it is missing. */
+  modelConfigId: string | null;
+  /** The binding is set but its connection is gone: the run fails. */
+  connectionMissing: boolean;
   /** The model a launch runs; null for a pass-through relay or no connection. */
   model: string | null;
   /** Null when the model takes no effort or the gateway decides (ChatGPT). */
@@ -1444,9 +1532,17 @@ export function summarizeModelBinding(
   agentId: string | null | undefined,
   agentEffort: SdkAgentEffort | undefined,
 ): ModelBindingSummary {
-  const { provider, source } = binding;
+  const { provider, source, modelConfigId } = binding;
+  const connectionMissing = !!binding.connectionMissing;
   if (!provider) {
-    return { source, provider, model: null, effort: null };
+    return {
+      source,
+      provider,
+      modelConfigId,
+      connectionMissing,
+      model: null,
+      effort: null,
+    };
   }
   const launch = resolveModelLaunch(
     { ...binding, provider },
@@ -1458,6 +1554,8 @@ export function summarizeModelBinding(
   return {
     source,
     provider,
+    modelConfigId,
+    connectionMissing,
     model: provider.codexOAuthCredentials
       ? chatGptLaunchModel(launch.model, provider)
       : launch.model || provider.anthropicModel || null,
@@ -1483,8 +1581,10 @@ export function willClearSessionOnProviderSwitch(
     { modelConfigId, model: agentModel },
     { groupFolder, agentId },
   );
-  if (!binding.provider) return false;
   const boundId = getSessionProviderId(groupFolder, agentId);
+  // Without a connection the launch fails, or runs the Workspace's own
+  // environment, which is another account than a bound session's.
+  if (!binding.provider) return !modelBindingError(binding) && !!boundId;
   if (boundId && boundId !== binding.provider.id) return true;
   return launchModelWillChange(groupFolder, agentId, {
     ...binding,
@@ -1631,6 +1731,8 @@ export function trySelectPoolProvider(
     { modelConfigId, model: agentModel },
     { groupFolder, agentId },
   );
+  const error = modelBindingError(binding);
+  if (error) throw new Error(error);
   const { provider } = binding;
   if (!provider) return null;
   const existingBoundId = getSessionProviderId(groupFolder, agentId);
@@ -1666,6 +1768,9 @@ export function trySelectPoolProvider(
       ...(launch.gatewayAgentEffort
         ? { gatewayAgentEffort: launch.gatewayAgentEffort }
         : {}),
+      ...(provider.codexOAuthCredentials
+        ? {}
+        : { launchEffort: launch.effort }),
     },
     groupFolder,
     agentId,
@@ -1692,6 +1797,44 @@ export interface PoolProviderSelection {
   sessionEffort?: string;
   /** ChatGPT: the Agent-level effort the gateway applies without a pick. */
   gatewayAgentEffort?: string;
+  /** ContainerInput.launchEffort for this launch; absent on ChatGPT. */
+  launchEffort?: string | null;
+}
+
+/**
+ * A launch that runs without a connection (the Workspace's own environment)
+ * on a Session whose SDK session ran on one: that session belongs to another
+ * account, so it starts over, seeded with history, and the binding is
+ * dropped so the switch happens once.
+ */
+export function leaveSessionConnection(
+  groupFolder: string,
+  agentId: string | null | undefined,
+): {
+  profileId: string;
+  previousProviderId: string;
+  resetSession: true;
+} | null {
+  const boundId = getSessionProviderId(groupFolder, agentId);
+  if (!boundId) return null;
+  setSessionProviderId(groupFolder, agentId, null);
+  return { profileId: '', previousProviderId: boundId, resetSession: true };
+}
+
+/** The input a launch starts with: a connection switch, its effort. */
+export function prepareLaunchInput(
+  input: ContainerInput,
+  selection: PoolProviderSelection | null,
+  sessionAgentId: string | undefined,
+): ContainerInput {
+  const switched = applyProviderSwitchToInput(
+    input,
+    selection ?? leaveSessionConnection(input.groupFolder, sessionAgentId),
+    sessionAgentId,
+  );
+  return selection?.launchEffort !== undefined
+    ? { ...switched, launchEffort: selection.launchEffort }
+    : switched;
 }
 
 /**
@@ -2877,7 +3020,7 @@ export async function runContainerAgent(
   let providerFailureDecision: ContainerOutput | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
-  input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
+  input = prepareLaunchInput(input, poolResult, sessionAgentId);
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -3986,7 +4129,7 @@ export async function runHostAgent(
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
-  input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
+  input = prepareLaunchInput(input, hostPoolResult, sessionAgentId);
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,

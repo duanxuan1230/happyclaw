@@ -75,15 +75,34 @@ function offersModel(provider: ModelConfiguration, model: string): boolean {
   return !!findProviderModel(provider, splitOneMillionSuffix(model).model);
 }
 
+/**
+ * The efforts `model` of a connection takes: a ChatGPT subscription's from
+ * its account catalog, any other's from its capabilities. A name saved with
+ * `[1m]` is the same model.
+ */
+export function modelEffortsFor(
+  provider: ModelConfiguration,
+  model: string,
+): readonly string[] {
+  if (!model) return [];
+  if (provider.codexOAuthCredentials) {
+    const id = splitOneMillionSuffix(model).model;
+    return (
+      listCodexModelsForProvider(provider).models.find(
+        (entry) => entry.value === id,
+      )?.efforts ?? []
+    );
+  }
+  return connectionModelCapabilities(provider, model).efforts;
+}
+
 function modelTakesEffort(
   provider: ModelConfiguration,
   model: string,
   effort: string,
 ): boolean {
   return (
-    !!model &&
-    isModelEffort(effort) &&
-    connectionModelCapabilities(provider, model).efforts.includes(effort)
+    isModelEffort(effort) && modelEffortsFor(provider, model).includes(effort)
   );
 }
 
@@ -115,6 +134,8 @@ export function resolveLaunchEffort(
 function checkConnectionChoice(
   provider: ModelConfiguration,
   stored: { model: string | null; effort: string | null },
+  /** What runs without a model pick: the Agent's model on its connection. */
+  unpickedModel: string = provider.anthropicModel,
 ): {
   model: string | null;
   effort: string | null;
@@ -122,12 +143,10 @@ function checkConnectionChoice(
   staleEffort: boolean;
 } {
   const model =
-    stored.model && offersModel(provider, stored.model)
-      ? splitOneMillionSuffix(stored.model).model
-      : null;
+    stored.model && offersModel(provider, stored.model) ? stored.model : null;
   const effort =
     stored.effort &&
-    modelTakesEffort(provider, model ?? provider.anthropicModel, stored.effort)
+    modelTakesEffort(provider, model ?? unpickedModel, stored.effort)
       ? stored.effort
       : null;
   return {
@@ -142,9 +161,15 @@ function checkConnectionChoice(
 export function readStoredConnectionChoice(
   provider: ModelConfiguration,
   stored: { model: string | null; effort: string | null },
+  unpickedModel?: string,
 ): { model: string | null; effort: string | null } {
-  const { model, effort } = checkConnectionChoice(provider, stored);
-  return { model, effort };
+  const { model, effort } = checkConnectionChoice(
+    provider,
+    stored,
+    unpickedModel,
+  );
+  // The picker lists ids; a name saved with `[1m]` is that id.
+  return { model: model && splitOneMillionSuffix(model).model, effort };
 }
 
 export interface SessionLaunchOverrides {
@@ -185,7 +210,7 @@ export function resolveSessionLaunchOverrides(
   groupFolder: string,
   agentId: string | null | undefined,
   provider: ModelConfiguration,
-  options: { warn?: boolean } = {},
+  options: { warn?: boolean; unpickedModel?: string } = {},
 ): SessionLaunchOverrides {
   const detail = getSessionModelSelectionDetail(groupFolder, agentId);
   if (
@@ -196,7 +221,11 @@ export function resolveSessionLaunchOverrides(
     return {};
   }
   if (!provider.codexOAuthCredentials) {
-    const choice = checkConnectionChoice(provider, detail);
+    const choice = checkConnectionChoice(
+      provider,
+      detail,
+      options.unpickedModel,
+    );
     if (choice.staleModel && options.warn !== false) {
       logger.warn(
         {
@@ -279,9 +308,7 @@ export function resolveAgentLaunchModel(
       authoritative: source === 'live',
     }).model;
   } else {
-    model = offersModel(provider, agentModel)
-      ? splitOneMillionSuffix(agentModel).model
-      : null;
+    model = offersModel(provider, agentModel) ? agentModel : null;
   }
   if (!model && context.warn !== false) {
     logger.warn(
@@ -494,6 +521,8 @@ export function validateSessionChoice(
   provider: ModelConfiguration,
   requested: { model?: string | null; effort?: string | null },
   chooser: Parameters<typeof hasPermission>[0],
+  /** What runs without a model pick: the Agent's model on its connection. */
+  unpickedModel: string = provider.anthropicModel,
 ):
   | { ok: true; model: string | null; effort: string | null }
   | { ok: false; rejection: SessionChoiceRejection } {
@@ -509,7 +538,7 @@ export function validateSessionChoice(
         },
       };
     }
-    const runs = model ?? provider.anthropicModel;
+    const runs = model ?? unpickedModel;
     if (effort && !modelTakesEffort(provider, runs, effort)) {
       return {
         ok: false,

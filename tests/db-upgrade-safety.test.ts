@@ -215,8 +215,6 @@ describe('schema version head', () => {
     // v85: scheduled tasks become automations (automations, automation_runs,
     // automation_failure_streaks); scheduled_tasks, task_runs, task_run_logs
     // and task_failure_notices are dropped (automation-migration.test.ts).
-    // v86: stored model names lose Claude Code's `[1m]` switch, the window
-    // being a field of the connection's model (schema-v86-model-names.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(86);
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(85);
   });
 });

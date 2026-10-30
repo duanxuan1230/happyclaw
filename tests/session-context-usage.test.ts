@@ -286,17 +286,26 @@ describe('the window when Claude Code has not reported one', () => {
     db.setSessionProviderId(FOLDER, null, provider.id);
   }
 
-  test("an official connection runs a model at the model's own window", async () => {
-    // Under 200K, so only the connection's kind can tell the window.
+  test('an official connection: the declared window, else 1M for a [1m] name, else 200K', async () => {
+    // The registry's 1M for opus is not used: on an official connection
+    // `[1m]` is the billed opt-in, which only a declared window turns on.
     session([assistant('claude-opus-5-5', 150_000, 0, 0)], { model: 'opus' });
-    bound(
-      runtimeConfig.createProvider({
-        name: 'Claude',
-        type: 'official',
-        anthropicApiKey: 'sk-ant-api03-official-key',
-        anthropicModel: 'opus',
-      }),
-    );
+    const official = runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      anthropicApiKey: 'sk-ant-api03-official-key',
+      anthropicModel: 'opus',
+    });
+    bound(official);
+    expect(await usage.readSessionContextUsage(FOLDER, null)).toMatchObject({
+      contextWindow: 200_000,
+      percentage: 75,
+    });
+    // A session recorded with `[1m]` before the window was a field.
+    session([assistant('claude-opus-5-5', 150_000, 0, 0)], {
+      model: 'opus[1m]',
+    });
+    bound(official);
     expect(await usage.readSessionContextUsage(FOLDER, null)).toMatchObject({
       contextWindow: 1_000_000,
       percentage: 15,

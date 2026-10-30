@@ -353,6 +353,7 @@ describe('POST /:id/duplicate', () => {
       anthropicBaseUrl: 'https://copy.example.test',
       anthropicAuthToken: 'copy-token',
       anthropicModel: 'copy-model',
+      models: [{ id: 'copy-model', efforts: ['low', 'high'] }],
       enabled: true,
     });
     const source = db.createAgentProfile({
@@ -968,9 +969,9 @@ describe('governance and capability preview', () => {
       (await resolve({ model_config_id: 'deleted-connection', model: null }))
         .body.model_resolution,
     ).toEqual({
-      // Skipped, not replaced: nothing else is bound here.
-      source: 'none',
-      model_config_id: null,
+      // A set binding is authoritative: runs fail until it is chosen again.
+      source: 'agent',
+      model_config_id: 'deleted-connection',
       model_config_name: null,
       model: null,
       effort: null,

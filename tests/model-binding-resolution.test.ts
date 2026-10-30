@@ -186,19 +186,55 @@ describe('resolveModelBinding', () => {
     expect(resolve()).toEqual({ source: 'none', id: null });
   });
 
-  test('a deleted connection or one without a credential is skipped, never replaced', () => {
+  test('a stale pick reads as none; a set binding that is gone stops there', () => {
     bind('admin-first', 'C');
-    bind('member', 'gone');
     db.setSessionModelSelection('grp', null, 'B', 'member');
     mocks.providers = [
-      provider('A'),
       provider('B', { anthropicAuthToken: '' }),
       provider('C'),
     ];
-    // Session pick B lost its key, the Agent's A was deleted, the owner main
-    // names a deleted connection: the system main decides.
-    mocks.providers = mocks.providers.filter((p) => p.id !== 'A');
-    expect(resolve('A')).toEqual({ source: 'system_main', id: 'C' });
+    const missing = (agentConfigId: string | null) =>
+      runner.resolveModelBinding({ modelConfigId: agentConfigId }, session);
+    // Session pick B lost its key: back to the default, the Agent's binding,
+    // whose connection A was deleted. That is authoritative.
+    expect(missing('A')).toMatchObject({
+      source: 'agent',
+      provider: null,
+      modelConfigId: 'A',
+      connectionMissing: true,
+    });
+    expect(runner.modelBindingError(missing('A'))).toMatch(
+      /智能体绑定的模型连接已删除或缺少凭据/,
+    );
+    // An unbound Agent: the owner main names a deleted connection; the system
+    // main is not consulted.
+    bind('member', 'gone');
+    expect(missing(null)).toMatchObject({
+      source: 'owner_main',
+      modelConfigId: 'gone',
+      connectionMissing: true,
+    });
+    bind('member', null);
+    expect(resolve()).toEqual({ source: 'system_main', id: 'C' });
+    expect(runner.modelBindingError(missing(null))).toBeNull();
+  });
+
+  test('nothing bound is an error only while connections exist', () => {
+    const none = runner.resolveModelBinding({}, session);
+    expect(none.source).toBe('none');
+    expect(runner.modelBindingError(none)).toMatch(/还没有为主 HappyClaw/);
+    mocks.providers = [];
+    expect(runner.modelBindingError(none)).toBeNull();
+  });
+
+  test('a disabled admin stays the system main', () => {
+    bind('admin-first', 'C');
+    db.updateUserFields('admin-first', { status: 'disabled' } as never);
+    try {
+      expect(resolve()).toEqual({ source: 'system_main', id: 'C' });
+    } finally {
+      db.updateUserFields('admin-first', { status: 'active' } as never);
+    }
   });
 
   test('enabled plays no part', () => {
