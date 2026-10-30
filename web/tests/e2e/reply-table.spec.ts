@@ -24,14 +24,21 @@ test.describe('reply tables', () => {
     const tools = block.locator('[data-md-table-tools]');
     // Hidden until the table is hovered or a tool has focus; always shown to touch.
     const copyButton = tools.getByRole('button', { name: /复制表格/ });
-    if (page.viewportSize()!.width >= 640) {
+    const coarse = await page.evaluate(
+      () => matchMedia('(pointer: coarse)').matches,
+    );
+    if (!coarse) {
       await expect(tools).toHaveCSS('opacity', '0');
       await copyButton.focus();
     }
     await expect(tools).toHaveCSS('opacity', '1');
 
-    await tools.getByRole('button', { name: /复制表格/ }).click();
+    await copyButton.click();
     await expect(tools).toContainText('已复制');
+    // Announced to a screen reader, which does not see the icon change.
+    await expect(tools.locator('[aria-live="polite"]')).toHaveText(
+      '已复制表格',
+    );
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     const header = (await block.locator('th').allTextContents()).map((h) =>
       h.trim(),
@@ -55,9 +62,24 @@ test.describe('reply tables', () => {
     expect(csv.startsWith(`\ufeff${header.join(',')}\r\n`)).toBe(true);
 
     const first = block.locator('td').first();
-    const narrow = page.viewportSize()!.width < 640;
-    await expect(first).toHaveCSS('position', narrow ? 'sticky' : 'static');
-    if (narrow) {
+    // The `phone` variant: touch and narrower than the desktop layout.
+    const phone = await page.evaluate(
+      () => matchMedia('(max-width: 1023px) and (pointer: coarse)').matches,
+    );
+    await expect(first).toHaveCSS('position', phone ? 'sticky' : 'static');
+    if (phone) {
+      // The pinned cell paints the surface it sits on: the page background,
+      // or what a container (a card, a sheet) sets as `--md-table-bg`.
+      expect(
+        await first.evaluate((cell) => getComputedStyle(cell).backgroundColor),
+      ).not.toBe('rgba(0, 0, 0, 0)');
+      await block.evaluate((element) =>
+        element.style.setProperty('--md-table-bg', 'rgb(1, 2, 3)'),
+      );
+      await expect(first).toHaveCSS('background-color', 'rgb(1, 2, 3)');
+      await block.evaluate((element) =>
+        element.style.removeProperty('--md-table-bg'),
+      );
       // Scrolled sideways, the pinned column is not washed out by the fade.
       const scroller = sink
         .locator('[data-md-table]', { hasText: '列 1 Column' })

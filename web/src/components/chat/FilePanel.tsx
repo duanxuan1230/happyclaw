@@ -226,7 +226,7 @@ type PreviewState =
 const PREVIEW_FRAME_CLASS =
   'inset-0 h-[100dvh] w-screen sm:left-1/2 sm:top-1/2 sm:h-[90vh] sm:w-[calc(100vw-2rem)] sm:max-w-4xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:supports-[height:100dvh]:h-[90dvh]';
 const PREVIEW_SHELL_CLASS =
-  'flex h-full w-full flex-col bg-surface-raised sm:animate-in sm:rounded-xl sm:shadow-floating sm:ring-1 sm:ring-foreground/10 sm:duration-200 sm:zoom-in-95';
+  'flex h-full w-full flex-col bg-surface-raised [--md-table-bg:var(--surface-raised)] sm:animate-in sm:rounded-xl sm:shadow-floating sm:ring-1 sm:ring-foreground/10 sm:duration-200 sm:zoom-in-95';
 const PREVIEW_HEADER_CLASS =
   'flex h-12 shrink-0 items-center justify-between gap-2 border-b border-surface-border pr-2 pl-3 sm:pl-4';
 // Keyboard hints only; a phone has no Esc or Ctrl+S to press.

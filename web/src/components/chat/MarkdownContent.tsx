@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { useIsPhone } from '../layout/phone';
 import { DetailSheet } from './DetailSheet';
-import { downloadFromUrl } from '../../utils/download';
+import { downloadFromUrl, downloadTextFile } from '../../utils/download';
 import { ImageLightbox } from './ImageLightbox';
 import {
   resolveMarkdownImageSrc,
@@ -227,9 +227,11 @@ function extractText(node: React.ReactNode): string {
 /**
  * On a phone a wide table scrolls sideways under its first column, so the
  * row it is reading stays named. Not in a shared image, which does not scroll.
+ * The pinned cells paint `--md-table-bg`, the surface the reply sits on: a
+ * container that is not the page background (a card, a sheet) sets it.
  */
 const STICKY_FIRST_CELL =
-  'max-sm:first:sticky max-sm:first:left-0 max-sm:first:z-1 max-sm:first:shadow-[inset_-1px_0_0_var(--surface-border)] [.share-card-content_&]:static';
+  'phone:first:sticky phone:first:left-0 phone:first:z-1 phone:first:shadow-[inset_-1px_0_0_var(--surface-border)] [.share-card-content_&]:static';
 
 /**
  * A reply's table, with 复制 (tab-separated, so a spreadsheet paste splits it
@@ -240,16 +242,8 @@ function MarkdownTable({ children }: { children: React.ReactNode }) {
   const tableRef = useRef<HTMLTableElement>(null);
   const { copied, copy } = useCopyFeedback();
   const rows = () => (tableRef.current ? readTable(tableRef.current) : []);
-  const download = () => {
-    const url = URL.createObjectURL(
-      new Blob([toCsv(rows())], { type: 'text/csv;charset=utf-8' }),
-    );
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = csvFileName();
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  };
+  const download = () =>
+    downloadTextFile(toCsv(rows()), csvFileName(), 'text/csv;charset=utf-8');
   const tool =
     'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5';
   return (
@@ -278,12 +272,15 @@ function MarkdownTable({ children }: { children: React.ReactNode }) {
         <button
           type="button"
           onClick={() => copy(toTsv(rows()))}
-          aria-label={copied ? '已复制表格' : '复制表格，可直接粘贴到表格软件'}
+          aria-label="复制表格，可直接粘贴到表格软件"
           className={tool}
         >
           {copied ? <Check size={13} /> : <Copy size={13} />}
           {copied ? '已复制' : '复制'}
         </button>
+        <span className="sr-only" aria-live="polite">
+          {copied ? '已复制表格' : ''}
+        </span>
         <button
           type="button"
           onClick={download}
@@ -669,7 +666,7 @@ function markdownComponents(
         className={cn(
           'border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75',
           STICKY_FIRST_CELL,
-          'max-sm:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--background))]',
+          'phone:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--md-table-bg,var(--background)))]',
         )}
       >
         {children}
@@ -682,7 +679,7 @@ function markdownComponents(
           'min-w-[6rem] max-w-[28rem] px-3 py-2 text-start align-top whitespace-normal text-foreground [overflow-wrap:anywhere]',
           tableTextClass,
           STICKY_FIRST_CELL,
-          'max-sm:first:bg-background',
+          'phone:first:bg-[var(--md-table-bg,var(--background))]',
         )}
       >
         {children}

@@ -138,7 +138,7 @@ function SearchResultItem({
               )}
 
               {detail.readme && (
-                <div className="mt-2 max-h-64 overflow-y-auto rounded-lg bg-surface-hover p-3 ring-1 ring-surface-border">
+                <div className="mt-2 max-h-64 overflow-y-auto rounded-lg bg-surface-hover p-3 ring-1 ring-surface-border [--md-table-bg:color-mix(in_oklab,var(--foreground)_5%,var(--surface-raised))]">
                   <MarkdownRenderer content={detail.readme} variant="docs" />
                 </div>
               )}

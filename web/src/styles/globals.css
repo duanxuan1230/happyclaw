@@ -885,8 +885,9 @@ pre code.language-diff .hljs-deletion {
   mask-image: linear-gradient(to bottom, transparent, #000 1.75rem);
 }
 /* A phone pins a reply table's first column (MarkdownTable), so the start
-   edge hides nothing and fading it would only wash out that column. */
-@media (width < 40rem) {
+   edge hides nothing and fading it would only wash out that column. The
+   query is the `phone` variant's. */
+@media (max-width: 1023px) and (pointer: coarse) {
   [data-md-table] [data-scroll-fade='start'] {
     -webkit-mask-image: none;
     mask-image: none;
