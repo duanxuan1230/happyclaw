@@ -43,6 +43,7 @@ import {
   countAgentProfilesByModelConfigId,
   countSessionModelSelectionsForModelConfig,
   listAgentProfilesUsingModels,
+  listSessionNamespacesForProviderId,
 } from '../db.js';
 import { parseChannelAddress } from '../channel-address.js';
 import { conversationBindingPolicyError } from '../channel-conversation-kind.js';
@@ -78,7 +79,6 @@ import {
   UnifiedProviderSecretsSchema,
   ProviderConnectivityTestSchema,
   ProviderDiscoverModelsSchema,
-  BalancingConfigSchema,
   type ProviderConnectivityTestInput,
 } from '../schemas.js';
 import {
@@ -87,22 +87,15 @@ import {
   appendClaudeConfigAudit,
   getProviders,
   getProviderById,
-  getEnabledProviders,
-  getDefaultModelConfigId,
-  getUsableDefaultProvider,
-  setDefaultModelConfig,
-  DEFAULT_MODEL_DISABLE_ERROR,
-  getBalancingConfig,
-  saveBalancingConfig,
+  getGlobalProvider,
   createProvider,
   nextProviderModelList,
   providerModels,
   recordProviderTest,
   updateProvider,
   updateProviderSecrets,
-  setProviderEnabled,
   duplicateProvider,
-  providerHasCredentials,
+  reservedConnectionEnvError,
   validateProviderCustomEnv,
   deleteProvider,
   providerToConfig,
@@ -236,11 +229,12 @@ import {
 } from '../provider-connectivity.js';
 import {
   classifyProviderError,
+  CONNECTION_ENV_PREFILL,
   findPresetsByBaseUrl,
   getModelPreset,
   modelsUrlFor,
   normalizeProviderBaseUrl,
-  presetModelEntryId,
+  presetModelEntry,
   splitOneMillionSuffix,
   type ModelPreset,
   type ProviderErrorCode,
@@ -646,15 +640,6 @@ function syncProviderSessionCaches(affectedFolders: string[]): void {
   }
 }
 
-/**
- * Whether a new connection that did not say starts enabled: only when no
- * other connection is. A second connection must not quietly turn a single
- * connection into a rotating pool.
- */
-function newConnectionJoinsPool(): boolean {
-  return getEnabledProviders().length === 0;
-}
-
 /** The models a connection offers once an edit is saved. */
 function providerModelsAfterEdit(
   previous: UnifiedProvider,
@@ -670,7 +655,7 @@ function providerModelsAfterEdit(
       : previous.anthropicModel;
   return providerModels({
     anthropicBaseUrl: patch.anthropicBaseUrl ?? previous.anthropicBaseUrl,
-    anthropicModel,
+    anthropicModel: splitOneMillionSuffix(anthropicModel).model,
     models: nextProviderModelList(previous, {
       anthropicModel,
       models: patch.models,
@@ -679,13 +664,15 @@ function providerModelsAfterEdit(
 }
 
 /**
- * Whether runners may be using this provider. The automatic pool only picks
- * enabled ones, but an Agent binding or a conversation's model pick can run
- * any saved configuration — those need the same runtime cleanup on a change.
+ * Whether runners may be using this provider: a stored session ran on it, an
+ * Agent binds it (directly or as the main Agent others follow), a
+ * conversation picked it, or it is the connection host-side calls and unbound
+ * launches fall back to.
  */
 function providerMayHaveRunners(provider: UnifiedProvider): boolean {
   return (
-    provider.enabled ||
+    getGlobalProvider()?.id === provider.id ||
+    listSessionNamespacesForProviderId(provider.id).length > 0 ||
     countAgentProfilesByModelConfigId(provider.id) > 0 ||
     countSessionModelSelectionsForModelConfig(provider.id) > 0
   );
@@ -1462,116 +1449,17 @@ configRoutes.get('/claude', authMiddleware, systemConfigMiddleware, (c) => {
   }
 });
 
-// ─── GET /claude/providers — 列出所有供应商 + 健康 + 负载均衡配置 ─────
+// ─── GET /claude/providers — 列出所有模型连接 ─────
 configRoutes.get(
   '/claude/providers',
   authMiddleware,
   systemConfigMiddleware,
   (c) => {
     try {
-      const providers = getProviders();
-      const balancing = getBalancingConfig();
-      const enabledProviders = getEnabledProviders();
-
-      // Refresh pool state for health info
-      providerPool.refreshFromConfig(enabledProviders, balancing);
-      const healthStatuses = providerPool.getHealthStatuses();
-
-      return c.json({
-        providers: providers.map((p) => ({
-          ...toPublicProvider(p),
-          health: healthStatuses.find((h) => h.profileId === p.id) || null,
-        })),
-        balancing,
-        enabledCount: enabledProviders.length,
-        // The default that actually applies: one that lost its credential
-        // pins nothing, so the page must not present it as the default.
-        defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
-      });
+      return c.json({ providers: getProviders().map(toPublicProvider) });
     } catch (err) {
       logger.error({ err }, 'Failed to list providers');
       return c.json({ error: 'Failed to list providers' }, 500);
-    }
-  },
-);
-
-// ─── PUT /claude/default — 设置或取消默认模型配置 ─────
-// providerId=null 取消默认，回到已启用配置的自动轮换。
-configRoutes.put(
-  '/claude/default',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    const body = await c.req.json().catch(() => ({}));
-    const raw = (body as { modelConfigId?: unknown }).modelConfigId;
-    if (raw !== null && (typeof raw !== 'string' || !raw.trim())) {
-      return c.json(
-        { error: 'modelConfigId must be a non-empty string or null' },
-        400,
-      );
-    }
-    const modelConfigId = raw === null ? null : (raw as string).trim();
-    const actor = (c.get('user') as AuthUser).username;
-
-    try {
-      return await withClaudeConfigMutationLock(async () => {
-        const previousId = getDefaultModelConfigId();
-        const target = modelConfigId
-          ? getProviders().find((provider) => provider.id === modelConfigId)
-          : null;
-        // Refuse before any runner is stopped.
-        if (modelConfigId) {
-          if (!target) throw new Error('未找到指定模型配置');
-          if (!providerHasCredentials(target)) {
-            throw new Error(
-              '该模型配置还没有可用的凭据，请先填写密钥或完成授权',
-            );
-          }
-        }
-        if (previousId === modelConfigId && (!target || target.enabled)) {
-          return c.json({
-            defaultModelConfigId: previousId,
-            provider: target ? toPublicProvider(target) : null,
-            applied: {
-              success: true,
-              stoppedCount: 0,
-              failedCount: 0,
-              persisted: true,
-            },
-          });
-        }
-        const mutation = await mutateClaudeConfigForAllGroups(
-          actor,
-          {
-            trigger: 'default_model_update',
-            previousModelConfigId: previousId,
-            modelConfigId,
-          },
-          () => {
-            const provider = setDefaultModelConfig(modelConfigId);
-            appendClaudeConfigAuditBestEffort(
-              actor,
-              modelConfigId ? 'set_default_model' : 'clear_default_model',
-              modelConfigId ? [`id:${modelConfigId}`] : [],
-            );
-            return provider;
-          },
-        );
-        const provider = mutation.value ?? null;
-        const payload = {
-          defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
-          provider: provider ? toPublicProvider(provider) : null,
-          applied: mutation.applied,
-        };
-        return mutation.applied.success
-          ? c.json(payload)
-          : c.json({ error: mutation.applied.error, ...payload }, 503);
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to set default model';
-      logger.warn({ err, modelConfigId }, 'Failed to set default model');
-      return c.json({ error: message }, 400);
     }
   },
 );
@@ -1591,6 +1479,8 @@ configRoutes.post(
       );
     }
 
+    const reserved = reservedConnectionEnvError(validation.data.customEnv);
+    if (reserved) return c.json(reserved, 400);
     const envError = validateProviderCustomEnv(validation.data.customEnv ?? {});
     if (envError) return c.json({ error: envError }, 400);
     // A connection without a credential could neither be tested nor run.
@@ -1608,7 +1498,12 @@ configRoutes.post(
     }
 
     const actor = (c.get('user') as AuthUser).username;
-    const { claudeCredentialInput, ...createInput } = validation.data;
+    const {
+      claudeCredentialInput,
+      enabled: _enabled,
+      weight: _weight,
+      ...createInput
+    } = validation.data;
     let pasted: ReturnType<typeof claudeCredentialInputFields>;
     try {
       pasted = claudeCredentialInputFields(
@@ -1633,7 +1528,6 @@ configRoutes.post(
           (createInput.type === 'third_party'
             ? getModelPreset(createInput.presetId)?.baseUrl
             : undefined),
-        enabled: createInput.enabled ?? newConnectionJoinsPool(),
       });
       appendClaudeConfigAudit(actor, 'create_provider', [
         `id:${provider.id}`,
@@ -1666,13 +1560,19 @@ configRoutes.patch(
       );
     }
     if (validation.data.customEnv) {
+      const reserved = reservedConnectionEnvError(validation.data.customEnv);
+      if (reserved) return c.json(reserved, 400);
       const envError = validateProviderCustomEnv(validation.data.customEnv);
       if (envError) return c.json({ error: envError }, 400);
     }
 
     const actor = (c.get('user') as AuthUser).username;
-    const { anthropicAuthToken, clearAnthropicAuthToken, ...providerPatch } =
-      validation.data;
+    const {
+      anthropicAuthToken,
+      clearAnthropicAuthToken,
+      weight: _weight,
+      ...providerPatch
+    } = validation.data;
     const tokenChange =
       anthropicAuthToken !== undefined
         ? { anthropicAuthToken }
@@ -1690,13 +1590,6 @@ configRoutes.patch(
         if (tokenChange && previous.codexOAuthCredentials) {
           throw new Error('ChatGPT 订阅配置的网关凭据由系统管理');
         }
-        if (
-          clearAnthropicAuthToken &&
-          previous.enabled &&
-          !previous.anthropicApiKey
-        ) {
-          throw new Error('该配置正在启用，请先停用再清空密钥');
-        }
         const changedFields = Object.keys(validation.data).map(
           (k) => `${k}:updated`,
         );
@@ -1704,16 +1597,13 @@ configRoutes.patch(
           validation.data.anthropicBaseUrl !== undefined &&
           validation.data.anthropicBaseUrl !== previous.anthropicBaseUrl
         );
+        // `[1m]` from an older client only sets the model's window, which
+        // is not a model change.
         const modelChanged = !!(
           validation.data.anthropicModel !== undefined &&
-          validation.data.anthropicModel !== previous.anthropicModel
+          splitOneMillionSuffix(validation.data.anthropicModel).model !==
+            previous.anthropicModel
         );
-        // Toggling 1M on the default keeps the upstream model: runners pick
-        // up the new window, but the SDK sessions stay valid.
-        const upstreamModelChanged =
-          modelChanged &&
-          splitOneMillionSuffix(validation.data.anthropicModel!).model !==
-            splitOneMillionSuffix(previous.anthropicModel).model;
         const customEnvChanged = !!(
           validation.data.customEnv !== undefined &&
           JSON.stringify(validation.data.customEnv) !==
@@ -1740,7 +1630,6 @@ configRoutes.patch(
           tokenChanged ||
           authModeChanged;
         const nextModels = providerModelsAfterEdit(previous, providerPatch);
-        // Toggling 1M renames a model, so it counts as a removal too.
         const removedModels = providerModels(previous)
           .map((entry) => entry.id)
           .filter((model) => !nextModels.some((entry) => entry.id === model));
@@ -1761,12 +1650,12 @@ configRoutes.patch(
         const pendingInvalidation = getPendingProviderSessionInvalidation(id);
         const sessionsInvalidated =
           baseUrlChanged ||
-          upstreamModelChanged ||
+          modelChanged ||
           customEnvChanged ||
           tokenChanged ||
           authModeChanged;
         const onlyDefaultModelChanged =
-          upstreamModelChanged &&
+          modelChanged &&
           !baseUrlChanged &&
           !customEnvChanged &&
           !tokenChanged &&
@@ -1774,7 +1663,7 @@ configRoutes.patch(
           !pendingInvalidation;
         const sessionInvalidation = {
           modelChanged:
-            upstreamModelChanged || pendingInvalidation?.modelChanged === true,
+            modelChanged || pendingInvalidation?.modelChanged === true,
           baseUrlChanged:
             baseUrlChanged ||
             tokenChanged ||
@@ -1810,10 +1699,10 @@ configRoutes.patch(
         };
 
         // Only what a running runner was launched with stops it: the endpoint,
-        // the key and its header style, the env, the default model, or a model
-        // a session may be running. A name, a weight, a model's visibility or
-        // effort, an added model or the preset reach the next pick or launch
-        // by themselves.
+        // the key and its header style, the env, the connection's model, or a
+        // model a session may be running. A name, a model's window or
+        // efforts, the roles, an added model or the preset reach the next
+        // launch by themselves.
         const runnerEnvironmentChanged =
           protocolFieldChanged || removedModels.length > 0;
 
@@ -2016,12 +1905,9 @@ configRoutes.delete(
           modelChanged: true,
           baseUrlChanged: true,
         };
-        // Deleting the default returns unselected conversations to the
-        // automatic pool; the operator is told, and the audit says so.
-        const wasDefault = !!previous && getDefaultModelConfigId() === id;
         const mutation = await mutateClaudeConfigForAllGroups(
           actor,
-          { trigger: 'provider_delete', providerId: id, wasDefault },
+          { trigger: 'provider_delete', providerId: id },
           () => {
             if (previous) {
               deleteProvider(id);
@@ -2029,7 +1915,6 @@ configRoutes.delete(
               invalidateProviderUsageCache(id);
               appendClaudeConfigAuditBestEffort(actor, 'delete_provider', [
                 `id:${id}`,
-                ...(wasDefault ? ['default_cleared'] : []),
               ]);
             }
             return { id };
@@ -2061,79 +1946,12 @@ configRoutes.delete(
             503,
           );
         }
-        return c.json({
-          ok: true,
-          applied: mutation.applied,
-          defaultCleared: wasDefault,
-        });
+        return c.json({ ok: true, applied: mutation.applied });
       });
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Failed to delete provider';
       logger.warn({ err }, 'Failed to delete provider');
-      return c.json({ error: message }, 400);
-    }
-  },
-);
-
-// ─── POST /claude/providers/:id/toggle — 切换 enabled ─────
-configRoutes.post(
-  '/claude/providers/:id/toggle',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    const { id } = c.req.param();
-    const actor = (c.get('user') as AuthUser).username;
-    const body = await c.req.json().catch(() => ({}));
-    if (typeof body.enabled !== 'boolean') {
-      return c.json({ error: 'enabled must be a boolean' }, 400);
-    }
-
-    try {
-      return await withClaudeConfigMutationLock(async () => {
-        // Refuse before any runner is stopped: enabling a credential-less
-        // provider would only route turns into authentication failures.
-        const target = getProviders().find((provider) => provider.id === id);
-        if (!target) throw new Error('未找到指定供应商');
-        if (body.enabled && !providerHasCredentials(target)) {
-          throw new Error('该模型配置还没有可用的凭据，请先填写密钥或完成授权');
-        }
-        if (!body.enabled && getDefaultModelConfigId() === id) {
-          throw new Error(DEFAULT_MODEL_DISABLE_ERROR);
-        }
-        const mutation = await mutateClaudeConfigForAllGroups(
-          actor,
-          { trigger: 'provider_toggle', providerId: id },
-          () => {
-            const updated = setProviderEnabled(id, body.enabled);
-            appendClaudeConfigAuditBestEffort(actor, 'toggle_provider', [
-              `id:${id}`,
-              `enabled:${updated.enabled}`,
-            ]);
-            return updated;
-          },
-        );
-        if (!mutation.applied.success) {
-          return c.json(
-            {
-              error: mutation.applied.error,
-              applied: mutation.applied,
-              ...(mutation.value
-                ? { provider: toPublicProvider(mutation.value) }
-                : {}),
-            },
-            503,
-          );
-        }
-        return c.json({
-          provider: toPublicProvider(mutation.value!),
-          applied: mutation.applied,
-        });
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to toggle provider';
-      logger.warn({ err }, 'Failed to toggle provider');
       return c.json({ error: message }, 400);
     }
   },
@@ -2194,6 +2012,8 @@ type CheckedConnection =
       explicitAuthMode: boolean;
       preset: ModelPreset | null;
       model: string;
+      /** The background (haiku-tier) model, probed besides `model`. */
+      smallFastModel: string;
       customEnv: Record<string, string>;
     }
   | {
@@ -2275,7 +2095,11 @@ function resolveCheckedConnection(
         preset,
         model:
           model ??
-          (preset?.models[0] ? presetModelEntryId(preset.models[0]) : ''),
+          (preset?.models[0] ? presetModelEntry(preset.models[0]).id : ''),
+        smallFastModel:
+          ('roles' in draft ? draft.roles?.smallFast : undefined) ??
+          stored?.roles?.smallFast ??
+          '',
         customEnv: draft.customEnv ?? stored?.customEnv ?? {},
       },
     };
@@ -2353,7 +2177,9 @@ function draftChangesConnection(
     (draft.anthropicAuthMode !== undefined &&
       draft.anthropicAuthMode !== stored.anthropicAuthMode) ||
     (draft.customEnv !== undefined &&
-      JSON.stringify(draft.customEnv) !== JSON.stringify(stored.customEnv))
+      JSON.stringify(draft.customEnv) !== JSON.stringify(stored.customEnv)) ||
+    (draft.roles?.smallFast !== undefined &&
+      draft.roles.smallFast !== (stored.roles?.smallFast ?? ''))
   );
 }
 
@@ -2485,7 +2311,7 @@ function testConnection(
           authMode: connection.authMode,
           explicitAuthMode: connection.explicitAuthMode,
           model: connection.model,
-          haikuModel: connection.customEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+          haikuModel: connection.smallFastModel,
           customHeaders: connection.customEnv.ANTHROPIC_CUSTOM_HEADERS,
         },
         testProviderConnectivity,
@@ -2667,8 +2493,8 @@ configRoutes.post(
 
 // ─── GET /claude/providers/:id/impact — 修改协议字段会停掉多少 Runner ─────
 // activeRunners：正在使用这个连接的 Runner；stoppedRunners：修改端点、密钥、
-// 默认模型等协议字段时实际会停掉的 Runner（当前实现会停掉全部工作区的 Runner，
-// 连接既未启用也没被绑定或选用时则一个都不停）。
+// 连接模型等协议字段时实际会停掉的 Runner（当前实现会停掉全部工作区的 Runner，
+// 连接既没被绑定或选用、也不是全局兜底连接时则一个都不停）。
 configRoutes.get(
   '/claude/providers/:id/impact',
   authMiddleware,
@@ -2684,32 +2510,6 @@ configRoutes.get(
         .length,
       stoppedRunners: providerMayHaveRunners(provider) ? live.length : 0,
     });
-  },
-);
-
-// ─── POST /claude/providers/:id/reset-health — 重置健康状态 ─────
-configRoutes.post(
-  '/claude/providers/:id/reset-health',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    const { id } = c.req.param();
-    providerPool.resetHealth(id);
-    return c.json({ ok: true });
-  },
-);
-
-// ─── GET /claude/providers/health — 健康状态轮询 ─────
-configRoutes.get(
-  '/claude/providers/health',
-  authMiddleware,
-  systemConfigMiddleware,
-  (c) => {
-    // Refresh pool state
-    const enabledProviders = getEnabledProviders();
-    const balancing = getBalancingConfig();
-    providerPool.refreshFromConfig(enabledProviders, balancing);
-    return c.json({ statuses: providerPool.getHealthStatuses() });
   },
 );
 
@@ -2738,37 +2538,6 @@ configRoutes.get(
       const msg = err instanceof Error ? err.message : 'Unknown error';
       logger.warn({ err, providerId: id }, 'Failed to fetch OAuth usage');
       return c.json({ error: msg }, 400);
-    }
-  },
-);
-
-// ─── PUT /claude/balancing — 更新负载均衡参数 ─────
-configRoutes.put(
-  '/claude/balancing',
-  authMiddleware,
-  systemConfigMiddleware,
-  async (c) => {
-    const body = await c.req.json().catch(() => ({}));
-    const validation = BalancingConfigSchema.safeParse(body);
-    if (!validation.success) {
-      return c.json(
-        { error: 'Invalid request body', details: validation.error.format() },
-        400,
-      );
-    }
-
-    const actor = (c.get('user') as AuthUser).username;
-
-    try {
-      const saved = saveBalancingConfig(validation.data);
-      appendClaudeConfigAudit(actor, 'update_balancing', [
-        ...Object.keys(validation.data),
-      ]);
-      return c.json(saved);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to update balancing';
-      return c.json({ error: message }, 400);
     }
   },
 );
@@ -3030,7 +2799,6 @@ configRoutes.post(
             : '官方 Claude (OAuth)',
           type: 'official',
           ...secrets,
-          enabled: newConnectionJoinsPool(),
         });
         appendClaudeConfigAuditBestEffort(user.username, 'oauth_login', [
           `providerId:${provider.id}`,
@@ -3218,9 +2986,10 @@ configRoutes.post(
             // Internal identifier only; runners receive per-launch tokens.
             anthropicAuthToken: randomBytes(32).toString('hex'),
             anthropicModel: defaults.anthropicModel,
-            customEnv: defaults.customEnv,
+            // The runtime defaults a third-party endpoint used to get
+            // implicitly; the add wizard offers the same to the others.
+            customEnv: { ...CONNECTION_ENV_PREFILL, ...defaults.customEnv },
             codexOAuthCredentials: codexCredentials,
-            enabled: newConnectionJoinsPool(),
           });
           appendClaudeConfigAuditBestEffort(actor, 'codex_oauth_login', [
             `providerId:${provider.id}`,
@@ -3343,7 +3112,7 @@ configRoutes.post(
   },
 );
 
-// ─── PUT /claude/custom-env — 更新当前启用供应商的自定义环境变量 ─────
+// ─── PUT /claude/custom-env — 兼容：更新全局兜底连接的自定义环境变量 ─────
 configRoutes.put(
   '/claude/custom-env',
   authMiddleware,
@@ -3358,14 +3127,14 @@ configRoutes.put(
       );
     }
 
-    try {
-      // Find first enabled provider and update its customEnv
-      const enabled = getEnabledProviders();
-      if (enabled.length === 0) {
-        return c.json({ error: '没有启用的供应商' }, 400);
-      }
+    const reserved = reservedConnectionEnvError(validation.data.customEnv);
+    if (reserved) return c.json(reserved, 400);
 
-      const updated = updateProvider(enabled[0].id, {
+    try {
+      const target = getGlobalProvider();
+      if (!target) return c.json({ error: '还没有模型连接' }, 400);
+
+      const updated = updateProvider(target.id, {
         customEnv: validation.data.customEnv,
       });
       return c.json({ customEnv: updated.customEnv });

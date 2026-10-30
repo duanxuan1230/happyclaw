@@ -136,9 +136,11 @@ describe('third-party provider routes', () => {
       },
     );
     expect(status).toBe(200);
+    // `[1m]` from an older client is the model's window, not its name.
     expect(body.provider).toMatchObject({
-      anthropicModel: 'glm-5.3[1m]',
+      anthropicModel: 'glm-5.3',
       anthropicAuthMode: 'bearer',
+      models: [{ id: 'glm-5.3', contextWindow: 1_000_000 }],
     });
     expect(JSON.stringify(body)).not.toContain('glm-new-secret');
     const stored = runtimeConfig.getProviderById(provider.id)!;
@@ -174,21 +176,21 @@ describe('third-party provider routes', () => {
     );
   });
 
-  test('toggle refuses to enable a provider without credentials', async () => {
+  test('there is no enable switch any more', async () => {
     const provider = createThirdParty({ anthropicAuthToken: '' });
-    const { status, body } = await request(
+    const { status } = await request(
       'POST',
       `/providers/${provider.id}/toggle`,
       { enabled: true },
     );
-    expect(status).toBe(400);
-    expect(body.error).toContain('凭据');
+    expect(status).toBe(404);
     expect(runtimeConfig.getProviderById(provider.id)!.enabled).toBe(false);
   });
 
   test('test connection falls back to the stored key without returning it', async () => {
     const provider = createThirdParty({
-      customEnv: { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash' },
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.3-flash' }],
+      roles: { smallFast: 'glm-5.3-flash' },
     });
     const probe = { model: 'glm-5.3', ok: true, status: 200, latencyMs: 12 };
     mocks.connectivity.mockResolvedValue({ ok: true, probes: [probe] });
@@ -222,7 +224,7 @@ describe('third-party provider routes', () => {
     });
   });
 
-  test('an enabled provider cannot be created or left without a key', async () => {
+  test('a provider cannot be created without a key; enabled is ignored', async () => {
     const created = await request('POST', '/providers', {
       name: 'Keyless',
       type: 'third_party',
@@ -231,15 +233,19 @@ describe('third-party provider routes', () => {
     });
     expect(created.status).toBe(400);
 
-    const provider = createThirdParty({ enabled: true });
-    const cleared = await request('PATCH', `/providers/${provider.id}`, {
-      clearAnthropicAuthToken: true,
+    const withKey = await request('POST', '/providers', {
+      name: 'Keyed',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://relay.test',
+      anthropicAuthToken: 'relay-secret',
+      enabled: true,
+      weight: 7,
     });
-    expect(cleared.status).toBe(400);
-    expect(cleared.body.error).toContain('先停用');
-    expect(runtimeConfig.getProviderById(provider.id)!.anthropicAuthToken).toBe(
-      'glm-old-secret',
-    );
+    expect(withKey.status).toBe(201);
+    expect(runtimeConfig.getProviderById(withKey.body.id)).toMatchObject({
+      enabled: false,
+      weight: 1,
+    });
   });
 
   test('test connection needs an endpoint and a key', async () => {
