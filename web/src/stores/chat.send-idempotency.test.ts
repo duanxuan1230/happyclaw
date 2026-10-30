@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { apiGetMock, apiPostMock, showToastMock, notifyMock, emitNoticeMock } =
   vi.hoisted(() => ({
     apiGetMock: vi.fn(
-      async (): Promise<unknown> => ({ items: [], messages: [] }),
+      async (_url: string): Promise<unknown> => ({ items: [], messages: [] }),
     ),
     apiPostMock: vi.fn(),
     showToastMock: vi.fn(),
