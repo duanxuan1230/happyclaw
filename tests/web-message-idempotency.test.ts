@@ -25,6 +25,11 @@ const ROOT =
   })();
 
 const auth = vi.hoisted(() => ({ userId: 'owner' }));
+const resets = vi.hoisted(() => ({
+  clear: 0,
+  fresh: 0,
+  gate: null as Promise<void> | null,
+}));
 
 vi.mock('../src/config.js', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
@@ -59,7 +64,45 @@ vi.mock('../src/middleware/auth.ts', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/commands.js', async (importOriginal) => {
+  const real = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...real,
+    executeSessionReset: async () => {
+      resets.clear += 1;
+    },
+    executeFreshWindowReset: async () => {
+      resets.fresh += 1;
+      await resets.gate;
+    },
+  };
+});
+vi.mock('../src/fresh-window.js', async (importOriginal) => {
+  const real = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...real,
+    captureWorkspaceSnapshot: async () => ({
+      available: false,
+      reason: 'test',
+    }),
+  };
+});
+// Every WebSocket client counts as the workspace owner's live session.
+vi.mock('../src/web-context.js', async (importOriginal) => {
+  const real = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...real,
+    getCachedSessionWithUser: () => ({
+      user_id: 'owner',
+      role: 'admin',
+      status: 'active',
+      expires_at: '2999-01-01T00:00:00.000Z',
+    }),
+  };
+});
+
 const web = await import('../src/web.js');
+const { wsClients } = await import('../src/web-context.js');
 const db = await import('../src/db.js');
 const store = await import('../src/runtime-state-store.js');
 
@@ -73,6 +116,8 @@ const calls = {
 let activeRunId: string | null = null;
 let promoteGate: Promise<void> | null = null;
 let failNextResolve = false;
+let failPromote = false;
+const announced: Array<Record<string, any>> = [];
 
 const app = web.createAppForTest({
   queue: {
@@ -99,6 +144,8 @@ const app = web.createAppForTest({
   promoteFollowUp: async (_jid: string, messageId: string) => {
     calls.promote.push(messageId);
     await promoteGate;
+    if (failPromote)
+      throw new Error('steer failed after the message was stored');
     return { ok: true, state: 'interrupting' };
   },
 } as unknown as Parameters<typeof web.createAppForTest>[0]);
@@ -118,6 +165,17 @@ beforeAll(() => {
   db.initDatabase();
   registerGroup(OWNER_JID, 'idempotency-owner', 'owner');
   registerGroup(OTHER_JID, 'idempotency-other', 'other');
+  wsClients.set(
+    {
+      readyState: 1,
+      bufferedAmount: 0,
+      send: (data: string) => {
+        const msg = JSON.parse(data);
+        if (msg.type === 'new_message') announced.push(msg.message);
+      },
+    } as any,
+    { sessionId: 'ws-session' } as any,
+  );
 });
 
 afterAll(() => {
@@ -130,6 +188,9 @@ beforeEach(() => {
   activeRunId = null;
   promoteGate = null;
   failNextResolve = false;
+  failPromote = false;
+  resets.gate = null;
+  announced.length = 0;
   calls.enqueue.length = 0;
   calls.promote.length = 0;
 });
@@ -220,7 +281,7 @@ describe('Web send idempotency', () => {
     const id = uuid();
     await post({ content: 'original', clientMessageId: id });
     const clash = await post({ content: 'edited', clientMessageId: id });
-    const otherSession = await post({
+    const asSteer = await post({
       content: 'original',
       clientMessageId: id,
       followUpBehavior: 'steer',
@@ -228,9 +289,85 @@ describe('Web send idempotency', () => {
 
     expect(clash.status).toBe(409);
     expect(storedWith(OWNER_JID, 'edited')).toHaveLength(0);
-    // followUpBehavior is not part of what was sent; only target and payload.
-    expect(otherSession.status).toBe(200);
-    expect(otherSession.body.deduplicated).toBe(true);
+    // Steering instead of queueing is a different send.
+    expect(asSteer.status).toBe(409);
+    expect(storedWith(OWNER_JID, 'original')).toHaveLength(1);
+  });
+
+  test('the announced message carries its id, so the client can tell it was stored', async () => {
+    const id = uuid();
+    await post({ content: 'announce me', clientMessageId: id });
+    await vi.waitFor(() =>
+      expect(announced.find((m) => m.content === 'announce me')).toBeDefined(),
+    );
+    expect(
+      announced.find((m) => m.content === 'announce me')!.client_message_id,
+    ).toBe(id);
+
+    await post({ content: 'no id' });
+    await vi.waitFor(() =>
+      expect(announced.find((m) => m.content === 'no id')).toBeDefined(),
+    );
+    expect(
+      announced.find((m) => m.content === 'no id')!.client_message_id,
+    ).toBeUndefined();
+  });
+
+  test('a failure after the message is stored still answers the resend from it', async () => {
+    activeRunId = 'run-active';
+    failPromote = true;
+    const id = uuid();
+    const body = {
+      content: 'stored then failed',
+      clientMessageId: id,
+      followUpBehavior: 'steer',
+    };
+    const failed = await post(body);
+    failPromote = false;
+    const resent = await post(body);
+
+    expect(failed.status).toBe(500);
+    expect(resent.status).toBe(200);
+    expect(resent.body.deduplicated).toBe(true);
+    expect(storedWith(OWNER_JID, 'stored then failed')).toHaveLength(1);
+    expect(resent.body.messageId).toBe(
+      storedWith(OWNER_JID, 'stored then failed')[0].id,
+    );
+    expect(calls.promote).toHaveLength(1);
+  });
+
+  test('/clear and /fresh run once per id, concurrent resends included', async () => {
+    const clearId = uuid();
+    await post({ content: '/clear', clientMessageId: clearId });
+    const clearAgain = await post({
+      content: '/clear',
+      clientMessageId: clearId,
+    });
+    expect(clearAgain.body).toMatchObject({
+      cleared: true,
+      deduplicated: true,
+    });
+    expect(resets.clear).toBe(1);
+
+    let release!: () => void;
+    resets.gate = new Promise((resolve) => (release = resolve));
+    const freshId = uuid();
+    const first = post({ content: '/fresh 交接', clientMessageId: freshId });
+    const second = post({ content: '/fresh 交接', clientMessageId: freshId });
+    await vi.waitFor(() => expect(resets.fresh).toBe(1));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.body).toMatchObject({ cleared: true, fresh: true });
+    expect(b.body).toMatchObject({
+      cleared: true,
+      fresh: true,
+      deduplicated: true,
+    });
+    expect(resets.fresh).toBe(1);
+
+    await post({ content: '/clear' });
+    await post({ content: '/clear' });
+    expect(resets.clear).toBe(3);
   });
 
   test('the same id with other images is a conflict too', async () => {

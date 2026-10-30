@@ -129,6 +129,7 @@ import type {
   UserRole,
   MessageCursor,
   RunFinishReason,
+  RegisteredGroup,
 } from './types.js';
 import {
   WEB_PORT,
@@ -394,121 +395,33 @@ app.post('/api/messages', authMiddleware, async (c) => {
     }
   }
 
-  // /clear: reset session without entering message pipeline.
-  // Permission: owner-only (canModifyGroup) — aligned with `reset-session`
-  // route, since /clear has the same destructive effect (clears agent
-  // session files, stops sibling containers, drops conversation history).
-  if (isClearCommand(content)) {
-    if (
-      !canModifyGroup(
-        { id: authUser.id, role: authUser.role },
-        { ...group, jid: chatJid },
-      )
-    ) {
-      return c.json({ error: 'Only the workspace owner can run /clear' }, 403);
-    }
-    if (!deps) return c.json({ error: 'Server not initialized' }, 500);
-    try {
-      await executeSessionReset(
-        chatJid,
-        group.folder,
-        {
-          queue: deps.queue,
-          sessions: deps.getSessions(),
-          broadcast: broadcastNewMessage,
-          setLastAgentTimestamp: deps.setLastAgentTimestamp,
-        },
-        agentId,
-      );
-      return c.json({ success: true, cleared: true });
-    } catch (err) {
-      logger.error({ chatJid, err }, '/clear command failed');
-      const errId = crypto.randomUUID();
-      const errTs = new Date().toISOString();
-      ensureChatExists(chatJid);
-      storeMessageDirect(
-        errId,
-        chatJid,
-        '__system__',
-        'system',
-        SESSION_RESET_FAILURE_MESSAGE,
-        errTs,
-        true,
-      );
-      broadcastNewMessage(chatJid, {
-        id: errId,
-        chat_jid: chatJid,
-        sender: '__system__',
-        sender_name: 'system',
-        content: SESSION_RESET_FAILURE_MESSAGE,
-        timestamp: errTs,
-        is_from_me: true,
-      });
-      return c.json({ error: '清除上下文失败' }, 500);
-    }
-  }
-
-  // /fresh [notes]: zero-summary window switch. Same owner gate as /clear.
-  const freshCommand = parseFreshCommand(content);
-  if (freshCommand) {
-    if (
-      !canModifyGroup(
-        { id: authUser.id, role: authUser.role },
-        { ...group, jid: chatJid },
-      )
-    ) {
-      return c.json({ error: 'Only the workspace owner can run /fresh' }, 403);
-    }
-    if (!deps) return c.json({ error: 'Server not initialized' }, 500);
-    try {
-      const snapshot = await captureWorkspaceSnapshot(
-        resolveWorkspaceProjectRoot(group, { agentId }),
-      );
-      const handoff = formatFreshWindowHandoff({
-        notes: freshCommand.notes,
-        snapshot,
-      });
-      await executeFreshWindowReset(
-        chatJid,
-        group.folder,
-        {
-          queue: deps.queue,
-          sessions: deps.getSessions(),
-          broadcast: broadcastNewMessage,
-          setLastAgentTimestamp: deps.setLastAgentTimestamp,
-        },
-        { agentId, handoff },
-      );
-      return c.json({ success: true, cleared: true, fresh: true });
-    } catch (err) {
-      logger.error({ chatJid, err }, '/fresh command failed');
-      const errId = crypto.randomUUID();
-      const errTs = new Date().toISOString();
-      ensureChatExists(chatJid);
-      storeMessageDirect(
-        errId,
-        chatJid,
-        '__system__',
-        'system',
-        SESSION_FRESH_WINDOW_FAILURE_MESSAGE,
-        errTs,
-        true,
-      );
-      broadcastNewMessage(chatJid, {
-        id: errId,
-        chat_jid: chatJid,
-        sender: '__system__',
-        sender_name: 'system',
-        content: SESSION_FRESH_WINDOW_FAILURE_MESSAGE,
-        timestamp: errTs,
-        is_from_me: true,
-      });
-      return c.json({ error: '零摘要换窗失败' }, 500);
-    }
+  // /clear and /fresh: reset the session without entering the message
+  // pipeline. Owner-only (canModifyGroup), aligned with `reset-session`,
+  // since both clear agent session files and stop sibling containers.
+  const isClear = isClearCommand(content);
+  const freshCommand = isClear ? null : parseFreshCommand(content);
+  if (
+    (isClear || freshCommand) &&
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid: chatJid },
+    )
+  ) {
+    return c.json(
+      {
+        error: `Only the workspace owner can run ${isClear ? '/clear' : '/fresh'}`,
+      },
+      403,
+    );
   }
 
   const trimmedContent = content.trim();
-  const send = async (): Promise<WebSendOutcome> => {
+  const send = async (
+    idempotency?: WebSendIdempotency,
+  ): Promise<WebSendOutcome> => {
+    if (isClear || freshCommand) {
+      return runSessionResetCommand(chatJid, group, agentId, freshCommand);
+    }
     const displayName = authUser.display_name || authUser.username;
     const result = agentId
       ? await handleAgentConversationMessage(
@@ -519,6 +432,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
           displayName,
           attachments,
           followUpBehavior,
+          idempotency,
         )
       : await handleWebUserMessage(
           chatJid,
@@ -527,6 +441,7 @@ app.post('/api/messages', authMiddleware, async (c) => {
           authUser.id,
           displayName,
           followUpBehavior,
+          idempotency,
         );
     if (!result.ok) {
       return { status: result.status, body: { error: result.error } };
@@ -542,7 +457,12 @@ app.post('/api/messages', authMiddleware, async (c) => {
           userId: authUser.id,
           chatJid,
           clientMessageId,
-          fingerprint: webSendFingerprint(agentId, trimmedContent, attachments),
+          fingerprint: webSendFingerprint(
+            agentId,
+            trimmedContent,
+            attachments,
+            followUpBehavior,
+          ),
         },
         send,
       )
@@ -550,10 +470,92 @@ app.post('/api/messages', authMiddleware, async (c) => {
   return c.json(outcome.body, outcome.status);
 });
 
+/** Run `/clear` or `/fresh [notes]`; failures post a system message. */
+async function runSessionResetCommand(
+  chatJid: string,
+  group: RegisteredGroup,
+  agentId: string | undefined,
+  freshCommand: ReturnType<typeof parseFreshCommand>,
+): Promise<WebSendOutcome> {
+  if (!deps) return { status: 500, body: { error: 'Server not initialized' } };
+  const resetDeps = {
+    queue: deps.queue,
+    sessions: deps.getSessions(),
+    broadcast: broadcastNewMessage,
+    setLastAgentTimestamp: deps.setLastAgentTimestamp,
+  };
+  try {
+    if (!freshCommand) {
+      await executeSessionReset(chatJid, group.folder, resetDeps, agentId);
+      return { status: 200, body: { success: true, cleared: true } };
+    }
+    const snapshot = await captureWorkspaceSnapshot(
+      resolveWorkspaceProjectRoot(group, { agentId }),
+    );
+    const handoff = formatFreshWindowHandoff({
+      notes: freshCommand.notes,
+      snapshot,
+    });
+    await executeFreshWindowReset(chatJid, group.folder, resetDeps, {
+      agentId,
+      handoff,
+    });
+    return { status: 200, body: { success: true, cleared: true, fresh: true } };
+  } catch (err) {
+    logger.error(
+      { chatJid, err },
+      freshCommand ? '/fresh command failed' : '/clear command failed',
+    );
+    const failure = freshCommand
+      ? SESSION_FRESH_WINDOW_FAILURE_MESSAGE
+      : SESSION_RESET_FAILURE_MESSAGE;
+    const errId = crypto.randomUUID();
+    const errTs = new Date().toISOString();
+    ensureChatExists(chatJid);
+    storeMessageDirect(
+      errId,
+      chatJid,
+      '__system__',
+      'system',
+      failure,
+      errTs,
+      true,
+    );
+    broadcastNewMessage(chatJid, {
+      id: errId,
+      chat_jid: chatJid,
+      sender: '__system__',
+      sender_name: 'system',
+      content: failure,
+      timestamp: errTs,
+      is_from_me: true,
+    });
+    return {
+      status: 500,
+      body: { error: freshCommand ? '零摘要换窗失败' : '清除上下文失败' },
+    };
+  }
+}
+
 type WebSendOutcome = {
   status: 200 | 404 | 409 | 500;
   body: Record<string, unknown>;
 };
+
+/** Handed to the message handlers when a send carries a clientMessageId. */
+interface WebSendIdempotency {
+  clientMessageId: string;
+  /**
+   * Called as soon as the message is stored, before anything that can still
+   * fail: from then on a resend must not store it again, even if this
+   * request ends in an error.
+   */
+  onStored(accepted: {
+    messageId: string;
+    timestamp: string;
+    ingestSequence?: number;
+  }): void;
+}
 
 /** Sends being processed, by idempotency key; a concurrent resend joins it. */
 const inFlightWebSends = new Map<
@@ -566,6 +568,7 @@ function webSendFingerprint(
   agentId: string | undefined,
   content: string,
   attachments: Array<{ data: string; mimeType?: string }> | undefined,
+  followUpBehavior: FollowUpMode,
 ): string {
   // Field by field with length prefixes: unambiguous, and the (possibly
   // tens of MB of) attachment data is hashed without being copied.
@@ -573,6 +576,7 @@ function webSendFingerprint(
   const field = (value: string) =>
     hash.update(`${value.length}:`).update(value);
   field(agentId ?? '');
+  field(followUpBehavior);
   field(content);
   for (const att of attachments ?? []) {
     field(att.mimeType ?? '');
@@ -587,12 +591,12 @@ const DEDUP_CONFLICT: WebSendOutcome = {
 };
 
 /**
- * Run `send` at most once per (user, chat, clientMessageId). A resend of an
- * accepted send gets the first answer back without storing or queueing
- * anything; one that arrives while the first is still running waits for it.
- * Only an accepted send is remembered, so a resend after a failure is
- * processed normally. Callers check access before this: the key alone never
- * reveals another user's answer, because the user is part of it.
+ * Run `send` at most once per (user, chat, clientMessageId). A resend of a
+ * send that stored its message, or finished, gets the first answer back
+ * without doing anything; one that arrives while the first is still running
+ * waits for it. A send that failed before storing anything is not
+ * remembered, so its resend is processed normally. Callers check access
+ * before this, and the user is part of the key.
  */
 async function sendOnce(
   key: {
@@ -601,7 +605,7 @@ async function sendOnce(
     clientMessageId: string;
     fingerprint: string;
   },
-  send: () => Promise<WebSendOutcome>,
+  send: (idempotency: WebSendIdempotency) => Promise<WebSendOutcome>,
 ): Promise<WebSendOutcome> {
   const { userId, chatJid, clientMessageId, fingerprint } = key;
   const mapKey = JSON.stringify([userId, chatJid, clientMessageId]);
@@ -619,29 +623,33 @@ async function sendOnce(
     return { status: 200, body: { ...stored.response, deduplicated: true } };
   }
 
+  const remember = (response: Record<string, unknown>) => {
+    try {
+      recordWebMessageDedup({
+        userId,
+        chatJid,
+        clientMessageId,
+        fingerprint,
+        response,
+      });
+    } catch (err) {
+      // The send went through; failing the request now would only make the
+      // client resend it.
+      logger.warn(
+        { chatJid, clientMessageId, err },
+        'Failed to record Web send idempotency key',
+      );
+    }
+  };
   // Registered before the first await, so no concurrent resend can slip in.
-  const done = send();
+  const done = send({
+    clientMessageId,
+    onStored: (accepted) => remember({ success: true, ...accepted }),
+  });
   inFlightWebSends.set(mapKey, { fingerprint, done });
   try {
     const outcome = await done;
-    if (outcome.status === 200) {
-      try {
-        recordWebMessageDedup({
-          userId,
-          chatJid,
-          clientMessageId,
-          fingerprint,
-          response: outcome.body,
-        });
-      } catch (err) {
-        // The message is stored; failing the request now would only make
-        // the client resend it.
-        logger.warn(
-          { chatJid, clientMessageId, err },
-          'Failed to record Web send idempotency key',
-        );
-      }
-    }
+    if (outcome.status === 200) remember(outcome.body);
     return outcome;
   } finally {
     inFlightWebSends.delete(mapKey);
@@ -751,6 +759,7 @@ async function handleWebUserMessage(
   userId = 'web-user',
   displayName = 'Web',
   followUpBehavior: FollowUpMode = 'queue',
+  idempotency?: WebSendIdempotency,
 ): Promise<
   | {
       ok: true;
@@ -832,6 +841,11 @@ async function handleWebUserMessage(
     timestamp,
     id: messageId,
   };
+  idempotency?.onStored({
+    messageId,
+    timestamp,
+    ingestSequence: messageCursor.sequence,
+  });
 
   broadcastNewMessage(chatJid, {
     id: messageId,
@@ -842,6 +856,7 @@ async function handleWebUserMessage(
     timestamp,
     is_from_me: false,
     attachments: attachmentsStr,
+    client_message_id: idempotency?.clientMessageId,
     delivery_mode: activeRunId ? effectiveFollowUpBehavior : null,
     delivery_status: deliveryStatus,
     delivery_run_id: activeRunId,
@@ -1162,6 +1177,7 @@ async function handleAgentConversationMessage(
   displayName: string,
   attachments?: Array<{ type: 'image'; data: string; mimeType?: string }>,
   followUpBehavior: FollowUpMode = 'queue',
+  idempotency?: WebSendIdempotency,
 ): Promise<
   | {
       ok: true;
@@ -1248,6 +1264,11 @@ async function handleAgentConversationMessage(
     timestamp,
     id: messageId,
   };
+  idempotency?.onStored({
+    messageId,
+    timestamp,
+    ingestSequence: agentMessageCursor.sequence,
+  });
   updateAgentContextInfo(agentId, { last_active_at: timestamp });
 
   // Auto-title: show a quick placeholder derived from the first user message.
@@ -1280,6 +1301,7 @@ async function handleAgentConversationMessage(
       timestamp,
       is_from_me: false,
       attachments: attachmentsStr,
+      client_message_id: idempotency?.clientMessageId,
       delivery_mode: activeRunId ? effectiveFollowUpBehavior : null,
       delivery_status: deliveryStatus,
       delivery_run_id: activeRunId,

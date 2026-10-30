@@ -467,6 +467,11 @@ export interface NewMessage {
   delivery_run_id?: string | null;
   delivery_priority?: number | null;
   delivery_updated_at?: string | null;
+  /**
+   * The idempotency key a Web client sent this message with, so it can tell
+   * that a send it saw fail was stored. Announced only; never persisted.
+   */
+  client_message_id?: string;
 }
 
 export type FollowUpMode = 'queue' | 'steer';
