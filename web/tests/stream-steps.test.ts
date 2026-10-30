@@ -583,7 +583,11 @@ describe('question steps', () => {
       },
     ];
     expect(readStepQuestions({ questions: stored })).toEqual([
-      { question: '午饭？', options: ['面条', '米饭'], descriptions: ['汤面', ''] },
+      {
+        question: '午饭？',
+        options: ['面条', '米饭'],
+        descriptions: ['汤面', ''],
+      },
     ]);
   });
 
