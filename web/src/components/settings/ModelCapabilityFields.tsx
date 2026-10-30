@@ -36,20 +36,26 @@ const CONTEXT_PRESETS = [128_000, 200_000, 256_000, 1_000_000] as const;
 export function withAddDefaults(
   entry: ProviderModelEntry,
   declareSuggestedWindow: boolean,
-): { entry: ProviderModelEntry; effortsUnverified: boolean } {
+): {
+  entry: ProviderModelEntry;
+  effortsUnverified: boolean;
+  /** The window came from the suggestion, not from the user or vendor. */
+  windowSuggested: boolean;
+} {
   const next = { ...entry };
   const known = resolveModelCapabilities(entry);
-  if (declareSuggestedWindow && !next.contextWindow) {
-    if (known.suggestedContextWindow) {
-      next.contextWindow = known.suggestedContextWindow;
-    }
-  }
+  const windowSuggested =
+    declareSuggestedWindow &&
+    !next.contextWindow &&
+    !!known.suggestedContextWindow;
+  if (windowSuggested) next.contextWindow = known.suggestedContextWindow!;
   if (known.effortsSource !== 'none') {
-    return { entry: next, effortsUnverified: false };
+    return { entry: next, effortsUnverified: false, windowSuggested };
   }
   return {
     entry: { ...next, efforts: [...MODEL_EFFORTS] },
     effortsUnverified: true,
+    windowSuggested,
   };
 }
 

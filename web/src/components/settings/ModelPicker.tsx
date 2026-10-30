@@ -29,6 +29,8 @@ export interface ModelCandidate extends ProviderModelEntry {
   origin: 'preset' | 'discovered' | 'manual';
   /** Efforts filled in with every level because nothing is known. */
   effortsUnverified?: boolean;
+  /** The window is the registry's suggestion, not one the user picked. */
+  windowSuggested?: boolean;
 }
 
 /** What the connection stores for a candidate. */
@@ -52,14 +54,39 @@ function toCandidate(
   declareSuggestedWindow: boolean,
 ): ModelCandidate {
   const [normalized] = normalizeProviderModels([model]) ?? [];
-  const { entry, effortsUnverified } = withAddDefaults(
+  const { entry, effortsUnverified, windowSuggested } = withAddDefaults(
     normalized,
     declareSuggestedWindow,
   );
   const candidate: ModelCandidate = { ...entry, picked, origin };
   if (model.name) candidate.name = model.name;
   if (effortsUnverified) candidate.effortsUnverified = true;
+  if (windowSuggested) candidate.windowSuggested = true;
   return candidate;
+}
+
+/**
+ * A kept candidate under another source. An official connection takes no
+ * suggested window (above 200K it is the billed 1M opt-in); a third-party one
+ * takes the suggestion where the candidate has no window. A window the user
+ * picked stays either way.
+ */
+export function candidateForSource(
+  candidate: ModelCandidate,
+  thirdParty: boolean,
+): ModelCandidate {
+  if (!thirdParty) {
+    if (!candidate.windowSuggested) return candidate;
+    const next = { ...candidate };
+    delete next.contextWindow;
+    delete next.windowSuggested;
+    return next;
+  }
+  if (candidate.contextWindow) return candidate;
+  const { entry, windowSuggested } = withAddDefaults(candidate, true);
+  return windowSuggested
+    ? { ...candidate, contextWindow: entry.contextWindow, windowSuggested }
+    : candidate;
 }
 
 /**
@@ -253,9 +280,13 @@ export function ModelPicker({
                         picked: true,
                         name: candidate.name,
                         origin: candidate.origin,
-                        // An effort the user set is theirs, not a guess.
+                        // An effort or window the user set is theirs, not a
+                        // guess.
                         effortsUnverified:
                           candidate.effortsUnverified && !effortsTouched,
+                        windowSuggested:
+                          candidate.windowSuggested &&
+                          entry.contextWindow === candidate.contextWindow,
                       })
                     }
                   />
