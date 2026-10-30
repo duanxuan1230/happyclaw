@@ -84,7 +84,13 @@ interface ShellState {
   /** Incremented to ask the active composer to take focus. */
   composerFocusNonce: number;
   /** Text the active composer should insert (starter prompts), not send. */
-  composerDraftRequest: { text: string; nonce: number } | null;
+  composerDraftRequest: ComposerDraftRequest | null;
+  /**
+   * By source (an AskUserQuestion card's `toolUseId`): the text it last
+   * filled that the composer still holds. The composer drops an entry once
+   * that text is edited away, cleared or sent.
+   */
+  composerFills: Record<string, string>;
   /**
    * A workspace the phone home list should expand and scroll to (the
    * `?sessions=1` link, a new workspace). Kept here rather than in the
@@ -110,9 +116,21 @@ interface ShellState {
   requestWorkspaceSettings: (groupJid: string) => void;
   clearWorkspaceSettingsRequest: () => void;
   requestComposerFocus: () => void;
-  requestComposerDraft: (text: string) => void;
+  /**
+   * Insert `text` into the composer. With a `source`, it replaces what that
+   * source filled last, when the composer still holds it unchanged.
+   */
+  requestComposerDraft: (text: string, source?: string) => void;
+  forgetComposerFills: (sources: readonly string[]) => void;
   revealOnPhoneHome: (folder: string) => void;
   clearPhoneHomeReveal: () => void;
+}
+
+export interface ComposerDraftRequest {
+  text: string;
+  nonce: number;
+  /** The text this one replaces, as its source filled it last. */
+  replaces?: string;
 }
 
 export const useShellStore = create<ShellState>((set, get) => ({
@@ -133,6 +151,7 @@ export const useShellStore = create<ShellState>((set, get) => ({
   workspaceSettingsRequest: null,
   composerFocusNonce: 0,
   composerDraftRequest: null,
+  composerFills: {},
   phoneHomeReveal: null,
 
   setSidebarWidth: (width) => {
@@ -180,13 +199,23 @@ export const useShellStore = create<ShellState>((set, get) => ({
   clearWorkspaceSettingsRequest: () => set({ workspaceSettingsRequest: null }),
   requestComposerFocus: () =>
     set((state) => ({ composerFocusNonce: state.composerFocusNonce + 1 })),
-  requestComposerDraft: (text) =>
+  requestComposerDraft: (text, source) =>
     set((state) => ({
       composerDraftRequest: {
         text,
         nonce: (state.composerDraftRequest?.nonce ?? 0) + 1,
+        ...(source ? { replaces: state.composerFills[source] } : {}),
       },
+      ...(source
+        ? { composerFills: { ...state.composerFills, [source]: text } }
+        : {}),
     })),
+  forgetComposerFills: (sources) => {
+    if (sources.length === 0) return;
+    const next = { ...get().composerFills };
+    for (const source of sources) delete next[source];
+    set({ composerFills: next });
+  },
   revealOnPhoneHome: (folder) => set({ phoneHomeReveal: { folder } }),
   clearPhoneHomeReveal: () => set({ phoneHomeReveal: null }),
 }));

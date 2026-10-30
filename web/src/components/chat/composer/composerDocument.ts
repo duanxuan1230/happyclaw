@@ -103,6 +103,56 @@ export function appendComposerText(
 }
 
 /**
+ * Where the composer holds `text` as it was filled: the last run of
+ * top-level blocks equal to the ones `text` makes, or null once edited.
+ */
+export function findFilledBlocks(
+  doc: PMNode,
+  text: string,
+): { from: number; to: number } | null {
+  if (!text) return null;
+  const blocks = (plainTextToComposerDocument(text).content ?? []).map((json) =>
+    doc.type.schema.nodeFromJSON(json),
+  );
+  const offsets = [0];
+  doc.forEach((child) => offsets.push(offsets.at(-1)! + child.nodeSize));
+  for (let start = doc.childCount - blocks.length; start >= 0; start -= 1) {
+    if (blocks.every((block, i) => doc.child(start + i).eq(block))) {
+      return { from: offsets[start], to: offsets[start + blocks.length] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Fill a draft request into the composer: in place of the text it replaces
+ * when that is still there unchanged, otherwise after what the composer
+ * holds. The caret lands at the end of the filled text.
+ */
+export function fillComposerDraft(
+  editor: Editor,
+  { text, replaces }: { text: string; replaces?: string },
+): void {
+  const range = replaces ? findFilledBlocks(editor.state.doc, replaces) : null;
+  if (!range) {
+    appendComposerText(editor, text, { gap: 0, focus: true });
+    return;
+  }
+  const { state } = editor;
+  const fragment = Fragment.from(
+    (plainTextToComposerDocument(text).content ?? []).map((json) =>
+      state.schema.nodeFromJSON(json),
+    ),
+  );
+  const tr = state.tr.replaceWith(range.from, range.to, fragment);
+  tr.setSelection(
+    Selection.near(tr.doc.resolve(range.from + fragment.size), -1),
+  );
+  editor.view.dispatch(tr.scrollIntoView());
+  editor.commands.focus();
+}
+
+/**
  * Whether the caret sits on the first line (`up`) or last line (`down`) of the
  * whole document, wrapped lines included.
  */

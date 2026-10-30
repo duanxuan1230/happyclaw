@@ -68,6 +68,7 @@ import {
   appendComposerText,
   caretOnEdgeLine,
   composerDocFor,
+  fillComposerDraft,
 } from './composer/composerDocument';
 import { AttachmentTray } from './composer/AttachmentTray';
 import {
@@ -500,10 +501,7 @@ export const MessageInput = memo(function MessageInput({
       return;
     }
     handledDraftRequestNonce = composerDraftRequest.nonce;
-    appendComposerText(editor, composerDraftRequest.text, {
-      gap: 0,
-      focus: true,
-    });
+    fillComposerDraft(editor, composerDraftRequest);
     // Only a new request inserts text; typing must not re-run this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composerDraftRequest]);

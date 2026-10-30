@@ -1116,6 +1116,56 @@ describe('answering AskUserQuestion', () => {
     );
     expect(text()).toBe('选项 A\n选项 B');
   });
+
+  // A card fills under its toolUseId; filling again replaces its last text.
+  const fill = (value: string) =>
+    act(async () =>
+      useShellStore.getState().requestComposerDraft(value, 'toolu_1'),
+    );
+  const fills = () => useShellStore.getState().composerFills;
+
+  test("a card's new answer takes the place of its last one", async () => {
+    useShellStore.setState({ composerFills: {} });
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await type('先说一句');
+    await fill('周末去哪？\n答：看展\n带什么？\n答：水');
+    await fill('周末去哪？\n答：爬山\n带什么？\n答：水');
+    expect(text()).toBe('先说一句\n周末去哪？\n答：爬山\n带什么？\n答：水');
+    await fill('甲');
+    await fill('乙');
+    expect(text()).toBe('先说一句\n乙');
+    // Another card's answer is its own.
+    await act(async () =>
+      useShellStore.getState().requestComposerDraft('丙', 'toolu_2'),
+    );
+    expect(text()).toBe('先说一句\n乙\n丙');
+  });
+
+  test('an answer the user edited stays, and the next one is appended', async () => {
+    useShellStore.setState({ composerFills: {} });
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await fill('甲');
+    await typeAtCaret('，但要快');
+    expect(fills()).toEqual({});
+    await fill('乙');
+    expect(text()).toBe('甲，但要快\n乙');
+  });
+
+  test('clearing or sending the answer lets the card fill it again', async () => {
+    useShellStore.setState({ composerFills: {} });
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await fill('甲');
+    expect(fills()).toEqual({ toolu_1: '甲' });
+    await type('');
+    expect(fills()).toEqual({});
+    await fill('甲');
+    expect(text()).toBe('甲');
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith('甲', undefined, undefined);
+    expect(text()).toBe('');
+    expect(fills()).toEqual({});
+  });
 });
 
 describe('uploaded files', () => {
