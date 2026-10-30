@@ -357,6 +357,11 @@ type MessageCreateResponse =
       ingestSequence?: number;
       disposition: 'started' | 'queued' | 'steered';
       runId?: string;
+      /**
+       * A resend answered from the first attempt. Its run and queue state
+       * are those of back then; the current ones come over the WebSocket.
+       */
+      deduplicated?: true;
     }
   | { success: false };
 const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
@@ -367,20 +372,34 @@ type SendAttachment = { data: string; mimeType: string };
 /**
  * Each conversation's last unconfirmed send. Resending the same message
  * reuses its idempotency key, so the server answers from the first attempt.
+ * A key is dropped once its message shows up (the server announces it with
+ * the key) and is not reused after UNCONFIRMED_SEND_REUSE_MS: by then the
+ * same text is a new message, not a retry.
  */
 const unconfirmedSends = new Map<
   string,
-  { content: string; attachments: SendAttachment[]; id: string }
+  {
+    content: string;
+    attachments: SendAttachment[];
+    mode: FollowUpMode;
+    id: string;
+    at: number;
+  }
 >();
+const UNCONFIRMED_SEND_REUSE_MS = 2 * 60_000;
 
 function clientMessageIdFor(
   target: string,
   content: string,
   attachments: SendAttachment[] = [],
+  mode: FollowUpMode,
 ): string {
   const previous = unconfirmedSends.get(target);
+  const now = Date.now();
   if (
     previous &&
+    now - previous.at < UNCONFIRMED_SEND_REUSE_MS &&
+    previous.mode === mode &&
     previous.content === content &&
     previous.attachments.length === attachments.length &&
     previous.attachments.every(
@@ -392,8 +411,15 @@ function clientMessageIdFor(
     return previous.id;
   }
   const id = randomUuid();
-  unconfirmedSends.set(target, { content, attachments, id });
+  unconfirmedSends.set(target, { content, attachments, mode, id, at: now });
   return id;
+}
+
+/** The message sent under `clientMessageId` was stored: never reuse it. */
+function forgetConfirmedSend(clientMessageId: string): void {
+  for (const [target, send] of unconfirmedSends) {
+    if (send.id === clientMessageId) unconfirmedSends.delete(target);
+  }
 }
 
 /** No answer, or a proxy's: the send may have been stored anyway. */
@@ -3708,7 +3734,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         chatJid: jid,
         content,
         followUpBehavior,
-        clientMessageId: clientMessageIdFor(jid, content, attachments),
+        clientMessageId: clientMessageIdFor(
+          jid,
+          content,
+          attachments,
+          followUpBehavior,
+        ),
       };
       if (attachments && attachments.length > 0) {
         body.attachments = attachments.map((att) => ({
@@ -3733,6 +3764,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // /clear was intercepted server-side: skip local user message merge.
       // The context_reset divider arrives via WS new_message and triggers state cleanup.
       if (isClearedResponse(data)) return true;
+      if (data.deduplicated) {
+        // The first attempt's message: show it if its announcement was
+        // missed, and take its queue state from the server.
+        if (!get().messages[jid]?.some((m) => m.id === data.messageId)) {
+          const authState = useAuthStore.getState();
+          const replayed: Message = {
+            id: data.messageId,
+            chat_jid: jid,
+            sender: authState.user?.id || 'web-user',
+            sender_name:
+              authState.user?.display_name || authState.user?.username || 'Web',
+            content,
+            timestamp: data.timestamp,
+            ingest_sequence: data.ingestSequence,
+            is_from_me: false,
+            attachments: body.attachments
+              ? JSON.stringify(body.attachments)
+              : undefined,
+          };
+          set((s) => ({
+            messages: {
+              ...s.messages,
+              [jid]: mergeMessagesChronologically(s.messages[jid] || [], [
+                replayed,
+              ]),
+            },
+          }));
+        }
+        void get().loadFollowUps(jid);
+        return true;
+      }
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(jid, data.runId);
       }
@@ -5309,6 +5371,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // 通过 WebSocket new_message 事件立即添加消息（避免轮询延迟导致消息"丢失"）
   handleWsNewMessage: (chatJid, wsMsg, agentId?) => {
     if (!wsMsg || !wsMsg.id) return;
+    if (typeof wsMsg.client_message_id === 'string') {
+      forgetConfirmedSend(wsMsg.client_message_id);
+    }
     // Skip while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[chatJid]) return;
 
@@ -6193,7 +6258,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           content,
           attachments: normalizedAttachments,
           followUpBehavior,
-          clientMessageId: clientMessageIdFor(runtimeJid, content, attachments),
+          clientMessageId: clientMessageIdFor(
+            runtimeJid,
+            content,
+            attachments,
+            followUpBehavior,
+          ),
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
@@ -6202,6 +6272,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // and no reply is coming, so the session must not wait for one.
       if (isClearedResponse(data)) return true;
       if (!data.success) throw new Error('服务器返回失败');
+      // A resend answered from the first attempt: that run may be long over.
+      if (data.deduplicated) return true;
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(runtimeJid, data.runId);
       }
