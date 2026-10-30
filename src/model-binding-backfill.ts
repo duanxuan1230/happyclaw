@@ -12,6 +12,8 @@
 import {
   getOrCreateDefaultAgentProfile,
   getSystemMainAdminUserId,
+  isDatabaseInitialized,
+  peekSystemMainAgentProfile,
   updateAgentProfile,
 } from './db.js';
 import { logger } from './logger.js';
@@ -21,6 +23,7 @@ import {
   getProviders,
   providerHasCredentials,
   readLegacyModelDefaults,
+  setGlobalModelConfigResolver,
   type UnifiedProvider,
 } from './runtime-config.js';
 
@@ -69,4 +72,16 @@ export function backfillSystemMainModelBinding(): ModelBindingBackfillResult {
     'Bound the system main HappyClaw to the former default model connection',
   );
   return { status: 'bound', modelConfigId: provider.id, model };
+}
+
+/**
+ * Point the host's own Claude calls (titles, recall, a launch nothing chose
+ * a connection for) at the system main HappyClaw's binding.
+ */
+export function installSystemMainModelConfigResolver(): void {
+  setGlobalModelConfigResolver(() =>
+    isDatabaseInitialized()
+      ? (peekSystemMainAgentProfile()?.model_config_id ?? null)
+      : null,
+  );
 }

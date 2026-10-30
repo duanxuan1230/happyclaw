@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
     enabledIds: [] as string[],
   },
   cleared: 0,
+  resolver: null as (() => string | null) | null,
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => ({
@@ -36,6 +37,9 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => ({
   ...((await importOriginal()) as Record<string, unknown>),
   getProviders: () => mocks.providers,
   readLegacyModelDefaults: () => mocks.legacy,
+  setGlobalModelConfigResolver: (resolver: () => string | null) => {
+    mocks.resolver = resolver;
+  },
   clearLegacyDefaultModelConfigId: () => {
     mocks.legacy.defaultModelConfigId = null;
     mocks.cleared += 1;
@@ -43,7 +47,7 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => ({
 }));
 
 const db = await import('../src/db.js');
-const { backfillSystemMainModelBinding } =
+const { backfillSystemMainModelBinding, installSystemMainModelConfigResolver } =
   await import('../src/model-binding-backfill.js');
 
 function provider(id: string, patch: Record<string, unknown> = {}) {
@@ -174,5 +178,14 @@ describe('backfillSystemMainModelBinding', () => {
     backfillSystemMainModelBinding();
     expect(mainOf('user-1').model_config_id).toBe('A');
     expect(mainOf('user-2').model_config_id).toBeNull();
+  });
+
+  test("the host's own calls follow the system main binding", () => {
+    installSystemMainModelConfigResolver();
+    expect(mocks.resolver?.()).toBe('A');
+    db.updateAgentProfile(mainOf('user-1').id, 'user-1', {
+      modelConfigId: null,
+    });
+    expect(mocks.resolver?.()).toBeNull();
   });
 });

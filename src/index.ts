@@ -116,7 +116,10 @@ import {
   hasUncoveredCursorMessageThrough,
   shouldRecoverPendingHistory,
 } from './delivery-cursor.js';
-import { backfillSystemMainModelBinding } from './model-binding-backfill.js';
+import {
+  backfillSystemMainModelBinding,
+  installSystemMainModelConfigResolver,
+} from './model-binding-backfill.js';
 import {
   AvailableGroup,
   ContainerInput,
@@ -22547,6 +22550,7 @@ async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
   logger.info('Database initialized');
+  installSystemMainModelConfigResolver();
   try {
     backfillSystemMainModelBinding();
   } catch (err) {
