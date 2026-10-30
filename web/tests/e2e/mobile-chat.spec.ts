@@ -388,20 +388,49 @@ test('the phone header’s ⋯ sheet says how full the context is; its buttons t
     }),
   );
   await prepareHarness(page);
+  // The 40px capsule buttons take taps 22px out from their centre, except
+  // where the other button's face is.
   const header = page.locator('[data-hc-chat-view] header').first();
-  for (const name of ['展开上下文面板', '更多选项']) {
-    const button = header.getByRole('button', { name, exact: true });
-    const target = await button.evaluate((element) => {
-      const box = element.getBoundingClientRect();
-      const hit = getComputedStyle(element, '::after');
-      return {
-        width: box.width - parseFloat(hit.left) - parseFloat(hit.right),
-        height: box.height - parseFloat(hit.top) - parseFloat(hit.bottom),
-      };
-    });
-    expect(target.width).toBeGreaterThanOrEqual(44);
-    expect(target.height).toBeGreaterThanOrEqual(44);
-  }
+  const files = header.getByRole('button', { name: '展开上下文面板' });
+  const more = header.getByRole('button', { name: '更多选项' });
+  const hits = await page.evaluate(
+    ([filesLabel, moreLabel]) => {
+      const button = (label: string) =>
+        document.querySelector<HTMLElement>(
+          `[data-hc-chat-view] header button[aria-label="${label}"]`,
+        )!;
+      const hit = (x: number, y: number) =>
+        document.elementFromPoint(x, y)?.closest('button')?.ariaLabel;
+      return [filesLabel, moreLabel].map((label) => {
+        const box = button(label).getBoundingClientRect();
+        const cx = box.x + box.width / 2;
+        const cy = box.y + box.height / 2;
+        return {
+          up: hit(cx, cy - 21.5),
+          down: hit(cx, cy + 21.5),
+          left: hit(cx - 21.5, cy),
+          right: hit(cx + 21.5, cy),
+        };
+      });
+    },
+    ['展开上下文面板', '更多选项'],
+  );
+  expect(hits).toEqual([
+    {
+      up: '展开上下文面板',
+      down: '展开上下文面板',
+      left: '展开上下文面板',
+      // The neighbouring ⋯ starts right there.
+      right: '更多选项',
+    },
+    {
+      up: '更多选项',
+      down: '更多选项',
+      left: '展开上下文面板',
+      right: '更多选项',
+    },
+  ]);
+  await expect(files).toBeVisible();
 
   await header.getByRole('button', { name: '更多选项' }).click();
   const sheet = page.getByRole('dialog', { name: '更多选项' });

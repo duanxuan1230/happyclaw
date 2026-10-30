@@ -1342,7 +1342,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const phoneCapsule =
     'phone:rounded-full phone:border phone:border-surface-border phone:bg-surface-raised/85';
   const phoneHeaderButton =
-    'phone:size-11 phone:rounded-full phone:text-foreground';
+    'phone:size-10 phone:rounded-full phone:text-foreground';
 
   return (
     <div
@@ -1382,7 +1382,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <nav
               aria-label="当前对话"
-              className="flex min-w-0 items-center gap-1 text-body phone:absolute phone:inset-x-[6.5rem] phone:justify-center phone:text-base phone:leading-[22px] phone:font-semibold"
+              className="flex min-w-0 items-center gap-1 text-body phone:absolute phone:inset-x-[5.75rem] phone:justify-center phone:text-base phone:leading-[22px] phone:font-semibold"
             >
               {activeAgentTab && isConversationTab ? (
                 <button
@@ -1517,7 +1517,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               }
               onClick={handleContextPanelToggle}
               className={cn(
-                'text-muted-foreground pointer-coarse:size-10',
+                // Its left neighbours are hidden on a phone: keep the whole hit area.
+                'text-muted-foreground pointer-coarse:size-10 phone:after:left-[min(0px,calc(50%-22px))]!',
                 phoneHeaderButton,
               )}
             />
