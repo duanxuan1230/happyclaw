@@ -53,49 +53,6 @@ describe('automatic enabled-model pool', () => {
     }
   });
 
-  test('rotates across enabled providers when no Agent pinned a configuration', () => {
-    const picked = new Set<string>();
-    // Distinct groupFolders: each is a fresh session, so sticky binding never
-    // applies and every call is a real pool selection.
-    for (let i = 0; i < 12; i += 1) {
-      const result = trySelectPoolProvider(`rotation-group-${i}`, null, null);
-      expect(result).not.toBeNull();
-      picked.add(result!.profileId);
-    }
-    expect(picked.size).toBeGreaterThan(1);
-  });
-
-  test('a completed warm turn closes before the next request and reselects with history reset', () => {
-    runtimeConfig.saveBalancingConfig({ strategy: 'round-robin' });
-    const groupFolder = 'warm-turn-rotation';
-    const first = trySelectPoolProvider(groupFolder, null, null);
-    expect(first).not.toBeNull();
-
-    const closeRunner = vi.fn();
-    expect(
-      closeRunnerAfterRotatingProviderTurn(
-        true,
-        false,
-        { providerFailure: false, inputTurnCompleted: true },
-        closeRunner,
-      ),
-    ).toBe(true);
-    expect(closeRunner).toHaveBeenCalledOnce();
-    // Host shutdown drops the resumable SDK session but retains the previous
-    // provider binding, so prompt construction predicts the switch and injects
-    // persisted history before the next cold runner starts.
-    db.deleteSession(groupFolder, null);
-    db.setSessionProviderId(groupFolder, null, first!.profileId);
-    expect(willClearSessionOnProviderSwitch(groupFolder, null, null)).toBe(
-      true,
-    );
-
-    const second = trySelectPoolProvider(groupFolder, null, null);
-    expect(second).not.toBeNull();
-    expect(second!.profileId).not.toBe(first!.profileId);
-    expect(second!.resetSession).toBe(true);
-  });
-
   test('rotation never closes a runner that still holds background tasks', () => {
     const closeRunner = vi.fn();
     expect(

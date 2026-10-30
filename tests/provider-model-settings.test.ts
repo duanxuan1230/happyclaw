@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'vitest';
 
-import { isOneMillionContextModel as backendIsOneMillion } from '../src/runtime-config.js';
 import {
   splitOneMillionSuffix,
   withOneMillionSuffix,
@@ -65,7 +64,7 @@ describe('third-party provider model settings', () => {
     ).toBe('200000');
   });
 
-  test('prefills the 1M compact window only for an explicit [1m] model, like the backend', () => {
+  test('prefills the 1M compact window only for an explicit [1m] model, like the shared split', () => {
     const window = (model: string, oneMillionContext = false) =>
       buildDefaultProviderEnv(
         withOneMillionSuffix(model, oneMillionContext),
@@ -91,8 +90,9 @@ describe('third-party provider model settings', () => {
       'glm-5.2[1m]',
       'deepseek-v4',
     ]) {
+      // The backend reads a 1M window from the shared suffix split.
       expect(isOneMillionContextModel(model), model).toBe(
-        backendIsOneMillion(model),
+        splitOneMillionSuffix(model).oneMillion,
       );
     }
   });
