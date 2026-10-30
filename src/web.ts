@@ -420,7 +420,13 @@ app.post('/api/messages', authMiddleware, async (c) => {
     idempotency?: WebSendIdempotency,
   ): Promise<WebSendOutcome> => {
     if (isClear || freshCommand) {
-      return runSessionResetCommand(chatJid, group, agentId, freshCommand);
+      return runSessionResetCommand(
+        chatJid,
+        group,
+        agentId,
+        freshCommand,
+        idempotency?.clientMessageId,
+      );
     }
     const displayName = authUser.display_name || authUser.username;
     const result = agentId
@@ -465,10 +471,33 @@ app.post('/api/messages', authMiddleware, async (c) => {
           ),
         },
         send,
+        () => requeueStoredWebInput(chatJid, agentId),
       )
     : await send();
   return c.json(outcome.body, outcome.status);
 });
+
+/**
+ * Hand a stored Web input whose request failed before queueing it to the
+ * queue again. The main chat's message loop polls stored inputs and picks it
+ * up by itself; a session (`#agent:`) input is only read when that session
+ * is next processed, so it is kicked here. Processing a session with nothing
+ * pending is a no-op, and a running session drains its queue when it ends.
+ */
+function requeueStoredWebInput(
+  chatJid: string,
+  agentId: string | undefined,
+): void {
+  if (!agentId || !deps?.processAgentConversation) return;
+  const virtualChatJid = `${chatJid}#agent:${agentId}`;
+  if (deps.queue.getActiveQueryId(virtualChatJid)) return;
+  const processAgentConversation = deps.processAgentConversation;
+  deps.queue.enqueueTask(
+    virtualChatJid,
+    `agent-conv:${agentId}:${Date.now()}`,
+    () => processAgentConversation(chatJid, agentId),
+  );
+}
 
 /** Run `/clear` or `/fresh [notes]`; failures post a system message. */
 async function runSessionResetCommand(
@@ -476,12 +505,23 @@ async function runSessionResetCommand(
   group: RegisteredGroup,
   agentId: string | undefined,
   freshCommand: ReturnType<typeof parseFreshCommand>,
+  clientMessageId: string | undefined,
 ): Promise<WebSendOutcome> {
   if (!deps) return { status: 500, body: { error: 'Server not initialized' } };
   const resetDeps = {
     queue: deps.queue,
     sessions: deps.getSessions(),
-    broadcast: broadcastNewMessage,
+    // The divider and reset notices carry the command's key, like a message.
+    broadcast: (
+      jid: string,
+      msg: Parameters<typeof broadcastNewMessage>[1],
+      ...rest: [agentId?: string, source?: string]
+    ) =>
+      broadcastNewMessage(
+        jid,
+        clientMessageId ? { ...msg, client_message_id: clientMessageId } : msg,
+        ...rest,
+      ),
     setLastAgentTimestamp: deps.setLastAgentTimestamp,
   };
   try {
@@ -595,8 +635,10 @@ const DEDUP_CONFLICT: WebSendOutcome = {
  * send that stored its message, or finished, gets the first answer back
  * without doing anything; one that arrives while the first is still running
  * waits for it. A send that failed before storing anything is not
- * remembered, so its resend is processed normally. Callers check access
- * before this, and the user is part of the key.
+ * remembered, so its resend is processed normally; one that failed after
+ * storing answers 500 with `stored: true`, and it and its replays `requeue`
+ * the stored input. Callers check access before this, and the user is part
+ * of the key.
  */
 async function sendOnce(
   key: {
@@ -606,6 +648,7 @@ async function sendOnce(
     fingerprint: string;
   },
   send: (idempotency: WebSendIdempotency) => Promise<WebSendOutcome>,
+  requeue: () => void,
 ): Promise<WebSendOutcome> {
   const { userId, chatJid, clientMessageId, fingerprint } = key;
   const mapKey = JSON.stringify([userId, chatJid, clientMessageId]);
@@ -620,7 +663,10 @@ async function sendOnce(
   const stored = getWebMessageDedup(userId, chatJid, clientMessageId);
   if (stored) {
     if (stored.fingerprint !== fingerprint) return DEDUP_CONFLICT;
-    return { status: 200, body: { ...stored.response, deduplicated: true } };
+    const { partial, ...response } = stored.response;
+    // Stored, but the first attempt failed before finishing: queue it again.
+    if (partial) requeueSafely(requeue, chatJid);
+    return { status: 200, body: { ...response, deduplicated: true } };
   }
 
   const remember = (response: Record<string, unknown>) => {
@@ -641,18 +687,46 @@ async function sendOnce(
       );
     }
   };
+  let storedMessageId: string | undefined;
   // Registered before the first await, so no concurrent resend can slip in.
   const done = send({
     clientMessageId,
-    onStored: (accepted) => remember({ success: true, ...accepted }),
+    onStored: (accepted) => {
+      storedMessageId = accepted.messageId;
+      remember({ success: true, ...accepted, partial: true });
+    },
   });
   inFlightWebSends.set(mapKey, { fingerprint, done });
   try {
     const outcome = await done;
     if (outcome.status === 200) remember(outcome.body);
     return outcome;
+  } catch (err) {
+    if (storedMessageId === undefined) throw err;
+    // The message is stored: tell the client so, and make sure it runs.
+    logger.error(
+      { chatJid, clientMessageId, messageId: storedMessageId, err },
+      'Web send failed after its message was stored',
+    );
+    requeueSafely(requeue, chatJid);
+    return {
+      status: 500,
+      body: {
+        error: '消息已保存，但处理失败',
+        stored: true,
+        messageId: storedMessageId,
+      },
+    };
   } finally {
     inFlightWebSends.delete(mapKey);
+  }
+}
+
+function requeueSafely(requeue: () => void, chatJid: string): void {
+  try {
+    requeue();
+  } catch (err) {
+    logger.warn({ chatJid, err }, 'Failed to requeue a stored Web input');
   }
 }
 
