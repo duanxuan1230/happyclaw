@@ -919,10 +919,10 @@ test.describe('touch composer', () => {
     await page.setViewportSize({ width: 390, height: 839 });
     const toolbar = page.locator('[data-composer-toolbar]');
     const plus = toolbar.getByRole('button', { name: '更多操作' });
-    // Only + is left on the row.
-    await expect(
-      toolbar.locator('[data-composer-tools]').getByRole('button'),
-    ).toHaveCount(1);
+    // Only + is left on the row (besides the model, in its own slot).
+    await expect(toolbar.locator('[data-composer-tools] > button')).toHaveCount(
+      1,
+    );
 
     // Clearing still asks first.
     await plus.click();
@@ -1261,11 +1261,22 @@ test.describe('touch composer', () => {
     expect(Math.round(viewport.width - pill.x - pill.width)).toBe(16);
     expect(Math.round(viewport.height - pill.y - pill.height)).toBe(8);
     expect(pill.height).toBeLessThan(56);
-    // + and send only: the model waits in the card.
-    await expect(
-      page.locator('[data-composer-tools]').getByRole('button'),
-    ).toHaveCount(1);
-    await expect(page.locator('[data-composer-model-slot]')).toBeHidden();
+    // +, the model's vendor chip and send: the model is one tap away
+    // without opening the card (or the keyboard) first.
+    await expect(page.locator('[data-composer-tools] > button')).toHaveCount(1);
+    const chip = page.locator('[data-model-pill="compact"]');
+    await expect(chip).toBeVisible();
+    const chipBox = (await chip.boundingBox())!;
+    expect([Math.round(chipBox.width), Math.round(chipBox.height)]).toEqual([
+      34, 34,
+    ]);
+    // Its touch target is padded to 44px.
+    expect(
+      await chip.evaluate((element) => {
+        const before = getComputedStyle(element, '::before');
+        return [before.position, before.top];
+      }),
+    ).toEqual(['absolute', '-5px']);
     // Tools: 34px with a light fill and a hairline.
     const plus = page.locator('[data-composer-tools] button').first();
     expect(

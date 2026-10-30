@@ -47,7 +47,8 @@ export default defineConfig({
       ? [
           {
             name: 'webkit-iphone',
-            testMatch: /composer\.spec\.ts$/,
+            // The model picker's taps, where iOS focus rules apply for real.
+            testMatch: /(composer|model-selector)\.spec\.ts$/,
             use: { ...devices['iPhone 14'] },
           },
           {
