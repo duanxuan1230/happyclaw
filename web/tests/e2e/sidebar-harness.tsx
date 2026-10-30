@@ -5,6 +5,7 @@
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { UnifiedSidebar } from '../../src/components/layout/UnifiedSidebar';
+import { CreateWorkspaceHost } from '../../src/components/layout/CreateWorkspaceHost';
 import { ConfirmHost } from '../../src/components/common/ConfirmHost';
 import { Toaster } from '../../src/components/ui/sonner';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
@@ -200,6 +201,7 @@ createRoot(document.getElementById('root')!).render(
         <div className="flex h-[100dvh] overflow-hidden bg-app-shell">
           <UnifiedSidebar />
           <RouteProbe />
+          <CreateWorkspaceHost />
         </div>
       </MemoryRouter>
       <Toaster />

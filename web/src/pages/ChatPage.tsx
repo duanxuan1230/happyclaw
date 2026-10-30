@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  useLocation,
-  useNavigate,
-  useParams,
-  useSearchParams,
-} from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { FolderPlus, Plus, SquarePen } from 'lucide-react';
 import { useChatStore } from '../stores/chat';
 import { useAuthStore } from '../stores/auth';
@@ -20,10 +15,7 @@ import { NewConversationFab } from '../components/layout/NewConversationFab';
 import { useIsPhone } from '../components/layout/phone';
 import { ConfirmDialog } from '../components/common';
 import { RenameDialog } from '../components/chat/RenameDialog';
-import {
-  lazyBugReportDialog,
-  lazyCreateContainerDialog,
-} from '../components/common/lazy-dialogs';
+import { lazyBugReportDialog } from '../components/common/lazy-dialogs';
 import { useOpenedOnce } from '../lib/preloaded-component';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { SkeletonCardList } from '../components/common/Skeletons';
@@ -43,6 +35,8 @@ import { withBasePath } from '../utils/url';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 import { useClearWorkspace } from '../hooks/useClearWorkspace';
 import type { GroupEntry } from '../utils/group-utils';
+import { hasAppEntryBefore } from '../lib/chat-navigation';
+import { cn } from '@/lib/utils';
 import { useDeleteWorkspace } from '../hooks/useDeleteWorkspace';
 import { useWorkspaceTree } from '../hooks/useWorkspaceTree';
 import { useNewConversation } from '../hooks/useNewConversation';
@@ -58,28 +52,20 @@ import {
 } from '@/components/ui/empty';
 
 const BugReportDialog = lazyBugReportDialog.Component;
-const CreateContainerDialog = lazyCreateContainerDialog.Component;
-
-/** Where the phone home list opens a workspace (the `?sessions=1` redirect). */
-interface PhoneHomeState {
-  revealWorkspace?: string;
-}
-
-function revealState(folder: string | undefined): PhoneHomeState {
-  return { revealWorkspace: folder };
-}
 
 export function ChatPage() {
   const { groupFolder } = useParams<{ groupFolder?: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams] = useSearchParams();
   // Phones have one list (workspaces with their sessions) instead of the
   // workspace list → session list → chat levels of narrow windows.
   const isPhone = useIsPhone();
   const phoneSessionsLink =
     isPhone && !!groupFolder && searchParams.get('sessions') === '1';
-  const showPhoneHome = isPhone && (!groupFolder || phoneSessionsLink);
+  // On a phone the home list stays mounted under an open conversation, so
+  // going back finds it where it was (scroll, 显示更多) and a swipe back
+  // shows it under the finger.
+  const phoneChatOpen = isPhone && !!groupFolder && !phoneSessionsLink;
   // 窄 selector：整 store 订阅会让整个页面跟着流式输出每帧重渲染。
   const groups = useChatStore((s) => s.groups);
   const currentGroup = useChatStore((s) => s.currentGroup);
@@ -94,9 +80,6 @@ export function ChatPage() {
     closeClear,
     handleClearConfirm,
   } = useClearWorkspace();
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createAgentId, setCreateAgentId] = useState<string | null>(null);
-  const createMounted = useOpenedOnce(createOpen);
   const [renameState, setRenameState] = useState({
     open: false,
     jid: '',
@@ -132,7 +115,9 @@ export function ChatPage() {
   // Mobile and desktop share the same Agent-first navigation contract.
   const { agentSections, agentPartitions } = useWorkspaceTree();
   const { startNewConversation, creatingSession } = useNewConversation();
-  const setDesktopCreateOpen = useShellStore((s) => s.setCreateWorkspaceOpen);
+  // One create-workspace dialog for the app, hosted by AppLayout.
+  const setCreateOpen = useShellStore((s) => s.setCreateWorkspaceOpen);
+  const revealOnPhoneHome = useShellStore((s) => s.revealOnPhoneHome);
   const hasAnyGroup = agentSections.length > 0;
 
   // Sync URL param to store selection. No auto-redirect to home container —
@@ -173,19 +158,34 @@ export function ChatPage() {
   // ChatView's own session list.
   useEffect(() => {
     if (!phoneSessionsLink || !groupFolder) return;
-    navigate('/chat', { replace: true, state: revealState(groupFolder) });
-  }, [phoneSessionsLink, groupFolder, navigate]);
-  const revealFolder = (location.state as PhoneHomeState | null)
-    ?.revealWorkspace;
+    revealOnPhoneHome(groupFolder);
+    navigate('/chat', { replace: true });
+  }, [phoneSessionsLink, groupFolder, navigate, revealOnPhoneHome]);
 
   const activeGroupJid = groupFolder ? routeGroupJid : currentGroup;
   const chatViewRef = useRef<HTMLDivElement>(null);
+  const phoneHomeRef = useRef<HTMLDivElement>(null);
 
-  const handleBackToList = () => {
-    navigate('/chat', { state: revealState(groupFolder) });
-  };
+  // A phone steps back to where the conversation was opened from, without
+  // stacking another list entry; opened directly, it lands on the list
+  // with this workspace in view. Narrow windows keep their list level.
+  const handleBackToList = useStableCallback(() => {
+    if (!isPhone) {
+      navigate('/chat');
+      return;
+    }
+    if (hasAppEntryBefore()) {
+      navigate(-1);
+      return;
+    }
+    if (groupFolder) revealOnPhoneHome(groupFolder);
+    navigate('/chat', { replace: true });
+  });
 
-  useSwipeBack(chatViewRef, handleBackToList);
+  useSwipeBack(chatViewRef, handleBackToList, {
+    underlayRef: phoneHomeRef,
+    enabled: phoneChatOpen && !!activeGroupJid,
+  });
 
   const selectMobileWorkspace = (group: GroupEntry) => {
     selectGroup(group.jid);
@@ -195,10 +195,9 @@ export function ChatPage() {
   const renameWorkspace = useStableCallback((jid: string, name: string) =>
     setRenameState({ open: true, jid, name }),
   );
-  const createAgentWorkspace = useStableCallback((agentId: string) => {
-    setCreateAgentId(agentId);
-    setCreateOpen(true);
-  });
+  const createAgentWorkspace = useStableCallback((agentId: string) =>
+    setCreateOpen(true, agentId),
+  );
   const openAgent = useStableCallback((agentId: string) =>
     navigate(`/agent-profiles?agent=${encodeURIComponent(agentId)}`),
   );
@@ -252,13 +251,20 @@ export function ChatPage() {
   );
 
   return (
-    <div className="h-full flex bg-background">
+    <div className={cn('h-full flex bg-background', isPhone && 'relative')}>
       {/* Phone home: one list of workspaces and their sessions, the drawer's
-          hamburger on the left and the new-conversation button. */}
-      {showPhoneHome && (
+          hamburger on the left and the new-conversation button. Under an
+          open conversation it is hidden and inert but keeps its layout, so
+          its scroll position survives. */}
+      {isPhone && (
         <div
+          ref={phoneHomeRef}
           data-hc-phone-home
-          className="w-full overflow-y-auto overscroll-y-contain pb-[calc(83px+env(safe-area-inset-bottom,0px))]"
+          inert={phoneChatOpen}
+          className={cn(
+            'absolute inset-0 overflow-y-auto overscroll-y-contain pb-[calc(83px+env(safe-area-inset-bottom,0px))]',
+            phoneChatOpen && 'invisible',
+          )}
         >
           <header className="sticky top-0 z-20 flex h-14 items-center gap-1 bg-background/85 px-2 backdrop-blur-xl">
             <NavDrawerButton />
@@ -279,11 +285,7 @@ export function ChatPage() {
               primary={agentPartitions.primary}
               custom={agentPartitions.custom}
               actions={workspaceActions}
-              reveal={
-                revealFolder
-                  ? { folder: revealFolder, key: location.key }
-                  : null
-              }
+              paused={phoneChatOpen}
             />
           ) : loading ? (
             <div className="px-4 pt-4">
@@ -367,15 +369,22 @@ export function ChatPage() {
         </div>
       )}
 
-      {/* Chat View - Desktop: visible when active group exists, Mobile: only in detail route */}
-      {activeGroupJid ? (
+      {/* Phone: the open conversation, over the home list. */}
+      {phoneChatOpen && activeGroupJid && (
         <div
           ref={chatViewRef}
-          className={`${groupFolder && !showPhoneHome ? 'flex-1 min-w-0 h-full overflow-hidden' : 'hidden lg:block flex-1 min-w-0 h-full overflow-hidden'}`}
+          className="absolute inset-0 z-10 overflow-hidden bg-background"
         >
-          {/* Stays mounted behind the phone list so the composer draft,
-              pending attachments and scroll position survive going back;
-              with the WebSocket up it only polls every 30s. */}
+          <ChatView groupJid={activeGroupJid} onBack={handleBackToList} />
+        </div>
+      )}
+
+      {/* Chat View - Desktop: visible when active group exists, narrow
+          windows: only in the detail route. */}
+      {isPhone ? null : activeGroupJid ? (
+        <div
+          className={`${groupFolder ? 'flex-1 min-w-0 h-full overflow-hidden' : 'hidden lg:block flex-1 min-w-0 h-full overflow-hidden'}`}
+        >
           <ChatView groupJid={activeGroupJid} onBack={handleBackToList} />
         </div>
       ) : (
@@ -403,10 +412,7 @@ export function ChatPage() {
               <SquarePen />
               新对话
             </Button>
-            <Button
-              variant="outline"
-              onClick={() => setDesktopCreateOpen(true)}
-            >
+            <Button variant="outline" onClick={() => setCreateOpen(true)}>
               <Plus />
               新建工作区
             </Button>
@@ -442,21 +448,6 @@ export function ChatPage() {
         onConfirm={handleDeleteConfirm}
         loading={deleteLoading}
       />
-      {createMounted && (
-        <CreateContainerDialog
-          open={createOpen}
-          defaultAgentProfileId={createAgentId}
-          onClose={() => {
-            setCreateOpen(false);
-            setCreateAgentId(null);
-          }}
-          onCreated={(jid, folder) => {
-            selectGroup(jid);
-            if (isPhone) navigate('/chat', { state: revealState(folder) });
-            else navigate(`/chat/${folder}?sessions=1`);
-          }}
-        />
-      )}
     </div>
   );
 }

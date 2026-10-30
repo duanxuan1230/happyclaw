@@ -26,6 +26,7 @@ import { useGlobalStreamSubscriptions } from '../../hooks/useStreamSubscriptions
 import { useUsageLimitWaitSubscription } from '../../stores/usage-limit-waits';
 import { useAutomationSubscription } from '../../stores/automations';
 import { AutomationFormHost } from '../automations/AutomationFormHost';
+import { CreateWorkspaceHost } from './CreateWorkspaceHost';
 
 export function AppLayout() {
   const location = useLocation();
@@ -209,7 +210,7 @@ export function AppLayout() {
           {isDesktop && <UnifiedSidebar />}
 
           {/* Desktop: pages render on an inset canvas floating in the shell. */}
-          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden [--app-canvas-h:100dvh] lg:my-2 lg:mr-2 lg:rounded-xl lg:bg-background lg:shadow-canvas lg:ring-1 lg:ring-surface-border lg:[--app-canvas-h:calc(100dvh-1rem)]">
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden [--app-canvas-h:100dvh] phone:pr-[env(safe-area-inset-right,0px)] phone:pl-[env(safe-area-inset-left,0px)] lg:my-2 lg:mr-2 lg:rounded-xl lg:bg-background lg:shadow-canvas lg:ring-1 lg:ring-surface-border lg:[--app-canvas-h:calc(100dvh-1rem)]">
             <ConnectionBanner />
             {/* The page names itself below; the bar only holds the menu. */}
             {showPhoneTopBar && <PhoneTopBar />}
@@ -230,6 +231,7 @@ export function AppLayout() {
           {isPhone ? <NavDrawer /> : !hideMobileTabBar && <BottomTabBar />}
           <CommandPaletteHost />
           <AutomationFormHost />
+          <CreateWorkspaceHost />
         </div>
       </TooltipProvider>
     </MotionProvider>

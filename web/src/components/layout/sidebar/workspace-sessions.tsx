@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Link2, Pencil, Timer, Trash2 } from 'lucide-react';
-import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { PromptDialog } from '@/components/common/PromptDialog';
 import { isLiveStream, useChatStore } from '../../../stores/chat';
 import { buildConversationSessions } from '../../../lib/session-presentation';
 import type { AgentInfo } from '../../../types';
+import type { MenuAction } from '../../common/ResponsiveMenu';
+import { MenuActionItems } from './WorkspaceTree';
 
 // Session lists shared by the desktop sidebar tree and the phone home list.
 
@@ -16,22 +17,28 @@ export const MAIN_BINDING = '__main__';
 /**
  * A workspace's conversations, newest first. They are fetched once the
  * element behind `containerRef` scrolls into view: a workspace far down a
- * long list should not cost a request on every load.
+ * long list should not cost a request on every load. While `paused` (the
+ * list is hidden) the running state is not recomputed per store update.
  */
-export function useWorkspaceSessions<T extends Element>(groupJid: string) {
+export function useWorkspaceSessions<T extends Element>(
+  groupJid: string,
+  { paused = false }: { paused?: boolean } = {},
+) {
   const loadAgents = useChatStore((s) => s.loadAgents);
   const agents = useChatStore((s) => s.agents[groupJid] ?? EMPTY_AGENTS);
   // A joined id string keeps streaming deltas from re-rendering the list:
   // it only changes when a session starts or stops answering.
   // A card frozen by a stop is not a running query.
-  const activeQueryIds = useChatStore((s) =>
-    (s.agents[groupJid] ?? EMPTY_AGENTS)
+  const lastActiveRef = useRef('');
+  const activeQueryIds = useChatStore((s) => {
+    if (paused) return lastActiveRef.current;
+    return (lastActiveRef.current = (s.agents[groupJid] ?? EMPTY_AGENTS)
       .filter(
         (a) => s.agentWaiting[a.id] || isLiveStream(s.agentStreaming[a.id]),
       )
       .map((a) => a.id)
-      .join(','),
-  );
+      .join(','));
+  });
 
   const containerRef = useRef<T>(null);
   useEffect(() => {
@@ -60,44 +67,46 @@ export function useWorkspaceSessions<T extends Element>(groupJid: string) {
   return { containerRef, sessions };
 }
 
-/** A conversation row's ⋯ items; the main conversation only binds. */
-export function SessionMenuItems({
-  onBind,
-  onCreateAutomation,
-  onRename,
-  onDelete,
-}: {
+interface SessionMenuHandlers {
   onBind: () => void;
   onCreateAutomation?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
-}) {
-  return (
-    <>
-      <DropdownMenuItem onClick={onBind}>
-        <Link2 />
-        会话绑定
-      </DropdownMenuItem>
-      {onCreateAutomation && (
-        <DropdownMenuItem onClick={onCreateAutomation}>
-          <Timer />
-          从此会话创建自动化…
-        </DropdownMenuItem>
-      )}
-      {onRename && (
-        <DropdownMenuItem onClick={onRename}>
-          <Pencil />
-          重命名
-        </DropdownMenuItem>
-      )}
-      {onDelete && (
-        <DropdownMenuItem variant="destructive" onClick={onDelete}>
-          <Trash2 />
-          删除
-        </DropdownMenuItem>
-      )}
-    </>
-  );
+}
+
+/** A conversation row's ⋯ actions; the main conversation only binds. */
+export function sessionMenuGroups({
+  onBind,
+  onCreateAutomation,
+  onRename,
+  onDelete,
+}: SessionMenuHandlers): MenuAction[][] {
+  const actions: MenuAction[] = [
+    { label: '会话绑定', icon: Link2, onSelect: onBind },
+  ];
+  if (onCreateAutomation) {
+    actions.push({
+      label: '从此会话创建自动化…',
+      icon: Timer,
+      onSelect: onCreateAutomation,
+    });
+  }
+  if (onRename)
+    actions.push({ label: '重命名', icon: Pencil, onSelect: onRename });
+  if (onDelete) {
+    actions.push({
+      label: '删除',
+      icon: Trash2,
+      destructive: true,
+      onSelect: onDelete,
+    });
+  }
+  return [actions];
+}
+
+/** The same actions as dropdown items, for the desktop session tree. */
+export function SessionMenuItems(handlers: SessionMenuHandlers) {
+  return <MenuActionItems groups={sessionMenuGroups(handlers)} />;
 }
 
 /** Renames `session` (open while it is set). */

@@ -1,5 +1,7 @@
 import {
+  createContext,
   memo,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -48,6 +50,9 @@ import {
 import type { AgentDisplayIdentity } from '../../../utils/agent-identity';
 import type { AgentInfo, SessionWorktreeInfo } from '../../../types';
 import { WorktreeBranchTag } from '../../chat/WorktreeBranchTag';
+import { lazyImBindingDialog } from '../../common/lazy-dialogs';
+import { useLongPress } from '../../../hooks/useLongPress';
+import type { MenuAction } from '../../common/ResponsiveMenu';
 import type { GroupEntry } from '../../../utils/group-utils';
 import {
   AgentAvatar,
@@ -61,9 +66,11 @@ import {
 import {
   MAIN_BINDING,
   RenameSessionDialog,
-  SessionMenuItems,
+  sessionMenuGroups,
   useWorkspaceSessions,
 } from './workspace-sessions';
+
+const ImBindingDialog = lazyImBindingDialog.Component;
 
 /** Sessions shown under a workspace before 显示更多, as in cindy's projects. */
 const INITIAL_VISIBLE = 5;
@@ -90,9 +97,11 @@ interface PhoneWorkspaceListProps {
   primary: AgentWorkspaceSection | null;
   custom: AgentWorkspaceSection[];
   actions: PhoneWorkspaceActions;
-  /** A workspace to expand and scroll to, once per navigation `key`. */
-  reveal?: { folder: string; key: string } | null;
+  /** Hidden under an open conversation: skip per-update work. */
+  paused?: boolean;
 }
+
+const ListPausedContext = createContext(false);
 
 /**
  * The phone home, after cindy's mobile list: one level where each workspace
@@ -105,7 +114,7 @@ export function PhoneWorkspaceList({
   primary,
   custom,
   actions,
-  reveal = null,
+  paused = false,
 }: PhoneWorkspaceListProps) {
   const navigate = useNavigate();
   const appearance = useAuthStore((s) => s.appearance);
@@ -157,24 +166,28 @@ export function PhoneWorkspaceList({
     ].filter((section) => section.entries.length > 0);
   }, [primary, custom, appearance, username]);
 
-  // `?sessions=1` lands here: open that workspace and bring it into view.
+  // `?sessions=1` or a new workspace: open it and bring it into view, once
+  // per request. Going back to the list asks for nothing, so the list stays
+  // where the user left it.
   const listRef = useRef<HTMLDivElement>(null);
+  const reveal = useShellStore((s) => s.phoneHomeReveal);
+  const clearReveal = useShellStore((s) => s.clearPhoneHomeReveal);
   useEffect(() => {
     if (!reveal) return;
     const entry = sections
       .flatMap((section) => section.entries)
       .find((item) => item.group.folder === reveal.folder);
+    // A new workspace may not be listed yet: wait for it.
     if (!entry) return;
+    clearReveal();
     revealWorkspace(entry.group.jid);
-    const frame = requestAnimationFrame(() =>
+    // Not cancelled with the effect: clearing the request re-runs it.
+    requestAnimationFrame(() =>
       listRef.current
         ?.querySelector(`[data-phone-workspace="${CSS.escape(reveal.folder)}"]`)
         ?.scrollIntoView({ block: 'start' }),
     );
-    return () => cancelAnimationFrame(frame);
-    // Once per navigation: later list changes must not scroll the page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal?.key]);
+  }, [reveal, sections, clearReveal, revealWorkspace]);
 
   const navigateTo = useStableCallback((to: string) => navigate(to));
   const toggleExpanded = useStableCallback((jid: string, expanded: boolean) =>
@@ -198,27 +211,29 @@ export function PhoneWorkspaceList({
   );
 
   return (
-    <div ref={listRef} data-hc-phone-workspace-list>
-      {sections.map((section) => (
-        <section key={section.title} aria-label={section.title}>
-          <h2 className="px-4 pt-4 pb-1 text-label font-medium text-faint-foreground">
-            {section.title}
-          </h2>
-          <ul>
-            {section.entries.map((entry) => (
-              <WorkspaceBlock
-                key={entry.group.jid}
-                entry={entry}
-                expanded={expandedWorkspaces[entry.group.jid] !== false}
-                onExpandedChange={toggleExpanded}
-                menuActions={menuActions}
-                navigate={navigateTo}
-              />
-            ))}
-          </ul>
-        </section>
-      ))}
-    </div>
+    <ListPausedContext.Provider value={paused}>
+      <div ref={listRef} data-hc-phone-workspace-list>
+        {sections.map((section) => (
+          <section key={section.title} aria-label={section.title}>
+            <h2 className="px-4 pt-4 pb-1 text-label font-medium text-faint-foreground">
+              {section.title}
+            </h2>
+            <ul>
+              {section.entries.map((entry) => (
+                <WorkspaceBlock
+                  key={entry.group.jid}
+                  entry={entry}
+                  expanded={expandedWorkspaces[entry.group.jid] !== false}
+                  onExpandedChange={toggleExpanded}
+                  menuActions={menuActions}
+                  navigate={navigateTo}
+                />
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+    </ListPausedContext.Provider>
   );
 }
 
@@ -337,13 +352,15 @@ function WorkspaceSessions({
 }) {
   const { containerRef, sessions } = useWorkspaceSessions<HTMLUListElement>(
     group.jid,
+    { paused: useContext(ListPausedContext) },
   );
-  const requestBinding = useShellStore((s) => s.requestBinding);
   const openCreateAutomation = useAutomationsStore((s) => s.openCreateForm);
   const boundTo = useBoundAutomations(group.jid);
   const { deleteSession } = useSessionActions();
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [renameTarget, setRenameTarget] = useState<AgentInfo | null>(null);
+  // `MAIN_BINDING` or a session id while its binding dialog is open.
+  const [bindingTarget, setBindingTarget] = useState<string | null>(null);
 
   const canModify = !!group.can_modify;
   const mainLabel = group.is_my_home ? '直接对话' : '当前对话';
@@ -355,12 +372,11 @@ function WorkspaceSessions({
   const hidden = others.length - visibleCount;
   const open = (sessionId: string | null) =>
     openWorkspaceSession(navigate, group, sessionId);
-  // Binding lives in ChatView, which stays mounted behind this list for the
-  // current workspace: make this one current and let it open the dialog.
-  const openBinding = (target: string) => {
-    useChatStore.getState().selectGroup(group.jid);
-    requestBinding(group.jid, target);
-  };
+  const openBinding = (target: string) => setBindingTarget(target);
+  const bindingSession =
+    bindingTarget && bindingTarget !== MAIN_BINDING
+      ? sessions.find((session) => session.id === bindingTarget)
+      : undefined;
   const createAutomationFrom = (sessionId: string | null) =>
     openCreateAutomation({
       workspaceJid: group.jid,
@@ -388,14 +404,15 @@ function WorkspaceSessions({
         automations={boundTo(session)}
         onOpen={() => open(session.id)}
         menu={
-          canModify && !isNativeManagedSession(session) ? (
-            <SessionMenuItems
-              onBind={() => openBinding(session.id)}
-              onCreateAutomation={() => createAutomationFrom(session.id)}
-              onRename={() => setRenameTarget(session)}
-              onDelete={() => deleteSession(group.jid, session.id, openBinding)}
-            />
-          ) : undefined
+          canModify && !isNativeManagedSession(session)
+            ? sessionMenuGroups({
+                onBind: () => openBinding(session.id),
+                onCreateAutomation: () => createAutomationFrom(session.id),
+                onRename: () => setRenameTarget(session),
+                onDelete: () =>
+                  deleteSession(group.jid, session.id, openBinding),
+              })
+            : undefined
         }
       />
     );
@@ -412,12 +429,12 @@ function WorkspaceSessions({
         automations={boundTo(null)}
         onOpen={() => open(null)}
         menu={
-          canModify ? (
-            <SessionMenuItems
-              onBind={() => openBinding(MAIN_BINDING)}
-              onCreateAutomation={() => createAutomationFrom(null)}
-            />
-          ) : undefined
+          canModify
+            ? sessionMenuGroups({
+                onBind: () => openBinding(MAIN_BINDING),
+                onCreateAutomation: () => createAutomationFrom(null),
+              })
+            : undefined
         }
       />
       {automationGroups.map((automationGroup) => (
@@ -446,6 +463,15 @@ function WorkspaceSessions({
         session={renameTarget}
         onClose={() => setRenameTarget(null)}
       />
+      {bindingTarget && (
+        <ImBindingDialog
+          open
+          groupJid={group.jid}
+          agentId={bindingTarget === MAIN_BINDING ? null : bindingTarget}
+          agent={bindingSession}
+          onClose={() => setBindingTarget(null)}
+        />
+      )}
     </ul>
   );
 }
@@ -453,7 +479,8 @@ function WorkspaceSessions({
 /**
  * A 78px conversation row: title (18/28) with the time at the top right,
  * a one-line preview (15/26) under it, and the ⋯ menu at the end of the
- * preview line. The whole row opens the conversation.
+ * preview line. The whole row opens the conversation; holding it opens the
+ * same menu.
  */
 function PhoneSessionRow({
   title,
@@ -476,12 +503,23 @@ function PhoneSessionRow({
   /** Automations bound to this session, shown as a timer mark. */
   automations?: Automation[];
   onOpen: () => void;
-  menu?: ReactNode;
+  menu?: MenuAction[][];
 }) {
   const previewId = useId();
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Fetched as the menu opens, so 会话绑定 opens its dialog in the same tap
+  // that closes the sheet: one hands its history entry to the other.
+  const openMenu = (open: boolean) => {
+    if (open) void lazyImBindingDialog.preload();
+    setMenuOpen(open);
+  };
+  const longPress = useLongPress(() => openMenu(true));
   return (
     // Indented to the workspace name, so the row reads as part of it.
-    <li className="relative list-none pl-13 active:bg-surface-hover">
+    <li
+      className="relative list-none pl-13 active:bg-surface-hover"
+      {...(menu ? longPress : {})}
+    >
       <div className="grid h-[78px] grid-cols-[minmax(0,1fr)_auto] grid-rows-[28px_26px] content-center items-center gap-x-2 border-b border-surface-border pr-2">
         <span className="flex min-w-0 items-center gap-1.5">
           {/* The button's box covers the row, so tapping anywhere opens it;
@@ -530,9 +568,13 @@ function PhoneSessionRow({
         </span>
         <span className="relative z-10 -my-2 justify-self-end">
           {menu && (
-            <RowMenu label={`${title}的更多操作`} touch>
-              {menu}
-            </RowMenu>
+            <RowMenu
+              label={`${title}的更多操作`}
+              touch
+              groups={menu}
+              open={menuOpen}
+              onOpenChange={openMenu}
+            />
           )}
         </span>
       </div>

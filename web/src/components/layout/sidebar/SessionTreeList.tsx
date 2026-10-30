@@ -180,7 +180,8 @@ export const SessionTreeList = memo(function SessionTreeList({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`搜索 ${sessions.length + 1} 个会话…`}
-            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-faint-foreground"
+            enterKeyHint="search"
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-faint-foreground phone:text-base"
           />
         </label>
       )}

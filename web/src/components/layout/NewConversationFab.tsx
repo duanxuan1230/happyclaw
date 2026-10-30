@@ -24,7 +24,7 @@ export function NewConversationFab() {
       aria-busy={creatingSession || undefined}
       disabled={creatingSession}
       onClick={start}
-      className="fixed right-4 bottom-[calc(env(safe-area-inset-bottom,0px)+8px)] z-30 grid size-[55px] cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground shadow-floating outline-none transition-transform duration-150 ease-snappy focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 active:scale-94 disabled:cursor-default disabled:opacity-70 motion-reduce:transition-none motion-reduce:active:scale-100"
+      className="fixed right-[calc(env(safe-area-inset-right,0px)+1rem)] bottom-[calc(env(safe-area-inset-bottom,0px)+8px)] z-30 grid size-[55px] cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground shadow-floating outline-none transition-transform duration-150 ease-snappy focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 active:scale-94 disabled:cursor-default disabled:opacity-70 motion-reduce:transition-none motion-reduce:active:scale-100"
     >
       <SquarePen className="size-6" aria-hidden="true" />
     </button>

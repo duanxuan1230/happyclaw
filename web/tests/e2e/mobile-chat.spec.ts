@@ -378,3 +378,90 @@ for (const visibility of [
     else await expect(terminal).toHaveCount(0);
   });
 }
+
+test('the phone header’s ⋯ sheet says how full the context is; its buttons take 44px taps', async ({
+  page,
+}) => {
+  await page.route('**/api/groups/**/context-usage*', (route) =>
+    route.fulfill({
+      json: { usedTokens: 12_000, contextWindow: 200_000, percentage: 6 },
+    }),
+  );
+  await page.route('**/api/groups/**/model-selection*', (route) =>
+    route.fulfill({
+      json: {
+        selectedModelConfigId: null,
+        selectedModel: null,
+        selectedEffort: null,
+        default: { source: 'pool', modelConfigId: null, enabledCount: 1 },
+        options: [
+          {
+            id: 'official',
+            name: 'Claude 官方',
+            kind: 'official',
+            enabled: true,
+            model: 'opus',
+            usable: true,
+          },
+        ],
+      },
+    }),
+  );
+  await prepareHarness(page);
+  // The 40px capsule buttons take taps 22px out from their centre, except
+  // where the other button's face is.
+  const header = page.locator('[data-hc-chat-view] header').first();
+  const files = header.getByRole('button', { name: '展开上下文面板' });
+  const more = header.getByRole('button', { name: '更多选项' });
+  const hits = await page.evaluate(
+    ([filesLabel, moreLabel]) => {
+      const button = (label: string) =>
+        document.querySelector<HTMLElement>(
+          `[data-hc-chat-view] header button[aria-label="${label}"]`,
+        )!;
+      const hit = (x: number, y: number) =>
+        document.elementFromPoint(x, y)?.closest('button')?.ariaLabel;
+      return [filesLabel, moreLabel].map((label) => {
+        const box = button(label).getBoundingClientRect();
+        const cx = box.x + box.width / 2;
+        const cy = box.y + box.height / 2;
+        return {
+          up: hit(cx, cy - 21.5),
+          down: hit(cx, cy + 21.5),
+          left: hit(cx - 21.5, cy),
+          right: hit(cx + 21.5, cy),
+        };
+      });
+    },
+    ['展开上下文面板', '更多选项'],
+  );
+  expect(hits).toEqual([
+    {
+      up: '展开上下文面板',
+      down: '展开上下文面板',
+      left: '展开上下文面板',
+      // The neighbouring ⋯ starts right there.
+      right: '更多选项',
+    },
+    {
+      up: '更多选项',
+      down: '更多选项',
+      left: '展开上下文面板',
+      right: '更多选项',
+    },
+  ]);
+  await expect(files).toBeVisible();
+
+  await header.getByRole('button', { name: '更多选项' }).click();
+  const sheet = page.getByRole('dialog', { name: '更多选项' });
+  await expect(sheet.getByRole('button', { name: '切换模型' })).toBeVisible();
+  await settleAnimations(sheet);
+  // The usage row opens the model sheet, which shows the same figures.
+  await sheet
+    .getByRole('button', { name: '上下文 已用 12K / 200K（6%）' })
+    .click();
+  await expect(sheet).toHaveCount(0);
+  await expect(page.locator('[data-context-usage-line]')).toHaveText(
+    '上下文 已用 12K / 200K（6%）',
+  );
+});
