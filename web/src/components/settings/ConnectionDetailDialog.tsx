@@ -35,7 +35,6 @@ import { ConnectionTestResult } from './ConnectionTestResult';
 import {
   AUTH_MODE_LABELS,
   AUTO_AUTH_MODE_HINT,
-  allowsNoDefaultModel,
   confirmProtocolChange,
   connectionKind,
   connectionKindLabel,
@@ -53,11 +52,14 @@ import { OAuthLoginPanel } from './OAuthLoginPanel';
 import {
   ProviderEnvEditor,
   buildProviderCustomEnv,
-  splitProviderEnv,
-  type ProviderEnvDraft,
+  envRowsFrom,
 } from './ProviderEnvEditor';
 import { SettingsField, SettingsSection } from './SettingsLayout';
-import { getErrorMessage, type UnifiedProviderPublic } from './types';
+import {
+  getErrorMessage,
+  type EnvRow,
+  type UnifiedProviderPublic,
+} from './types';
 
 export type ConnectionUpdate = Pick<UnifiedProviderPublic, 'id'> &
   Partial<UnifiedProviderPublic>;
@@ -262,11 +264,11 @@ function ConnectionDetail({
       ) : (
         <SettingsSection
           title="模型"
-          description="打开的模型会出现在聊天的模型选择里；默认模型用于没有指定模型的对话。"
+          description="这些模型都可以在聊天和智能体里选择。"
         >
           <ConnectionModelList
             provider={provider}
-            allowNoDefault={allowsNoDefaultModel(kind)}
+            thirdParty={thirdParty}
             onSaved={onChanged}
             setNotice={setNotice}
             setError={setError}
@@ -380,12 +382,9 @@ function ConnectionSettings({
   const thirdParty = isThirdPartyKind(kind);
   const [baseUrl, setBaseUrl] = useState(provider.anthropicBaseUrl);
   const [secret, setSecret] = useState('');
-  const initialEnv = splitProviderEnv(
-    thirdParty,
-    provider.customEnv ?? {},
-    provider.anthropicModel,
+  const [env, setEnv] = useState<EnvRow[]>(() =>
+    envRowsFrom(provider.customEnv ?? {}),
   );
-  const [env, setEnv] = useState<ProviderEnvDraft>(initialEnv);
   const savedAuthMode = provider.anthropicAuthMode ?? 'auto';
   // Null until the user picks one: the select follows the saved header,
   // which a test may store (a reload brings it in) while this is open.
@@ -397,7 +396,7 @@ function ConnectionSettings({
   const baseUrlProblem =
     kind === 'custom' ? describeBaseUrlProblem(baseUrl) : null;
 
-  const built = buildProviderCustomEnv(thirdParty, env);
+  const built = buildProviderCustomEnv(env);
   const envChanged = !sameEnv(built.customEnv, provider.customEnv ?? {});
   const urlChanged =
     kind === 'custom' && baseUrl.trim() !== provider.anthropicBaseUrl;
@@ -650,13 +649,7 @@ function ConnectionSettings({
               </NativeSelect>
             </SettingsField>
           )}
-          <ProviderEnvEditor
-            thirdParty={thirdParty}
-            defaultModel={provider.anthropicModel}
-            value={env}
-            onChange={setEnv}
-            disabled={saving}
-          />
+          <ProviderEnvEditor value={env} onChange={setEnv} disabled={saving} />
           <Button onClick={() => void save()} disabled={!dirty || saving}>
             {saving && <Loader2 className="animate-spin" />}
             保存连接设置

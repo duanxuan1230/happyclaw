@@ -293,7 +293,7 @@ describe('creating a connection', () => {
     expect(runtimeConfig.getProviders()).toEqual([]);
   });
 
-  test('joins the pool only when nothing else is enabled, unless it says', async () => {
+  test('there is no pool to join: enabled and weight are ignored', async () => {
     const create = (extra: Record<string, unknown> = {}) =>
       request('POST', '/providers', {
         name: 'Relay',
@@ -302,21 +302,67 @@ describe('creating a connection', () => {
         anthropicAuthToken: 'relay-secret-123456',
         ...extra,
       });
-    expect((await create()).body.enabled).toBe(true);
-    // A second one must not turn a single connection into a rotating pool.
-    expect((await create()).body.enabled).toBe(false);
-    expect((await create({ enabled: true })).body.enabled).toBe(true);
-    expect(runtimeConfig.getDefaultModelConfigId()).toBeNull();
+    expect((await create()).status).toBe(201);
+    const created = await create({ enabled: true, weight: 9 });
+    expect(created.status).toBe(201);
+    expect(created.body).not.toHaveProperty('enabled');
+    expect(created.body).not.toHaveProperty('weight');
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).toEqual([]);
+    const list = await request('GET', '/providers');
+    expect(Object.keys(list.body)).toEqual(['providers']);
+    expect(list.body.providers[0]).not.toHaveProperty('health');
+    expect(runtimeConfig.readLegacyModelDefaults().defaultModelConfigId).toBe(
+      null,
+    );
   });
 
-  test('a connection that says it is off stays off', async () => {
+  test('a new connection keeps exactly the env it was given', async () => {
     const created = await request('POST', '/providers', {
-      name: 'Claude',
-      type: 'official',
-      anthropicApiKey: 'sk-ant-api03-abcdefghijklmnop',
-      enabled: false,
+      name: 'Relay',
+      type: 'third_party',
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+      customEnv: { API_TIMEOUT_MS: '600000', CLAUDE_CODE_NO_FLICKER: '' },
     });
-    expect(created.body.enabled).toBe(false);
+    expect(created.body.customEnv).toEqual({ API_TIMEOUT_MS: '600000' });
+    // The prefill is the wizard's to offer; a later read adds nothing.
+    expect(runtimeConfig.getProviderById(created.body.id)!.customEnv).toEqual({
+      API_TIMEOUT_MS: '600000',
+    });
+  });
+
+  test('env keys the models decide are refused with RESERVED_ENV_KEY', async () => {
+    const base = {
+      name: 'Relay',
+      type: 'third_party',
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+    };
+    for (const key of [
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'CLAUDE_CODE_SUBAGENT_MODEL',
+      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+      'CLAUDE_CODE_EFFORT_LEVEL',
+      'ANTHROPIC_MODEL',
+    ]) {
+      const created = await request('POST', '/providers', {
+        ...base,
+        customEnv: { [key]: 'x' },
+      });
+      expect(created.status).toBe(400);
+      expect(created.body).toMatchObject({
+        code: 'RESERVED_ENV_KEY',
+        keys: [key],
+      });
+    }
+    expect(runtimeConfig.getProviders()).toEqual([]);
+
+    const provider = thirdParty({});
+    const patched = await request('PATCH', `/providers/${provider.id}`, {
+      customEnv: { CLAUDE_CODE_EFFORT_LEVEL: 'max' },
+    });
+    expect(patched.status).toBe(400);
+    expect(patched.body.code).toBe('RESERVED_ENV_KEY');
   });
 
   test('stores its model list and preset and reports them', async () => {
@@ -328,18 +374,24 @@ describe('creating a connection', () => {
       anthropicAuthToken: 'glm-secret-123456',
       anthropicAuthMode: 'bearer',
       anthropicModel: 'glm-5.3[1m]',
-      models: [{ id: 'glm-5.2', hidden: true }, { id: 'glm-5.1' }],
+      models: [
+        { id: 'glm-5.2', contextWindow: 128_000, efforts: ['low', 'high'] },
+        { id: 'glm-5.1' },
+      ],
+      roles: { smallFast: 'glm-5.1', subagent: 'not-offered' },
     });
     expect(created.status).toBe(201);
     expect(created.body).toMatchObject({
       presetId: 'zhipu-glm-cn',
-      anthropicModel: 'glm-5.3[1m]',
+      anthropicModel: 'glm-5.3',
       anthropicAuthMode: 'bearer',
       models: [
-        { id: 'glm-5.3[1m]' },
-        { id: 'glm-5.2', hidden: true },
+        { id: 'glm-5.3', contextWindow: 1_000_000 },
+        { id: 'glm-5.2', contextWindow: 128_000, efforts: ['low', 'high'] },
         { id: 'glm-5.1' },
       ],
+      // A role naming a model the connection does not offer is dropped.
+      roles: { smallFast: 'glm-5.1' },
       lastTest: null,
     });
   });
@@ -393,7 +445,7 @@ describe('editing a model list', () => {
     db.setSessionProviderId('connections-folder', null, providerId);
   }
 
-  test('showing, hiding, re-tuning or adding models stops nothing', async () => {
+  test('re-tuning windows, efforts or roles, or adding models stops nothing', async () => {
     const provider = thirdParty({
       enabled: true,
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
@@ -403,18 +455,20 @@ describe('editing a model list', () => {
       name: 'Relay',
       weight: 1,
       models: [
-        { id: 'glm-5.3' },
-        { id: 'glm-5.2', hidden: true, effort: 'high' },
+        { id: 'glm-5.3', contextWindow: 256_000 },
+        { id: 'glm-5.2', efforts: ['high', 'low'], defaultEffort: 'high' },
         { id: 'glm-5.1' },
       ],
+      roles: { smallFast: 'glm-5.1' },
     });
     expect(patched.status).toBe(200);
     expect(patched.body.applied).toMatchObject({ stoppedCount: 0 });
     expect(patched.body.provider.models).toEqual([
-      { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true, effort: 'high' },
+      { id: 'glm-5.3', contextWindow: 256_000 },
+      { id: 'glm-5.2', efforts: ['low', 'high'], defaultEffort: 'high' },
       { id: 'glm-5.1' },
     ]);
+    expect(patched.body.provider.roles).toEqual({ smallFast: 'glm-5.1' });
     expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
     expect(db.getSession('connections-folder')).toBe('sdk-session-1');
   });
@@ -438,9 +492,9 @@ describe('editing a model list', () => {
       expect(patched.body.applied).toMatchObject({ stoppedCount: 0 });
     }
     expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
+    // A weight is accepted from older clients and means nothing.
     expect(runtimeConfig.getProviderById(provider.id)).toMatchObject({
       name: 'Renamed',
-      weight: 7,
       presetId: 'deepseek',
     });
   });
@@ -569,15 +623,19 @@ describe('editing a model list', () => {
     db.setSessionModelSelection(folder, null, null);
   });
 
-  test('turning the default model to its 1M window keeps every session', async () => {
+  test("an older client's [1m] on the model sets its window and keeps every session", async () => {
     const provider = thirdParty({ enabled: true });
     boundSession(provider.id);
     const patched = await request('PATCH', `/providers/${provider.id}`, {
       anthropicModel: 'glm-5.3[1m]',
     });
     expect(patched.status).toBe(200);
-    // Runners restart for the new window; the SDK session stays valid.
-    expect(queue.pauseGroupsForMutation).toHaveBeenCalled();
+    expect(patched.body.provider).toMatchObject({
+      anthropicModel: 'glm-5.3',
+      models: [{ id: 'glm-5.3', contextWindow: 1_000_000 }],
+    });
+    // Not a model change: the window reaches the next launch.
+    expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
     expect(db.getSession('connections-folder')).toBe('sdk-session-1');
   });
 
@@ -618,7 +676,7 @@ describe('editing a model list', () => {
     expect(moved.body.provider.presetId).toBeNull();
   });
 
-  test('a model an Agent runs cannot be removed, nor renamed by its 1M switch', async () => {
+  test('a model an Agent runs cannot be removed or renamed; its window can change', async () => {
     const provider = thirdParty({
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }, { id: 'glm-5.1' }],
     });
@@ -637,10 +695,19 @@ describe('editing a model list', () => {
       },
     });
     const renamed = await request('PATCH', `/providers/${provider.id}`, {
-      models: [{ id: 'glm-5.3' }, { id: 'glm-5.2[1m]' }, { id: 'glm-5.1' }],
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.2-x' }, { id: 'glm-5.1' }],
     });
     expect(renamed.status).toBe(409);
     expect(runtimeConfig.getProviderById(provider.id)?.models).toHaveLength(3);
+    // `[1m]` is the window, not a new name.
+    const widened = await request('PATCH', `/providers/${provider.id}`, {
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.2[1m]' }, { id: 'glm-5.1' }],
+    });
+    expect(widened.status).toBe(200);
+    expect(widened.body.provider.models[1]).toEqual({
+      id: 'glm-5.2',
+      contextWindow: 1_000_000,
+    });
 
     // A model nobody runs goes.
     const dropped = await request('PATCH', `/providers/${provider.id}`, {
@@ -698,6 +765,43 @@ describe('POST /providers/discover-models', () => {
     expect(seen[0].headers.authorization).toBe('Bearer relay-secret-123456');
     expect(seen[1].headers['x-api-key']).toBe('relay-secret-123456');
     expect(seen[1].headers['user-agent']).toMatch(/^claude-cli/);
+  });
+
+  test('returns the efforts and window a vendor declares', async () => {
+    reply = () => ({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: 'k3',
+            context_length: 256_000,
+            supported_reasoning_levels: ['low', 'medium', 'high', 'minimal'],
+            default_reasoning_level: 'high',
+          },
+          { id: 'k3-mini' },
+        ],
+      },
+    });
+    const { status, body } = await request(
+      'POST',
+      '/providers/discover-models',
+      {
+        type: 'third_party',
+        anthropicBaseUrl: upstream,
+        anthropicAuthToken: 'relay-secret-123456',
+        anthropicAuthMode: 'bearer',
+      },
+    );
+    expect(status).toBe(200);
+    expect(body.models).toEqual([
+      {
+        id: 'k3',
+        contextWindow: 256_000,
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'high',
+      },
+      { id: 'k3-mini' },
+    ]);
   });
 
   test('a chosen header style is not second-guessed', async () => {

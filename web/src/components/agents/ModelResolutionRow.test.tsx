@@ -2,13 +2,18 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { AgentProfileRuntimePolicy } from '@/types';
 
-const mocks = vi.hoisted(() => ({ post: vi.fn() }));
+const mocks = vi.hoisted(() => ({ post: vi.fn(), canManage: false }));
 
 vi.mock('@/api/client', () => ({ api: { post: mocks.post } }));
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: (selector: (state: unknown) => unknown) =>
+    selector({ hasPermission: () => mocks.canManage }),
+}));
 
 const { ModelResolutionRow } = await import('./ModelResolutionRow');
 const { EffectiveCapabilitiesPreview } =
@@ -26,13 +31,14 @@ afterEach(async () => {
   root = null;
   vi.clearAllMocks();
   vi.useRealTimers();
+  mocks.canManage = false;
 });
 
 async function render(node: React.ReactNode) {
   const container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => root?.render(node));
+  await act(async () => root?.render(<MemoryRouter>{node}</MemoryRouter>));
   return container;
 }
 
@@ -57,15 +63,40 @@ describe('the resolved model', () => {
       />,
     );
     const text = container.querySelector('span.text-warning');
-    expect(text?.textContent).toBe('绑定的连接不存在，运行会失败');
+    expect(text?.textContent).toBe(
+      '连接不可用，绑定的连接已删除或缺少凭据，运行会失败',
+    );
     expect(container.textContent).toContain('智能体绑定');
+  });
+
+  test('nothing chosen: admins get 添加模型, others are told to ask an admin', async () => {
+    const resolution = {
+      source: 'none' as const,
+      model_config_id: null,
+      model_config_name: null,
+      model: null,
+      connection_missing: false,
+    };
+    let container = await render(
+      <ModelResolutionRow resolution={resolution} />,
+    );
+    expect(container.textContent).toContain('未选择模型');
+    expect(container.textContent).toContain('请联系管理员添加模型');
+    expect(container.querySelector('a')).toBeNull();
+
+    await act(async () => root?.unmount());
+    mocks.canManage = true;
+    container = await render(<ModelResolutionRow resolution={resolution} />);
+    const link = container.querySelector('a');
+    expect(link?.textContent).toBe('添加模型');
+    expect(link?.getAttribute('href')).toBe('/settings?tab=claude');
   });
 
   test('names the connection and model with the source', async () => {
     const container = await render(
       <ModelResolutionRow
         resolution={{
-          source: 'default',
+          source: 'system_main',
           model_config_id: 'official',
           model_config_name: 'Claude 官方',
           model: 'opus',
@@ -74,7 +105,7 @@ describe('the resolved model', () => {
       />,
     );
     expect(container.textContent).toContain('Claude 官方 · opus');
-    expect(container.textContent).toContain('全局默认');
+    expect(container.textContent).toContain('跟随主 HappyClaw');
     expect(container.querySelector('.text-warning')).toBeNull();
   });
 

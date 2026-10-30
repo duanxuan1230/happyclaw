@@ -18,10 +18,10 @@ describe('Agent effort runtime contracts', () => {
     }
   });
 
-  test("host and container starts remove Provider effort only for explicit Agents, under a conversation's own", () => {
+  test('host and container starts write the launch effort of the resolved connection', () => {
     const host = read('src/container-runner.ts');
     const calls = host.match(
-      /applyLaunchEffortEnv\(\s*envLines,\s*resolveAgentSdkEffort\([^)]*\),\s*(?:resolvedProvider|hostPoolResult)\?\.(?:resolved\.)?conversationEffort,\s*\)/g,
+      /applyLaunchEffortEnv\(\s*envLines,\s*resolveAgentSdkEffort\([^)]*\),\s*(resolvedProvider|hostPoolResult)\s*\?\s*\(\1\.(?:resolved\.)?launchEffort \?\? null\)\s*:\s*undefined,\s*\)/g,
     );
     expect(calls).toHaveLength(2);
   });
@@ -36,6 +36,18 @@ describe('Agent effort runtime contracts', () => {
     ).toHaveLength(2);
     expect(read('container/agent-runner/src/index.ts')).not.toContain(
       'sessionEffort',
+    );
+  });
+
+  test('host and container starts hand the launch effort to the runner', () => {
+    const host = read('src/container-runner.ts');
+    expect(
+      host.match(
+        /input = prepareLaunchInput\(input, (?:hostPoolResult|poolResult), sessionAgentId\);/g,
+      ),
+    ).toHaveLength(2);
+    expect(read('container/agent-runner/src/index.ts')).toContain(
+      'const agentEffort = resolveRunSdkEffort(containerInput);',
     );
   });
 

@@ -2,15 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  test,
-  vi,
-} from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 
 const root = fs.mkdtempSync(
   path.join(os.tmpdir(), 'provider-failover-context-'),
@@ -28,10 +20,10 @@ vi.mock('../src/logger.js', () => ({
 
 const runtimeConfig = await import('../src/runtime-config.js');
 const db = await import('../src/db.js');
-const { trySelectPoolProvider } = await import('../src/container-runner.js');
+const { leaveSessionConnection, trySelectPoolProvider } =
+  await import('../src/container-runner.js');
 const { applyProviderSwitchToInput } =
   await import('../src/provider-switch-context.js');
-const { providerPool } = await import('../src/provider-pool.js');
 
 const created: string[] = [];
 
@@ -50,20 +42,11 @@ beforeAll(() => {
       }).id,
     );
   }
-  runtimeConfig.saveBalancingConfig({
-    strategy: 'failover',
-    unhealthyThreshold: 1,
-    recoveryIntervalMs: 300_000,
-  });
 });
 
 afterAll(() => {
   db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
-});
-
-beforeEach(() => {
-  for (const id of created) providerPool.resetHealth(id);
 });
 
 function persistTurn(
@@ -107,13 +90,13 @@ function conversationInput(opts?: {
 }
 
 /**
- * Session stickiness binds a Claude SDK session to one OAuth account.
- * Failover must start a new session on the next provider, but the new
- * prompt has to carry HappyClaw's persisted user/assistant turns — otherwise
- * the replacement account sees an empty conversation.
+ * A Claude SDK session is bound to one OAuth account. Moving a conversation
+ * to another connection must start a new session, but the new prompt has to
+ * carry HappyClaw's persisted user/assistant turns; otherwise the new
+ * account sees an empty conversation.
  */
 describe('provider failover keeps conversation context', () => {
-  test('sticky provider fails → next provider is selected with prior turns seeded', () => {
+  test('another connection starts a new session with prior turns seeded', () => {
     const groupFolder = 'failover-keep-context';
     const chatJid = 'web:failover-keep-context';
     db.setSession(groupFolder, 'sess-account-a', null);
@@ -140,10 +123,7 @@ describe('provider failover keeps conversation context', () => {
       '2026-08-18T10:00:02.000Z',
     );
 
-    providerPool.reportFailure(created[0], true);
-    expect(providerPool.getHealthStatus(created[0]).healthy).toBe(false);
-
-    const selected = trySelectPoolProvider(groupFolder, null, null);
+    const selected = trySelectPoolProvider(groupFolder, null, created[1]);
     expect(selected).not.toBeNull();
     expect(selected!.profileId).toBe(created[1]);
     expect(selected!.resetSession).toBe(true);
@@ -163,7 +143,32 @@ describe('provider failover keeps conversation context', () => {
     expect(db.getSessionProviderId(groupFolder, null)).toBe(created[1]);
   });
 
-  test('healthy sticky path keeps the resume token and does not rewrite the prompt', () => {
+  test("moving to the Workspace's own environment starts a new session with history", () => {
+    const groupFolder = 'failover-to-workspace-env';
+    const chatJid = 'web:failover-to-workspace-env';
+    db.setSession(groupFolder, 'sess-on-a', null);
+    db.setSessionProviderId(groupFolder, null, created[0]);
+    persistTurn(
+      chatJid,
+      'env-user',
+      '记住代号 Atlas',
+      false,
+      '2026-08-18T12:00:00.000Z',
+    );
+    const prepared = applyProviderSwitchToInput(
+      conversationInput({ groupFolder, chatJid, sessionId: 'sess-on-a' }),
+      leaveSessionConnection(groupFolder, null),
+      null,
+    );
+    expect(prepared.sessionId).toBeUndefined();
+    expect(prepared.prompt).toContain('记住代号 Atlas');
+    expect(db.getSession(groupFolder, null)).toBeFalsy();
+    expect(db.getSessionProviderId(groupFolder, null)).toBeFalsy();
+    // Once: the next launch has nothing bound to leave.
+    expect(leaveSessionConnection(groupFolder, null)).toBeNull();
+  });
+
+  test('the same connection keeps the resume token and does not rewrite the prompt', () => {
     const groupFolder = 'failover-sticky-healthy';
     const chatJid = 'web:failover-sticky-healthy';
     db.setSession(groupFolder, 'sess-keep', null);
@@ -176,7 +181,7 @@ describe('provider failover keeps conversation context', () => {
       '2026-08-18T11:00:00.000Z',
     );
 
-    const selected = trySelectPoolProvider(groupFolder, null, null);
+    const selected = trySelectPoolProvider(groupFolder, null, created[0]);
     expect(selected?.profileId).toBe(created[0]);
     expect(selected?.resetSession ?? false).toBe(false);
 

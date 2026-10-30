@@ -30,6 +30,9 @@ export function MainAgentCapabilitiesSection() {
   const modelConfigs = useAgentProfilesStore(
     (state) => state.modelConfigs ?? [],
   );
+  const inheritedModel = useAgentProfilesStore(
+    (state) => state.inheritedModel ?? null,
+  );
   const profilesLoading = useAgentProfilesStore((state) => state.loading);
   const loadProfiles = useAgentProfilesStore((state) => state.loadProfiles);
   const updateProfile = useAgentProfilesStore((state) => state.updateProfile);
@@ -102,7 +105,7 @@ export function MainAgentCapabilitiesSection() {
         ...capabilityFormModelChanges(profile, form),
         ...(policyChanged ? { runtime_policy: policy } : {}),
       });
-      toast.success('主 HappyClaw 模型、推理档位与能力已保存');
+      toast.success('主 HappyClaw 模型、推理等级与能力已保存');
     } catch (error) {
       toast.error(
         modelBindingErrorMessage(error) ??
@@ -149,9 +152,11 @@ export function MainAgentCapabilitiesSection() {
           value={form}
           onChange={setForm}
           modelConfigs={modelConfigs}
+          inheritedModel={inheritedModel}
+          profile={profile}
           hostAvailable
           labelPrefix="主 HappyClaw "
-          modelConfigDescription="Home 工作区、主会话、独立会话与自动化都会继承该选择。自动选择只使用已启用配置；未启用的配置仍可在这里显式使用。"
+          modelConfigDescription="Home 工作区、主会话、独立会话与自动化都会继承该选择；你创建的其他智能体没有自己的模型时也跟随它。"
         />
 
         <SettingsFormFooter>

@@ -274,7 +274,7 @@ read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued
 系统 MCP 默认仅 admin 可用；只有显式设置为 shared 后，普通成员的 Agent 才能进入
 有效能力清单。API 不回传 Secret 明文。
 
-模型连接只由 `manage_system_config` 管理，没有个人连接：增改删、凭据、启用、全局默认、
+模型连接只由 `manage_system_config` 管理，没有个人连接：增改删、凭据、
 `POST /api/config/claude/providers/test`、`POST /api/config/claude/providers/discover-models`
 和 `GET /api/config/claude/providers/:id/impact` 都在该权限下。测试与获取模型列表共用每个
 用户每分钟 10 次的上游请求限额；草稿里的凭据只用于这一次请求，不落盘，上游错误摘录脱敏后

@@ -1,54 +1,56 @@
 import { useEffect, useState } from 'react';
-import { Loader2, MoreHorizontal, RefreshCw, Star, Trash2 } from 'lucide-react';
+import { Loader2, RefreshCw, Trash2 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ResponsiveMenu } from '@/components/common/ResponsiveMenu';
+import { IconButton } from '@/components/common/IconButton';
 import {
-  NativeSelect,
-  NativeSelectOption,
-} from '@/components/ui/native-select';
-import { Switch } from '@/components/ui/switch';
-import {
-  MODEL_EFFORTS,
   effectiveProviderModels,
   getModelPreset,
   mergeDiscoveredModels,
-  splitOneMillionSuffix,
-  withOneMillionSuffix,
-  type ModelEffort,
+  normalizeConnectionModelRoles,
+  normalizeProviderModels,
+  type ConnectionModelRoles,
   type ProviderModelEntry,
 } from '@/lib/model-providers';
-import { cn } from '@/lib/utils';
 import {
   confirmProtocolChange,
+  connectionKind,
   discoverModels,
-  effortLabel,
+  discoveredModelsFor,
   errorCopy,
   modelInUseAgents,
   presetModelName,
   updateConnection,
 } from './model-connections';
-import { ManualModelInput, OneMillionToggle } from './ModelPicker';
+import {
+  ModelCapabilityFields,
+  ModelRolesFields,
+  withAddDefaults,
+} from './ModelCapabilityFields';
+import { ManualModelInput } from './ModelPicker';
 import { getErrorMessage, type UnifiedProviderPublic } from './types';
 
 interface ConnectionModelListProps {
   provider: UnifiedProviderPublic;
-  /** The connection may run without a default model (it routes names itself). */
-  allowNoDefault: boolean;
+  /**
+   * Third-party: roles for sub-agents and background calls, and added models
+   * declare the registry's window.
+   */
+  thirdParty: boolean;
   onSaved: (provider: UnifiedProviderPublic) => void;
   setNotice: (message: string | null) => void;
   setError: (message: string | null) => void;
 }
 
 /**
- * The models a connection offers. Showing, hiding, efforts and additions save
- * at once and leave running conversations alone; a new default model is a
- * protocol change and asks first.
+ * The models a connection offers, each with its context window and efforts,
+ * and the connection's 后台与子代理 roles. Edits save at once and apply from
+ * the next launch; removing a model stops the runners that may be on it, so
+ * it asks first.
  */
 export function ConnectionModelList({
   provider,
-  allowNoDefault,
+  thirdParty,
   onSaved,
   setNotice,
   setError,
@@ -56,51 +58,46 @@ export function ConnectionModelList({
   const [models, setModels] = useState<ProviderModelEntry[]>(() =>
     effectiveProviderModels(provider),
   );
+  const [roles, setRoles] = useState<ConnectionModelRoles>(
+    provider.roles ?? {},
+  );
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const preset = getModelPreset(provider.presetId);
-  const defaultModel = provider.anthropicModel;
 
   useEffect(() => {
     setModels(effectiveProviderModels(provider));
+    setRoles(provider.roles ?? {});
     // The stored list changes only with the provider record.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.id, provider.updatedAt]);
 
   const save = async (
-    next: ProviderModelEntry[],
-    nextDefault: string = defaultModel,
+    patch: {
+      models?: ProviderModelEntry[];
+      roles?: ConnectionModelRoles;
+      anthropicModel?: string;
+    },
+    failure: string,
   ): Promise<boolean> => {
-    const defaultChanged = nextDefault !== defaultModel;
-    // A model taken out (a 1M switch renames, so it takes one out too) stops
-    // the runners that may be on it, like a new default does.
-    const removed = models.some(
-      (entry) => !next.some((other) => other.id === entry.id),
-    );
-    if (
-      (defaultChanged || removed) &&
-      !(await confirmProtocolChange(provider))
-    ) {
-      return false;
-    }
-    const previous = models;
-    setModels(next);
+    const previous = { models, roles };
+    if (patch.models) setModels(patch.models);
+    if (patch.roles) setRoles(patch.roles);
     setBusy(true);
     try {
-      const saved = await updateConnection(provider.id, {
-        models: next,
-        ...(defaultChanged ? { anthropicModel: nextDefault } : {}),
-      });
+      const saved = await updateConnection(provider.id, patch);
       setModels(effectiveProviderModels(saved));
+      setRoles(saved.roles ?? {});
       onSaved(saved);
       return true;
     } catch (err) {
-      setModels(previous);
+      setModels(previous.models);
+      setRoles(previous.roles);
       const agents = modelInUseAgents(err);
       setError(
         agents
-          ? `这个模型正被智能体「${agents.join('」「')}」使用。先在智能体设置里改用其他模型，再删除或改名。`
-          : getErrorMessage(err, '保存模型列表失败'),
+          ? `这个模型正被智能体「${agents.join('」「')}」使用。先在智能体设置里改用其他模型，再删除。`
+          : getErrorMessage(err, failure),
       );
       return false;
     } finally {
@@ -108,47 +105,39 @@ export function ConnectionModelList({
     }
   };
 
-  const update = (id: string, patch: Partial<ProviderModelEntry>) =>
-    save(
-      models.map((entry) => {
-        if (entry.id !== id) return entry;
-        const next: ProviderModelEntry = { ...entry, ...patch };
-        if (!next.hidden) delete next.hidden;
-        if (!next.effort) delete next.effort;
-        return next;
-      }),
-    );
+  const saveModels = (next: ProviderModelEntry[]) =>
+    save({ models: next }, '保存模型列表失败');
 
-  const toggleOneMillion = (entry: ProviderModelEntry) => {
-    const { model: base, oneMillion } = splitOneMillionSuffix(entry.id);
-    const nextId = withOneMillionSuffix(base, !oneMillion);
-    void save(
-      models.map((other) =>
-        other.id === entry.id ? { ...other, id: nextId } : other,
-      ),
-      entry.id === defaultModel ? nextId : defaultModel,
+  const remove = async (id: string) => {
+    if (!(await confirmProtocolChange(provider))) return;
+    const next = models.filter((entry) => entry.id !== id);
+    await save(
+      {
+        models: next,
+        // The connection's own model is always in its list: hand it on.
+        ...(id === provider.anthropicModel
+          ? { anthropicModel: next[0]?.id ?? '' }
+          : {}),
+        roles: normalizeConnectionModelRoles(roles, next),
+      },
+      '删除模型失败',
     );
   };
 
-  /** Same model with or without `[1m]` counts as already listed. */
-  const listed = (id: string) => {
-    const base = splitOneMillionSuffix(id).model;
-    return models.find(
-      (entry) => splitOneMillionSuffix(entry.id).model === base,
-    );
-  };
-
-  const addManual = async (id: string) => {
-    const existing = listed(id);
-    if (existing) {
-      setError(`列表里已经有 ${existing.id}`);
+  const addManual = async (raw: string) => {
+    const typed = normalizeProviderModels([raw])?.[0];
+    if (!typed) return false;
+    const { entry } = withAddDefaults(typed, thirdParty);
+    if (models.some((other) => other.id === entry.id)) {
+      setError(`列表里已经有 ${entry.id}`);
       return false;
     }
-    const added = await save([...models, { id }]);
-    if (added) setNotice(`已添加模型 ${id}`);
+    const added = await saveModels([...models, entry]);
+    if (added) setNotice(`已添加模型 ${entry.id}`);
     return added;
   };
 
+  /** Adds what the vendor lists now; nothing already here is touched. */
   const refresh = async () => {
     setRefreshing(true);
     try {
@@ -160,16 +149,19 @@ export function ConnectionModelList({
       }
       const merged = mergeDiscoveredModels(
         models,
-        result.models.map((model) => model.id),
+        discoveredModelsFor(connectionKind(provider), result.models),
+      );
+      // New models start the way the add flow starts them.
+      const added = new Set(merged.added);
+      merged.models = merged.models.map((entry) =>
+        added.has(entry.id) ? withAddDefaults(entry, thirdParty).entry : entry,
       );
       if (merged.added.length === 0) {
         setNotice('没有发现新模型');
         return;
       }
-      if (await save(merged.models)) {
-        setNotice(
-          `新增 ${merged.added.length} 个模型，默认隐藏；在列表里打开即可出现在聊天选择器中`,
-        );
+      if (await saveModels(merged.models)) {
+        setNotice(`新增 ${merged.added.length} 个模型`);
       }
     } catch (err) {
       setError(getErrorMessage(err, '获取模型列表失败'));
@@ -184,9 +176,7 @@ export function ConnectionModelList({
     <div className="space-y-3">
       {models.length === 0 ? (
         <p className="rounded-lg px-3 py-4 text-caption text-muted-foreground ring-1 ring-surface-border">
-          {defaultModel
-            ? '还没有模型。'
-            : '没有指定模型：Claude Code 自己选择模型名，由服务端决定实际模型。可以刷新或手动添加。'}
+          还没有模型。获取模型列表或手动添加。
         </p>
       ) : (
         <ul
@@ -194,139 +184,44 @@ export function ConnectionModelList({
           className="divide-y divide-surface-border overflow-hidden rounded-lg ring-1 ring-surface-border"
         >
           {models.map((entry) => {
-            const isDefault = entry.id === defaultModel;
-            const { oneMillion } = splitOneMillionSuffix(entry.id);
             const name = presetModelName(preset, entry.id);
             return (
-              <li
-                key={entry.id}
-                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2"
-              >
-                <Switch
-                  checked={!entry.hidden}
-                  onCheckedChange={(checked) =>
-                    void update(entry.id, { hidden: !checked })
-                  }
-                  disabled={disabled || isDefault}
-                  title={
-                    isDefault
-                      ? '默认模型总是显示'
-                      : '是否出现在聊天的模型选择里'
-                  }
-                  aria-label={`在聊天中显示 ${entry.id}`}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span
-                      className={cn(
-                        'truncate font-mono text-caption',
-                        entry.hidden
-                          ? 'text-muted-foreground'
-                          : 'text-foreground',
-                      )}
-                    >
+              <li key={entry.id} className="min-w-0 space-y-2 px-3 py-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-mono text-caption text-foreground">
                       {entry.id}
-                    </span>
-                    {isDefault && <Badge variant="info">默认</Badge>}
-                  </div>
-                  {(name || entry.hidden) && (
-                    <div className="truncate text-micro text-muted-foreground">
-                      {[name, entry.hidden ? '已隐藏' : null]
-                        .filter(Boolean)
-                        .join(' · ')}
                     </div>
-                  )}
-                </div>
-                {/* Phones put the controls on their own line under the name. */}
-                <div className="flex shrink-0 items-center gap-1.5 max-sm:w-full max-sm:pl-12">
-                  <NativeSelect
-                    size="sm"
-                    value={entry.effort ?? ''}
-                    onChange={(event) =>
-                      void update(entry.id, {
-                        effort: (event.target.value || undefined) as
-                          | ModelEffort
-                          | undefined,
-                      })
+                    {name && (
+                      <div className="truncate text-micro text-muted-foreground">
+                        {name}
+                      </div>
+                    )}
+                  </div>
+                  <IconButton
+                    label={
+                      models.length > 1
+                        ? `从连接中删除 ${entry.id}`
+                        : '连接至少保留一个模型'
                     }
-                    disabled={disabled}
-                    aria-label={`${entry.id} 的推理档位`}
-                    title="下次启动会话时生效；智能体设置了推理档位时以智能体为准"
-                    className="w-28 font-mono text-caption"
-                  >
-                    <NativeSelectOption value="">档位默认</NativeSelectOption>
-                    {MODEL_EFFORTS.map((effort) => (
-                      <NativeSelectOption key={effort} value={effort}>
-                        {effortLabel(effort)}
-                      </NativeSelectOption>
-                    ))}
-                  </NativeSelect>
-                  <OneMillionToggle
-                    id={entry.id}
-                    on={oneMillion}
-                    onToggle={() => toggleOneMillion(entry)}
-                    disabled={disabled}
-                  />
-                  <ResponsiveMenu
-                    title={`${entry.id} 的操作`}
-                    groups={[
-                      [
-                        ...(!isDefault
-                          ? [
-                              {
-                                label: '设为默认模型',
-                                icon: Star,
-                                onSelect: () =>
-                                  void save(
-                                    models.map((other) =>
-                                      other.id === entry.id
-                                        ? { id: other.id, effort: other.effort }
-                                        : other,
-                                    ),
-                                    entry.id,
-                                  ),
-                              },
-                            ]
-                          : []),
-                        ...(isDefault && allowNoDefault
-                          ? [
-                              {
-                                label: '不再指定默认模型',
-                                icon: Star,
-                                onSelect: () => void save(models, ''),
-                              },
-                            ]
-                          : []),
-                      ],
-                      isDefault
-                        ? []
-                        : [
-                            {
-                              label: '从连接中删除',
-                              icon: Trash2,
-                              destructive: true,
-                              onSelect: () =>
-                                void save(
-                                  models.filter(
-                                    (other) => other.id !== entry.id,
-                                  ),
-                                ),
-                            },
-                          ],
-                    ]}
-                    trigger={
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`${entry.id} 的更多操作`}
-                        disabled={disabled}
-                      >
-                        <MoreHorizontal />
-                      </Button>
-                    }
+                    icon={<Trash2 />}
+                    onClick={() => void remove(entry.id)}
+                    disabled={disabled || models.length <= 1}
+                    className="hover:text-destructive"
                   />
                 </div>
+                <ModelCapabilityFields
+                  entry={entry}
+                  showDefaultEffort
+                  disabled={disabled}
+                  onChange={(next) =>
+                    void saveModels(
+                      models.map((other) =>
+                        other.id === entry.id ? next : other,
+                      ),
+                    )
+                  }
+                />
               </li>
             );
           })}
@@ -334,7 +229,7 @@ export function ConnectionModelList({
       )}
       {models.length > 0 && (
         <p className="text-caption text-muted-foreground">
-          推理档位下次启动会话时生效；智能体设置了推理档位时以智能体为准。
+          上下文和推理等级从下次启动会话时生效；智能体或对话选了推理等级时以它们为准。
         </p>
       )}
 
@@ -351,9 +246,20 @@ export function ConnectionModelList({
           title="从服务商获取模型列表：只添加新模型，不删除已有的"
         >
           {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-          刷新模型列表
+          获取模型列表
         </Button>
       </div>
+
+      {thirdParty && (
+        <ModelRolesFields
+          models={models.map((entry) => entry.id)}
+          roles={roles}
+          onChange={(next) =>
+            void save({ roles: next }, '保存后台与子代理失败')
+          }
+          disabled={disabled}
+        />
+      )}
     </div>
   );
 }

@@ -65,18 +65,6 @@ export function isThirdPartyKind(kind: ConnectionKind | null): boolean {
   return kind === 'preset' || kind === 'custom';
 }
 
-/**
- * Kinds that may run without a default model: Claude Code picks one itself,
- * or a relay routes the names it sends. A preset always has one.
- */
-export function allowsNoDefaultModel(kind: ConnectionKind | null): boolean {
-  return (
-    kind === 'claude_subscription' ||
-    kind === 'anthropic_api' ||
-    kind === 'custom'
-  );
-}
-
 /** The label a row shows for its kind: a preset is named by its vendor. */
 export function connectionKindLabel(provider: KindFields): string {
   const kind = connectionKind(provider);
@@ -123,6 +111,25 @@ export function connectionStatus(
   }
   const copy = errorCopy(test.code);
   return { tone: 'error', label: `失败 · ${copy.title}`, hint: copy.hint };
+}
+
+/**
+ * Discovered models as a connection takes them. On an official connection a
+ * window above 200K is the billed 1M opt-in, so the vendor's window is left
+ * out and only a deliberate pick declares one.
+ */
+export function discoveredModelsFor(
+  kind: ConnectionKind | null,
+  models: readonly DiscoveredModel[],
+): DiscoveredModel[] {
+  if (kind !== 'claude_subscription' && kind !== 'anthropic_api') {
+    return [...models];
+  }
+  return models.map((model) => {
+    const copy = { ...model };
+    delete copy.contextWindow;
+    return copy;
+  });
 }
 
 // ─── Requests ──────────────────────────────────────────────────
@@ -257,7 +264,7 @@ export function testOutcome(result: ProviderTestResponse): TestOutcome {
 }
 
 /**
- * Asks before an edit that stops runners: an address, a key, the default
+ * Asks before an edit that stops runners: an address, a key, a removed
  * model or the environment. Says how many live runners the edit stops (the
  * server counts every one it quiesces, not only this connection's) and that
  * conversations keep their history.

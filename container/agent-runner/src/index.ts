@@ -133,7 +133,7 @@ import {
   resolveClaudeQueryModelRuntime,
   resolveProviderReportedModelTier,
 } from './provider-runtime.js';
-import { resolveAgentSdkEffort } from './agent-effort.js';
+import { resolveRunSdkEffort } from './agent-effort.js';
 import {
   resolveAssistantErrorAttemptBoundary,
   decideProviderLimitAction,
@@ -3024,13 +3024,13 @@ async function runQueryAttempt(
     : {};
 
   try {
-    const agentEffort = resolveAgentSdkEffort(
-      containerInput.agentProfile?.runtimePolicy,
-    );
+    const agentEffort = resolveRunSdkEffort(containerInput);
     log(
       agentEffort
-        ? `Agent effort override: ${agentEffort}`
-        : 'Agent effort: inherit Provider/SDK default',
+        ? `Run effort: ${agentEffort}`
+        : containerInput.launchEffort === null
+          ? 'Run effort: none (the model takes no effort)'
+          : 'Run effort: inherit Provider/SDK default',
     );
     if (Object.keys(claudeRuntimeEnv).length > 0) {
       log(

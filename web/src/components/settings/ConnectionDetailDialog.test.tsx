@@ -135,7 +135,8 @@ const legacyProvider = makeProvider({
   anthropicModel: 'glm-5.3',
   anthropicAuthMode: null,
   anthropicAuthTokenMasked: 'glm-***',
-  models: [{ id: 'glm-5.3' }, { id: 'glm-5.2', hidden: true }],
+  models: [{ id: 'glm-5.3' }, { id: 'glm-5.2', defaultEffort: 'max' }],
+  customEnv: { API_TIMEOUT_MS: '3000000', MY_FLAG: 'on' },
 });
 
 function select(selector: string): HTMLSelectElement {
@@ -150,25 +151,6 @@ async function choose(selector: string, value: string) {
     element.value = value;
     element.dispatchEvent(new Event('change', { bubbles: true }));
   });
-}
-
-async function openMenu(label: string) {
-  const trigger = document.querySelector(`button[aria-label="${label}"]`);
-  if (!trigger) throw new Error(`menu "${label}" not found`);
-  await act(async () => {
-    trigger.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-    );
-  });
-}
-
-async function menuItem(label: string) {
-  const item = [...document.querySelectorAll('[role="menuitem"]')].find(
-    (candidate) => candidate.textContent?.includes(label),
-  );
-  if (!item) throw new Error(`menu item "${label}" not found`);
-  await click(item);
-  await flush();
 }
 
 describe('Claude subscription', () => {
@@ -429,22 +411,100 @@ describe('third-party connection settings', () => {
   });
 });
 
-describe('model list', () => {
-  test('showing a model saves the list at once without asking', async () => {
+describe('environment', () => {
+  test('shows the stored rows; an emptied one is dropped on save', async () => {
     await render(legacyProvider);
-    const toggle = document.querySelector(
-      '[role="switch"][aria-label="在聊天中显示 glm-5.2"]',
-    );
-    expect(toggle?.getAttribute('aria-checked')).toBe('false');
-    // The default model is always shown.
     expect(
-      document
-        .querySelector('[role="switch"][aria-label="在聊天中显示 glm-5.3"]')
-        ?.hasAttribute('disabled'),
-    ).toBe(true);
-    await click(toggle);
+      (
+        document.querySelector(
+          'input[aria-label="第 1 行环境变量 Key"]',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('API_TIMEOUT_MS');
+    await type('input[aria-label="第 1 行环境变量值"]', '');
+    await click(button('保存连接设置'));
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      { customEnv: { MY_FLAG: 'on' } },
+      120_000,
+    );
+  });
+
+  test('a model key is refused before anything is sent', async () => {
+    await render(legacyProvider);
+    await type(
+      'input[aria-label="第 2 行环境变量 Key"]',
+      'CLAUDE_CODE_SUBAGENT_MODEL',
+    );
+    expect(text()).toContain('CLAUDE_CODE_SUBAGENT_MODEL 由模型设置决定');
+    await click(button('保存连接设置'));
+    await flush();
+    expect(setError).toHaveBeenCalledWith(
+      expect.stringContaining('由模型设置决定'),
+    );
+    expect(mocks.patch).not.toHaveBeenCalled();
+  });
+});
+
+describe('model list', () => {
+  test('no default, show-in-chat or 1M controls are left', async () => {
+    await render(legacyProvider);
+    expect(document.querySelector('[role="switch"]')).toBeNull();
+    expect(text()).not.toContain('设为默认模型');
+    expect(text()).not.toContain('1M 上下文');
+  });
+
+  test('the suggestion fills the registry window in one tap', async () => {
+    await render(legacyProvider);
+    await click(
+      [...document.querySelectorAll('button')].find(
+        (node) =>
+          node.textContent === '建议：1M' &&
+          node.parentElement?.textContent?.includes('上下文') &&
+          node.closest('li')?.textContent?.startsWith('glm-5.2'),
+      ),
+    );
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      {
+        models: [
+          { id: 'glm-5.3' },
+          { id: 'glm-5.2', defaultEffort: 'max', contextWindow: 1_000_000 },
+        ],
+      },
+      120_000,
+    );
+  });
+
+  test('a context window is saved per model, without asking', async () => {
+    await render(legacyProvider);
+    await choose('select[aria-label="glm-5.2 的上下文长度"]', '128000');
     await flush();
     expect(mocks.confirm).not.toHaveBeenCalled();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      {
+        models: [
+          { id: 'glm-5.3' },
+          { id: 'glm-5.2', defaultEffort: 'max', contextWindow: 128_000 },
+        ],
+      },
+      120_000,
+    );
+  });
+
+  test('the default effort lists only the model’s efforts', async () => {
+    await render(legacyProvider);
+    const options = [
+      ...select('select[aria-label="glm-5.2 的默认档位"]').options,
+    ].map((option) => option.value);
+    // The registry gives glm-5.2 high and max.
+    expect(options).toEqual(['', 'high', 'max']);
+    expect(select('select[aria-label="glm-5.2 的默认档位"]').value).toBe('max');
+    await choose('select[aria-label="glm-5.2 的默认档位"]', '');
+    await flush();
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/glm`,
       { models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }] },
@@ -452,53 +512,47 @@ describe('model list', () => {
     );
   });
 
-  test('an effort is saved per model, without asking, from the next launch', async () => {
+  test('declaring efforts drops a default the model no longer has', async () => {
     await render(legacyProvider);
-    expect(text()).toContain('推理档位下次启动会话时生效');
-    await choose('select[aria-label="glm-5.2 的推理档位"]', 'high');
+    const chip = [
+      ...document
+        .querySelector('[role="group"][aria-label="glm-5.2 的推理等级"]')!
+        .querySelectorAll('button'),
+    ].find((node) => node.textContent === '最高');
+    await click(chip);
     await flush();
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/glm`,
-      {
-        models: [
-          { id: 'glm-5.3' },
-          { id: 'glm-5.2', hidden: true, effort: 'high' },
-        ],
-      },
+      { models: [{ id: 'glm-5.3' }, { id: 'glm-5.2', efforts: ['high'] }] },
       120_000,
     );
-    expect(mocks.confirm).not.toHaveBeenCalled();
   });
 
-  test('a new default model is a protocol change and asks first', async () => {
+  test('removing the connection model asks, and hands it on', async () => {
     await render(legacyProvider);
-    await openMenu('glm-5.2 的更多操作');
-    await menuItem('设为默认模型');
+    await click(
+      document.querySelector('button[aria-label="从连接中删除 glm-5.3"]'),
+    );
+    await flush();
     expect(mocks.confirm).toHaveBeenCalledTimes(1);
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/glm`,
       {
-        models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
+        models: [{ id: 'glm-5.2', defaultEffort: 'max' }],
         anthropicModel: 'glm-5.2',
+        roles: {},
       },
       120_000,
     );
   });
 
-  test('turning on 1M renames the model, and the default with it', async () => {
-    await render(legacyProvider);
-    await click(
-      document.querySelector('[aria-label="glm-5.3 使用 1M 上下文"]'),
-    );
-    await flush();
-    expect(mocks.patch).toHaveBeenCalledWith(
-      `${PROVIDERS}/glm`,
-      {
-        models: [{ id: 'glm-5.3[1m]' }, { id: 'glm-5.2', hidden: true }],
-        anthropicModel: 'glm-5.3[1m]',
-      },
-      120_000,
-    );
+  test('the last model cannot be removed', async () => {
+    await render(makeProvider());
+    expect(
+      document
+        .querySelector('button[aria-label="连接至少保留一个模型"]')
+        ?.hasAttribute('disabled'),
+    ).toBe(true);
   });
 
   test('removing a model an Agent uses names the Agent and keeps the model', async () => {
@@ -511,24 +565,28 @@ describe('model list', () => {
       },
     });
     await render(legacyProvider);
-    await openMenu('glm-5.2 的更多操作');
-    await menuItem('从连接中删除');
-    // Taking a model out stops runners, so it asks first.
-    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    await click(
+      document.querySelector('button[aria-label="从连接中删除 glm-5.2"]'),
+    );
+    await flush();
     expect(setError).toHaveBeenCalledWith(
       expect.stringContaining('智能体「写作助手」'),
     );
     expect(text()).toContain('glm-5.2');
   });
 
-  test('refreshing only adds the new models, hidden', async () => {
+  test('获取模型列表 only adds, carrying what the vendor declares', async () => {
     mocks.post.mockResolvedValue({
       ok: true,
       source: 'endpoint',
-      models: [{ id: 'glm-5.3' }, { id: 'glm-5.4' }],
+      models: [
+        { id: 'glm-5.3', contextWindow: 128_000 },
+        { id: 'glm-5.4', contextWindow: 400_000, efforts: ['high'] },
+        { id: 'vendor-new' },
+      ],
     });
     await render(legacyProvider);
-    await click(button('刷新模型列表'));
+    await click(button('获取模型列表'));
     await flush();
     expect(mocks.post).toHaveBeenCalledWith(
       `${PROVIDERS}/discover-models`,
@@ -540,18 +598,21 @@ describe('model list', () => {
       {
         models: [
           { id: 'glm-5.3' },
-          { id: 'glm-5.2', hidden: true },
-          { id: 'glm-5.4', hidden: true },
+          { id: 'glm-5.2', defaultEffort: 'max' },
+          { id: 'glm-5.4', contextWindow: 400_000, efforts: ['high'] },
+          // Unknown: every effort declared, like the add flow.
+          {
+            id: 'vendor-new',
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          },
         ],
       },
       120_000,
     );
-    expect(setNotice).toHaveBeenCalledWith(
-      expect.stringContaining('新增 1 个'),
-    );
+    expect(setNotice).toHaveBeenCalledWith('新增 2 个模型');
   });
 
-  test('a model already listed with or without [1m] is not added twice', async () => {
+  test('a model already listed is not added twice, [1m] or not', async () => {
     await render(legacyProvider);
     await type('input[aria-label="手动添加模型"]', 'glm-5.2[1m]');
     await click(button('添加'));
@@ -560,31 +621,9 @@ describe('model list', () => {
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
-  test('renaming a model with its 1M switch asks first, and declining keeps it', async () => {
-    mocks.confirm.mockResolvedValue(false);
+  test('a manual model is added without asking', async () => {
     await render(legacyProvider);
-    await click(
-      document.querySelector('[aria-label="glm-5.2 使用 1M 上下文"]'),
-    );
-    await flush();
-    expect(mocks.confirm).toHaveBeenCalledTimes(1);
-    expect(mocks.patch).not.toHaveBeenCalled();
-
-    mocks.confirm.mockResolvedValue(true);
-    await click(
-      document.querySelector('[aria-label="glm-5.2 使用 1M 上下文"]'),
-    );
-    await flush();
-    expect(mocks.patch).toHaveBeenCalledWith(
-      `${PROVIDERS}/glm`,
-      { models: [{ id: 'glm-5.3' }, { id: 'glm-5.2[1m]', hidden: true }] },
-      120_000,
-    );
-  });
-
-  test('a manual model is added visible', async () => {
-    await render(legacyProvider);
-    await type('input[aria-label="手动添加模型"]', 'glm-6');
+    await type('input[aria-label="手动添加模型"]', 'glm-6[1m]');
     await click(button('添加'));
     await flush();
     expect(mocks.patch).toHaveBeenCalledWith(
@@ -592,13 +631,64 @@ describe('model list', () => {
       {
         models: [
           { id: 'glm-5.3' },
-          { id: 'glm-5.2', hidden: true },
-          { id: 'glm-6' },
+          { id: 'glm-5.2', defaultEffort: 'max' },
+          {
+            id: 'glm-6',
+            contextWindow: 1_000_000,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          },
         ],
       },
       120_000,
     );
-    // Adding stops nothing, so nothing is asked.
     expect(mocks.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('后台与子代理', () => {
+  test('roles are picked from the connection’s models and saved at once', async () => {
+    await render({ ...legacyProvider, roles: { smallFast: 'glm-5.2' } });
+    expect(select('#connection-role-smallFast').value).toBe('glm-5.2');
+    expect(select('#connection-role-subagent').value).toBe('');
+    expect(
+      [...select('#connection-role-subagent').options].map((o) => o.value),
+    ).toEqual(['', 'glm-5.3', 'glm-5.2']);
+    await choose('#connection-role-subagent', 'glm-5.3');
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      { roles: { smallFast: 'glm-5.2', subagent: 'glm-5.3' } },
+      120_000,
+    );
+    await choose('#connection-role-smallFast', '');
+    await flush();
+    expect(mocks.patch).toHaveBeenLastCalledWith(
+      `${PROVIDERS}/glm`,
+      { roles: { subagent: 'glm-5.3' } },
+      120_000,
+    );
+  });
+
+  test('an official refresh does not declare the vendor window (the 1M opt-in)', async () => {
+    mocks.post.mockResolvedValue({
+      ok: true,
+      source: 'endpoint',
+      models: [{ id: 'claude-opus-5-5', contextWindow: 1_000_000 }],
+    });
+    await render(officialProvider);
+    await click(button('获取模型列表'));
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/claude`,
+      {
+        models: [{ id: 'opus' }, { id: 'sonnet' }, { id: 'claude-opus-5-5' }],
+      },
+      120_000,
+    );
+  });
+
+  test('official connections have no roles', async () => {
+    await render(officialProvider);
+    expect(text()).not.toContain('后台与子代理');
   });
 });

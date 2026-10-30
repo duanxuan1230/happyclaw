@@ -96,7 +96,13 @@ describe('legacy ChatGPT gateway identifiers', () => {
       const [provider] = runtime.getProviders();
       expect(provider.anthropicAuthToken).toMatch(/^[a-f0-9]{64}$/);
       expect(provider.codexOAuthCredentials).toEqual(credentials);
-      expect(provider.customEnv).toEqual({ CODEX_REASONING_EFFORT: 'high' });
+      // The runtime defaults it ran with become its own env, once.
+      expect(provider.customEnv).toEqual({
+        CODEX_REASONING_EFFORT: 'high',
+        API_TIMEOUT_MS: '3000000',
+        CLAUDE_CODE_NO_FLICKER: '1',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      });
       expect(provider.updatedAt).toBe(credentials.updatedAt);
       const saved = fs.readFileSync(configFile, 'utf8');
       expect(JSON.parse(saved).version).toBe(5);
@@ -113,6 +119,11 @@ describe('legacy ChatGPT gateway identifiers', () => {
       legacyProvider('codex', 'existing-identifier'),
       legacyProvider('relay', '', false),
     ]);
+    expect(runtime.getProviders().map((p) => p.anthropicAuthToken)).toEqual([
+      'existing-identifier',
+      '',
+    ]);
+    // The first read moved the env prefill in; nothing is rewritten after.
     const saved = fs.readFileSync(configFile, 'utf8');
     expect(runtime.getProviders().map((p) => p.anthropicAuthToken)).toEqual([
       'existing-identifier',
@@ -132,7 +143,8 @@ describe('legacy ChatGPT gateway identifiers', () => {
     expect(providers[0].anthropicAuthToken).not.toBe(
       providers[1].anthropicAuthToken,
     );
-    expect(providers[1].enabled).toBe(false);
+    // Legacy pool membership is carried through for the binding backfill.
+    expect(runtime.readLegacyModelDefaults().enabledIds).toEqual(['one']);
   });
 
   test.each(['host', 'container'] as const)(

@@ -12,16 +12,18 @@ import {
   Brain,
   Check,
   ChevronDown,
+  History,
   LayoutGrid,
   Loader2,
+  Plus,
   Search,
-  Settings2,
   Sparkles,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
-import { splitOneMillionSuffix } from '@/lib/model-providers';
+import type { ModelCapabilitySource } from '@/lib/model-providers';
+import type { ConnectionModel } from '@/types';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,6 +51,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { Badge } from '@/components/ui/badge';
 import { IconButton } from '@/components/common/IconButton';
 import { SegmentedControl } from '@/components/common/SegmentedControl';
 import { vendorOfConnection, vendorOfModel } from '../brand/vendor';
@@ -59,7 +62,10 @@ import { useAuthStore } from '../../stores/auth';
 import { showToast } from '../../utils/toast';
 import { useIsPhone } from '../layout/phone';
 import { useComposerDock, useDockOverlay } from './composer/composerDock';
-import { ConversationContextUsageLine } from './composer/ContextUsageRing';
+import {
+  ConversationContextUsageLine,
+  formatTokenCount,
+} from './composer/ContextUsageRing';
 import {
   effortLabel,
   modelBindingErrorMessage,
@@ -87,114 +93,103 @@ export interface CodexSelectionView {
   models: CodexModelChoice[];
 }
 
-/** One model of a non-ChatGPT configuration. */
-export interface ConnectionModelChoice {
-  id: string;
-  /** Left out of the menu unless the conversation already runs on it. */
-  hidden: boolean;
-  /** Reasoning efforts the model takes, low to high; absent when none. */
-  efforts?: string[];
-  /** The level it runs at when none is picked. */
-  defaultEffort?: string;
-  contextWindow?: number;
-}
+/** One model of a non-ChatGPT connection. */
+export type ConnectionModelChoice = ConnectionModel;
 
 export interface SessionModelOption {
   id: string;
   name: string;
   kind: 'official' | 'third_party' | 'codex';
-  enabled: boolean;
-  /** The configuration's default model; '' lets a relay decide. */
+  /** The connection's own model; '' lets a relay decide. */
   model: string;
-  /** False when the configuration holds no credential and would fail. */
+  /** False when the connection holds no credential and would fail. */
   usable?: boolean;
-  /** Present on ChatGPT configurations: the models and efforts to choose from. */
+  /** Present on ChatGPT connections: the models and efforts to choose from. */
   codex?: CodexSelectionView;
-  /**
-   * The models a non-ChatGPT configuration offers, its default included.
-   * Older servers send none and the configuration stays a single row.
-   */
+  /** Every model a non-ChatGPT connection offers, its own included. */
   models?: ConnectionModelChoice[];
 }
 
+/** Which step of the resolution order the conversation's default comes from. */
+export type DefaultModelSource =
+  | 'agent'
+  | 'owner_main'
+  | 'system_main'
+  | 'workspace_env'
+  | 'none';
+
 export interface SessionModelSelection {
   selectedModelConfigId: string | null;
-  /**
-   * The model picked within the selected configuration; null follows its
-   * default. Older servers do not send this nor the effort.
-   */
+  /** The model picked within the selected connection; null follows its own. */
   selectedModel?: string | null;
   selectedEffort?: string | null;
   default: {
-    source: 'agent' | 'default' | 'single' | 'pool' | 'workspace_env' | 'none';
+    source: DefaultModelSource;
     modelConfigId: string | null;
-    enabledCount: number;
-    /**
-     * The model the default runs on that connection: what a launch with no
-     * pick would use. Null for the pool and the workspace override; older
-     * servers do not send it.
-     */
+    /** The model a launch with no pick runs; null for the workspace override. */
     model?: string | null;
     /** The effort a launch with no pick runs at, when its model takes one. */
     effort?: string | null;
+    /**
+     * The bound connection is deleted or has no credential: a run on the
+     * default fails rather than falling back to another connection.
+     */
+    connectionMissing?: boolean;
   };
   options: SessionModelOption[];
 }
 
-/** Human label for "what the default resolves to" in this conversation. */
-export function describeDefaultModel(selection: SessionModelSelection): string {
-  const { source, modelConfigId, enabledCount, model } = selection.default;
-  const named = selection.options.find((option) => option.id === modelConfigId);
-  switch (source) {
-    case 'agent':
-    case 'default':
-    case 'single':
-      // A ChatGPT configuration is named by the model it runs; the others by
-      // name and, when known, the model.
-      if (named?.codex) return model || named.codex.defaultModel;
-      if (!named) return '默认';
-      return model ? `${named.name} · ${modelLabel(model)}` : named.name;
-    case 'pool':
-      return `自动 · ${enabledCount} 个`;
-    case 'workspace_env':
-      return '工作区环境变量';
-    default:
-      return '系统默认';
-  }
+const DEFAULT_SOURCE_LABELS: Record<DefaultModelSource, string> = {
+  agent: '智能体默认',
+  owner_main: '跟随主智能体',
+  system_main: '跟随主 HappyClaw',
+  workspace_env: '工作区环境变量',
+  none: '未选择模型',
+};
+
+/** Where the conversation's default comes from, as the default row reads. */
+export function defaultSourceLabel(selection: SessionModelSelection): string {
+  return (
+    DEFAULT_SOURCE_LABELS[selection.default.source] ??
+    DEFAULT_SOURCE_LABELS.none
+  );
 }
 
-function defaultHint(selection: SessionModelSelection): string {
-  switch (selection.default.source) {
-    case 'agent':
-      return '跟随智能体绑定的模型配置';
-    case 'default':
-      return '使用模型配置里设为默认的模型';
-    case 'pool':
-      return '未设置默认模型，在已启用的模型配置间自动选择';
-    case 'workspace_env':
-      return '使用工作区环境变量中的模型网关';
-    case 'single':
-      return '使用唯一启用的模型配置';
-    default:
-      return '使用系统设置';
-  }
+/** The default cannot run: nothing is chosen, or its connection is unusable. */
+export function defaultUnusable(selection: SessionModelSelection): boolean {
+  return (
+    selection.default.source === 'none' || !!selection.default.connectionMissing
+  );
 }
 
 /**
- * Why a configuration is listed but cannot be chosen ('' when it can).
- * Whether it is in the automatic pool is left to Settings: an explicit pick
- * ignores the pool.
+ * What the default resolves to in this conversation: connection and model,
+ * or why it cannot run and what to do about it.
  */
+export function describeDefaultModel(
+  selection: SessionModelSelection,
+  canAddModel = false,
+): string {
+  const { source, modelConfigId, model, connectionMissing } = selection.default;
+  if (connectionMissing) return '连接不可用，绑定的连接已删除或缺少凭据';
+  if (source === 'workspace_env') return '使用工作区自带的 Provider 环境变量';
+  const named = selection.options.find((option) => option.id === modelConfigId);
+  if (source === 'none' || !named) {
+    return canAddModel
+      ? '选择一个模型，或在下方添加模型'
+      : '请联系管理员添加模型';
+  }
+  // A ChatGPT connection is named by the model it runs; the others by name
+  // and, when known, the model.
+  if (named.codex) return model || named.codex.defaultModel;
+  return model ? `${named.name} · ${model}` : named.name;
+}
+
+/** Why a connection is listed but cannot be chosen ('' when it can). */
 function optionStatus(option: SessionModelOption): string {
   if (option.usable === false) return '缺少凭据';
   if (option.codex?.needsReauth) return '需重新登录';
   return '';
-}
-
-/** A model id for a label, with the 1M context window spelled out. */
-function modelLabel(id: string): string {
-  const { model, oneMillion } = splitOneMillionSuffix(id);
-  return oneMillion ? `${model}（1M）` : model;
 }
 
 function ownModel(option: SessionModelOption): string {
@@ -211,8 +206,7 @@ function vendorOf(option: SessionModelOption, model: string) {
 
 /**
  * The connection and model the conversation runs on: the pick, or what the
- * default resolves to (the server sends a connection only for an Agent, the
- * global default or a single enabled one). '' when nothing names a model.
+ * default resolves to. '' when nothing names a model.
  */
 function modelInUse(selection: SessionModelSelection): {
   option: SessionModelOption | null;
@@ -239,21 +233,44 @@ function modelInUse(selection: SessionModelSelection): {
   };
 }
 
+interface ModelLevels {
+  efforts: string[];
+  defaultEffort: string | null;
+  source: ModelCapabilitySource;
+}
+
 /** The efforts a connection's model takes, and its own default level. */
 function modelEfforts(
   option: SessionModelOption,
   model: string,
-): { efforts: string[]; defaultEffort: string | null } | null {
+): ModelLevels | null {
   if (option.codex) {
     const choice = option.codex.models.find((item) => item.value === model);
     return choice?.efforts.length
-      ? { efforts: choice.efforts, defaultEffort: choice.defaultEffort || null }
+      ? {
+          efforts: choice.efforts,
+          defaultEffort: choice.defaultEffort || null,
+          source: 'registry',
+        }
       : null;
   }
   const entry = option.models?.find((item) => item.id === model);
   return entry?.efforts?.length
-    ? { efforts: entry.efforts, defaultEffort: entry.defaultEffort ?? null }
+    ? {
+        efforts: entry.efforts,
+        defaultEffort: entry.defaultEffort ?? null,
+        source: entry.effortsSource ?? 'registry',
+      }
     : null;
+}
+
+/** The badge a list of efforts carries when the registry did not supply it. */
+export function effortsSourceBadge(
+  source: ModelCapabilitySource,
+): string | null {
+  if (source === 'family') return '推断';
+  if (source === 'declared') return '自定义';
+  return null;
 }
 
 const DEFAULT_ROW_KEY = '__default__';
@@ -268,6 +285,8 @@ interface ModelRow {
   /** The model shown; '' when a relay decides. */
   id: string;
   note?: string;
+  /** Its context window in tokens; null when unknown. */
+  contextWindow: number | null;
 }
 
 function rowKey(optionId: string, id: string): string {
@@ -275,10 +294,9 @@ function rowKey(optionId: string, id: string): string {
 }
 
 /**
- * The rows a configuration offers. Hidden models are left out unless
- * `pinned` names one, and a pinned model the list lacks stays too, so the
- * panel shows what is really selected. An older server (no list) gives one
- * row standing for the configuration.
+ * The rows a connection offers: every model it lists, and a pinned model the
+ * list lacks too, so the panel shows what is really selected. A connection
+ * without a list gives one row standing for it.
  */
 function optionRows(
   option: SessionModelOption,
@@ -286,16 +304,23 @@ function optionRows(
 ): ModelRow[] {
   const defaultModel = ownModel(option);
   const listed = option.codex
-    ? option.codex.models.map((model) => ({ id: model.value, hidden: false }))
-    : option.models;
-  const row = (id: string, note?: string): ModelRow => ({
+    ? option.codex.models.map((model) => ({
+        id: model.value,
+        contextWindow: null,
+      }))
+    : (option.models ?? []);
+  const row = (
+    id: string,
+    { note, contextWindow = null }: Partial<ModelRow> = {},
+  ): ModelRow => ({
     key: rowKey(option.id, id),
     option,
     pick: id === defaultModel ? null : id,
     id,
     note,
+    contextWindow,
   });
-  if (!listed?.length) return [row(defaultModel)];
+  if (!listed.length) return [row(defaultModel)];
   const rows: ModelRow[] = [];
   if (
     pinned &&
@@ -303,16 +328,105 @@ function optionRows(
     !listed.some((model) => model.id === pinned)
   ) {
     rows.push(
-      row(pinned, option.codex ? '不在账号的模型列表里' : '不在模型列表里'),
+      row(pinned, {
+        note: option.codex ? '不在账号的模型列表里' : '不在模型列表里',
+      }),
     );
   }
   // A relay without a model of its own still lets the relay decide.
   if (!option.codex && !defaultModel) rows.push(row(''));
-  for (const model of listed) {
-    if (!model.hidden) rows.push(row(model.id));
-    else if (model.id === pinned) rows.push(row(model.id, '已隐藏'));
-  }
+  for (const model of listed) rows.push(row(model.id, model));
   return rows;
+}
+
+/** The second line of a model row. */
+function rowDetail(row: ModelRow): string {
+  return [
+    row.option.name,
+    row.contextWindow
+      ? `${formatTokenCount(row.contextWindow)} 上下文`
+      : row.option.models && row.id
+        ? '上下文未知'
+        : null,
+    row.note,
+    optionStatus(row.option),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+// ─── Recently used ─────────────────────────────────────────────
+
+/** A model picked in some conversation: its connection and the model run. */
+export interface RecentModel {
+  modelConfigId: string;
+  model: string;
+}
+
+const MAX_RECENT_MODELS = 5;
+
+export function recentModelsKey(userId: string): string {
+  return `happyclaw:model-picker:recent:${userId}`;
+}
+
+/** Most recent first; empty without a user or a readable storage. */
+export function readRecentModels(userId: string | undefined): RecentModel[] {
+  if (!userId) return [];
+  try {
+    const value: unknown = JSON.parse(
+      globalThis.localStorage.getItem(recentModelsKey(userId)) ?? '[]',
+    );
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter(
+        (item): item is RecentModel =>
+          typeof item?.modelConfigId === 'string' &&
+          typeof item?.model === 'string',
+      )
+      .slice(0, MAX_RECENT_MODELS);
+  } catch {
+    return [];
+  }
+}
+
+/** Puts a pick first, without duplicates, keeping the last five. */
+export function rememberRecentModel(
+  userId: string | undefined,
+  pick: RecentModel,
+): RecentModel[] {
+  const next = [
+    pick,
+    ...readRecentModels(userId).filter(
+      (item) =>
+        item.modelConfigId !== pick.modelConfigId || item.model !== pick.model,
+    ),
+  ].slice(0, MAX_RECENT_MODELS);
+  if (userId) {
+    try {
+      globalThis.localStorage.setItem(
+        recentModelsKey(userId),
+        JSON.stringify(next),
+      );
+    } catch {
+      // Storage full or disabled: the list just is not remembered.
+    }
+  }
+  return next;
+}
+
+/** The rows of the recent view, in the order they were used. */
+function recentRows(
+  selection: SessionModelSelection,
+  recent: RecentModel[],
+): ModelRow[] {
+  return recent.flatMap((item) => {
+    const option = selection.options.find(
+      (candidate) => candidate.id === item.modelConfigId,
+    );
+    if (!option) return [];
+    const found = optionRows(option, null).find((row) => row.id === item.model);
+    return found ? [found] : [];
+  });
 }
 
 export interface EffortContext {
@@ -322,6 +436,8 @@ export interface EffortContext {
   model: string;
   /** The levels that model takes, low to high. */
   efforts: string[];
+  /** Where those levels come from. */
+  effortsSource: ModelCapabilitySource;
   /** The level when none is picked: the default's, else the model's own. */
   defaultEffort: string | null;
   /** The picked level; null follows the default. */
@@ -344,10 +460,13 @@ export function resolveEffortContext(
   const levels = option && model ? modelEfforts(option, model) : null;
   if (!option || !levels) return null;
   const picked = !!selection.selectedModelConfigId;
+  // Nothing to set an effort on while the default cannot run.
+  if (!picked && defaultUnusable(selection)) return null;
   return {
     option,
     model,
     efforts: levels.efforts,
+    effortsSource: levels.source,
     defaultEffort:
       (picked ? null : selection.default.effort) ?? levels.defaultEffort,
     effort: picked ? (selection.selectedEffort ?? null) : null,
@@ -450,6 +569,12 @@ export function ModelSelector({
   const canManageModels = useAuthStore((s) =>
     s.hasPermission('manage_system_config'),
   );
+  const userId = useAuthStore((s) => s.user?.id);
+  // Read once: a sign-out unmounts the composer, so the user never changes
+  // under a mounted picker.
+  const [recent, setRecent] = useState<RecentModel[]>(() =>
+    readRecentModels(userId),
+  );
   // A phone gets one pill for model and effort and picks the effort in the
   // sheet; a narrow window keeps the desktop controls but the sheet too.
   const phone = useIsPhone();
@@ -536,8 +661,8 @@ export function ModelSelector({
       effort?: string | null;
     },
     success: (next: SessionModelSelection) => string,
-  ) => {
-    if (saving) return;
+  ): Promise<boolean> => {
+    if (saving) return false;
     saves.current += 1;
     setSaving(true);
     try {
@@ -547,11 +672,13 @@ export function ModelSelector({
       });
       setSelection(next);
       toast.success(success(next));
+      return true;
     } catch (err) {
       toast.error(
         modelBindingErrorMessage(err) ?? getErrorMessage(err, '切换模型失败'),
       );
       void load();
+      return false;
     } finally {
       setSaving(false);
     }
@@ -567,8 +694,8 @@ export function ModelSelector({
             showToast(
               '还没有可用的模型',
               canManageModels
-                ? '在 设置 → 模型 中添加模型配置'
-                : '请联系管理员添加模型配置',
+                ? '在 设置 → 模型 中添加模型'
+                : '请联系管理员添加模型',
             );
           } else {
             showToast('无法读取模型配置', '已重新加载，请稍后再试');
@@ -589,14 +716,24 @@ export function ModelSelector({
       ? rowKey(inUse.option.id, inUse.model)
       : DEFAULT_ROW_KEY;
   const effortContext = resolveEffortContext(selection);
-  // The trigger names the model in use, without a 「默认 ·」 prefix.
-  const triggerName = inUse.model
-    ? splitOneMillionSuffix(inUse.model).model
-    : (inUse.option?.name ?? describeDefaultModel(selection));
-  const fullLabel = inUse.model
-    ? [inUse.option?.name, modelLabel(inUse.model)].filter(Boolean).join(' · ')
-    : triggerName;
-  const tooltip = picked ? fullLabel : `默认 · ${fullLabel}`;
+  // The trigger names the model in use, without where the default came from.
+  const unusable = !picked && defaultUnusable(selection);
+  const triggerName = unusable
+    ? selection.default.connectionMissing
+      ? '连接不可用'
+      : '未选择模型'
+    : inUse.model ||
+      inUse.option?.name ||
+      (selection.default.source === 'workspace_env'
+        ? defaultSourceLabel(selection)
+        : '未选择模型');
+  const fullLabel =
+    inUse.model && !unusable
+      ? [inUse.option?.name, inUse.model].filter(Boolean).join(' · ')
+      : triggerName;
+  const tooltip = picked
+    ? fullLabel
+    : `${defaultSourceLabel(selection)} · ${fullLabel}`;
 
   const pickRow = (row: ModelRow | null) => {
     const modelConfigId = row ? row.option.id : null;
@@ -626,9 +763,7 @@ export function ModelSelector({
         : null;
     const effort =
       keptEffort && levels?.efforts.includes(keptEffort) ? keptEffort : null;
-    const name = modelToRun
-      ? `${option.name} · ${modelLabel(modelToRun)}`
-      : option.name;
+    const name = modelToRun ? `${option.name} · ${modelToRun}` : option.name;
     const dropped =
       keptEffort && !effort
         ? `；该模型不支持${effortLabel(keptEffort)}，推理等级已恢复为默认${
@@ -646,7 +781,16 @@ export function ModelSelector({
         ...(keptEffort || option.codex ? { effort } : {}),
       },
       () => `已切换到「${name}」，从下一条消息开始生效${dropped}`,
-    );
+    ).then((saved) => {
+      if (saved && row) {
+        setRecent(
+          rememberRecentModel(userId, {
+            modelConfigId: option.id,
+            model: row.id,
+          }),
+        );
+      }
+    });
   };
 
   const pickEffort = (value: string | null) => {
@@ -675,6 +819,7 @@ export function ModelSelector({
   const panel = (
     <ModelPanel
       selection={selection}
+      recent={recent}
       pinnedModel={pinnedModel}
       selectedKey={selectedKey}
       disabled={disabled}
@@ -701,7 +846,7 @@ export function ModelSelector({
           <ConversationContextUsageLine jid={groupJid} agentId={agentId} />
         )
       }
-      onManage={
+      onAddModel={
         canManageModels
           ? () => {
               handleOpenChange(false);
@@ -714,7 +859,7 @@ export function ModelSelector({
 
   const mark = saving ? (
     <Loader2 className="size-5 shrink-0 animate-spin p-0.5" />
-  ) : inUse.option ? (
+  ) : inUse.option && !unusable ? (
     <VendorTile
       size="sm"
       vendor={vendorOf(inUse.option, inUse.model)}
@@ -756,7 +901,14 @@ export function ModelSelector({
               {mark}
               {!compact && (
                 <>
-                  <span className="min-w-0 truncate">{triggerName}</span>
+                  <span
+                    className={cn(
+                      'min-w-0 truncate',
+                      unusable && 'text-warning',
+                    )}
+                  >
+                    {triggerName}
+                  </span>
                   {shown?.level && (
                     <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
                       <span
@@ -790,7 +942,14 @@ export function ModelSelector({
                   className={cn(TRIGGER_CLASS, 'max-w-[240px]')}
                 >
                   {mark}
-                  <span className="min-w-0 truncate">{triggerName}</span>
+                  <span
+                    className={cn(
+                      'min-w-0 truncate',
+                      unusable && 'text-warning',
+                    )}
+                  >
+                    {triggerName}
+                  </span>
                   {chevron}
                 </button>
               </TooltipTrigger>
@@ -922,7 +1081,10 @@ function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
         onCloseAutoFocus={keepFocusThatMovedOn}
         className="w-56 max-w-[calc(100vw-2rem)]"
       >
-        <DropdownMenuLabel>推理等级</DropdownMenuLabel>
+        <DropdownMenuLabel className="flex items-center gap-1.5">
+          推理等级
+          <EffortsSourceBadge source={context.effortsSource} />
+        </DropdownMenuLabel>
         <DropdownMenuRadioGroup
           value={context.effort ?? DEFAULT_EFFORT}
           onValueChange={(value) =>
@@ -956,7 +1118,9 @@ function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
 
 interface ModelPanelProps {
   selection: SessionModelSelection;
-  /** The model picked within the selected configuration, if any. */
+  /** Models this user picked lately, most recent first. */
+  recent: RecentModel[];
+  /** The model picked within the selected connection, if any. */
   pinnedModel: string | null;
   selectedKey: string;
   disabled: boolean;
@@ -980,16 +1144,21 @@ interface ModelPanelProps {
   } | null;
   /** Null picks the default. */
   onPick: (row: ModelRow | null) => void;
-  onManage: (() => void) | null;
+  /** Opens Settings to add a model; null for whoever may not. */
+  onAddModel: (() => void) | null;
 }
+
+const RECENT_RAIL = 'recent';
+const ALL_RAIL = 'all';
 
 /**
  * The model panel after cindy's unified selector: a search field, a rail of
- * connections that filters the list, two-line rows with a check on the one
- * in use, and the way to Settings.
+ * 最近, 全部 and the connections that filters the list, two-line rows with a
+ * check on the one in use, and the way to add a model.
  */
 function ModelPanel({
   selection,
+  recent,
   pinnedModel,
   selectedKey,
   disabled,
@@ -999,7 +1168,7 @@ function ModelPanel({
   onSearchFocus,
   effort,
   onPick,
-  onManage,
+  onAddModel,
 }: ModelPanelProps) {
   const effortRow = effort && (
     <EffortSegments
@@ -1009,7 +1178,7 @@ function ModelPanel({
     />
   );
   const [query, setQuery] = useState('');
-  const [rail, setRail] = useState<string>('all');
+  const [rail, setRail] = useState<string>(ALL_RAIL);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Opens on the model in use (cindy's picker scrolls to it), centred when
@@ -1035,27 +1204,60 @@ function ModelPanel({
   }, []);
 
   const needle = query.trim().toLowerCase();
+  const recentView = rail === RECENT_RAIL && !needle;
   // A search looks through every connection, whatever the rail shows.
-  const rows = selection.options
-    .filter((option) => needle || rail === 'all' || option.id === rail)
-    .flatMap((option) =>
-      optionRows(
-        option,
-        option.id === selection.selectedModelConfigId ? pinnedModel : null,
-      ).filter(
-        (row) =>
-          !needle ||
-          row.id.toLowerCase().includes(needle) ||
-          option.name.toLowerCase().includes(needle),
-      ),
-    );
+  const rows = recentView
+    ? recentRows(selection, recent)
+    : selection.options
+        .filter((option) => needle || rail === ALL_RAIL || option.id === rail)
+        .flatMap((option) =>
+          optionRows(
+            option,
+            option.id === selection.selectedModelConfigId ? pinnedModel : null,
+          ).filter(
+            (row) =>
+              !needle ||
+              row.id.toLowerCase().includes(needle) ||
+              option.name.toLowerCase().includes(needle),
+          ),
+        );
+  const sourceLabel = defaultSourceLabel(selection);
   const showDefault =
-    rail === 'all' &&
-    (!needle || '默认'.includes(needle) || 'default'.includes(needle));
+    rail === ALL_RAIL &&
+    (!needle ||
+      '默认'.includes(needle) ||
+      'default'.includes(needle) ||
+      sourceLabel.toLowerCase().includes(needle));
   const showRail = (id: string) => {
     setRail(id);
     setQuery('');
   };
+  // 最近, 全部 and each connection: chips on a phone, marks otherwise.
+  const railItems = [
+    {
+      id: RECENT_RAIL,
+      label: '最近',
+      mark: <History className="size-4" aria-hidden="true" />,
+    },
+    {
+      id: ALL_RAIL,
+      label: '全部',
+      mark: <LayoutGrid className="size-4" aria-hidden="true" />,
+    },
+    ...selection.options.map((option) => ({
+      id: option.id,
+      label: option.name,
+      mark: (
+        <VendorTile
+          vendor={vendorOfConnection({
+            kind: option.kind,
+            model: ownModel(option),
+          })}
+          name={option.name}
+        />
+      ),
+    })),
+  ].map((item) => ({ ...item, active: rail === item.id && !needle }));
 
   const moveFocus = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
@@ -1106,17 +1308,12 @@ function ModelPanel({
           aria-label="模型配置"
           className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-surface-border px-3 py-2 [scrollbar-width:none]"
         >
-          <RailChip
-            label="全部"
-            active={rail === 'all' && !needle}
-            onClick={() => showRail('all')}
-          />
-          {selection.options.map((option) => (
+          {railItems.map((item) => (
             <RailChip
-              key={option.id}
-              label={option.name}
-              active={rail === option.id && !needle}
-              onClick={() => showRail(option.id)}
+              key={item.id}
+              label={item.label}
+              active={item.active}
+              onClick={() => showRail(item.id)}
             />
           ))}
         </div>
@@ -1136,27 +1333,14 @@ function ModelPanel({
             touch && 'hidden',
           )}
         >
-          <RailButton
-            label="全部"
-            active={rail === 'all' && !needle}
-            onClick={() => showRail('all')}
-          >
-            <LayoutGrid className="size-4" aria-hidden="true" />
-          </RailButton>
-          {selection.options.map((option) => (
+          {railItems.map((item) => (
             <RailButton
-              key={option.id}
-              label={option.name}
-              active={rail === option.id && !needle}
-              onClick={() => showRail(option.id)}
+              key={item.id}
+              label={item.label}
+              active={item.active}
+              onClick={() => showRail(item.id)}
             >
-              <VendorTile
-                vendor={vendorOfConnection({
-                  kind: option.kind,
-                  model: ownModel(option),
-                })}
-                name={option.name}
-              />
+              {item.mark}
             </RailButton>
           ))}
         </div>
@@ -1170,50 +1354,44 @@ function ModelPanel({
           {showDefault && (
             <RowButton
               checked={selectedKey === DEFAULT_ROW_KEY}
-              disabled={disabled}
+              // A default that cannot run is not offered as a choice.
+              disabled={
+                disabled ||
+                (defaultUnusable(selection) && selectedKey !== DEFAULT_ROW_KEY)
+              }
               onClick={() => onPick(null)}
               mark={
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-selected text-muted-foreground">
                   <Sparkles className="size-3.5" aria-hidden="true" />
                 </span>
               }
-              title={`默认 · ${describeDefaultModel(selection)}`}
-              detail={defaultHint(selection)}
+              title={sourceLabel}
+              detail={describeDefaultModel(selection, !!onAddModel)}
+              warning={defaultUnusable(selection)}
             />
           )}
           {showDefault && selectedKey === DEFAULT_ROW_KEY && effortRow}
-          {rows.map((row) => {
-            const { model, oneMillion } = splitOneMillionSuffix(row.id);
-            const status = optionStatus(row.option);
-            return (
-              <Fragment key={row.key}>
-                <RowButton
-                  checked={row.key === selectedKey}
-                  disabled={disabled || !!status}
-                  onClick={() => onPick(row)}
-                  mark={
-                    <VendorTile
-                      vendor={vendorOf(row.option, row.id)}
-                      name={row.option.name}
-                    />
-                  }
-                  title={model || '由中转站决定'}
-                  detail={[
-                    row.option.name,
-                    oneMillion ? '1M 上下文' : null,
-                    row.note,
-                    status,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                />
-                {row.key === selectedKey && effortRow}
-              </Fragment>
-            );
-          })}
+          {rows.map((row) => (
+            <Fragment key={row.key}>
+              <RowButton
+                checked={row.key === selectedKey}
+                disabled={disabled || !!optionStatus(row.option)}
+                onClick={() => onPick(row)}
+                mark={
+                  <VendorTile
+                    vendor={vendorOf(row.option, row.id)}
+                    name={row.option.name}
+                  />
+                }
+                title={row.id || '由中转站决定'}
+                detail={rowDetail(row)}
+              />
+              {row.key === selectedKey && effortRow}
+            </Fragment>
+          ))}
           {rows.length === 0 && !showDefault && (
             <p className="px-3 py-6 text-center text-caption text-muted-foreground">
-              没有匹配的模型
+              {recentView ? '还没有最近使用的模型' : '没有匹配的模型'}
             </p>
           )}
         </div>
@@ -1225,14 +1403,14 @@ function ModelPanel({
             ? '切换模型会开启新的底层会话，并自动带上最近的对话记录；推理等级在输入框旁调整。'
             : '切换模型会开启新的底层会话，并自动带上最近的对话记录。'}
         </p>
-        {onManage && (
+        {onAddModel && (
           <button
             type="button"
-            onClick={onManage}
-            className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-caption text-primary-text hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+            onClick={onAddModel}
+            className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-caption text-primary-text hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none pointer-coarse:h-10"
           >
-            <Settings2 className="size-3.5" aria-hidden="true" />
-            管理模型配置
+            <Plus className="size-3.5" aria-hidden="true" />
+            添加模型
           </button>
         )}
         {footer}
@@ -1241,9 +1419,27 @@ function ModelPanel({
   );
 }
 
+/** 推断 or 自定义 next to a list of efforts the registry did not supply. */
+function EffortsSourceBadge({ source }: { source: ModelCapabilitySource }) {
+  const badge = effortsSourceBadge(source);
+  return badge ? (
+    <Badge
+      variant="neutral"
+      title={
+        source === 'family'
+          ? '按同系列模型推断，未经上游确认'
+          : '在模型连接里手动声明'
+      }
+    >
+      {badge}
+    </Badge>
+  ) : null;
+}
+
 /**
  * A phone's effort choice: 默认 and the model's levels as a segmented row
- * under the model in use. A pick applies in place; the sheet stays open.
+ * under the model in use. A pick applies in place; the sheet stays open. On
+ * a narrow screen the row drops its indent and scrolls sideways if needed.
  */
 function EffortSegments({
   context,
@@ -1260,12 +1456,16 @@ function EffortSegments({
       data-effort-segments=""
       role="none"
       disabled={disabled}
-      className="min-w-0 space-y-1 pt-0.5 pr-2 pb-2 pl-[2.875rem] disabled:opacity-50"
+      className="min-w-0 space-y-1 pt-0.5 pr-2 pb-2 pl-2 disabled:opacity-50 min-[420px]:pl-[2.875rem]"
     >
-      <p className="text-micro text-muted-foreground" aria-hidden="true">
+      <p
+        className="flex items-center gap-1.5 text-micro text-muted-foreground"
+        aria-hidden="true"
+      >
         推理等级
         {context.defaultEffort &&
           ` · 默认${effortLabel(context.defaultEffort)}`}
+        <EffortsSourceBadge source={context.effortsSource} />
       </p>
       <SegmentedControl
         label={
@@ -1353,6 +1553,7 @@ function RowButton({
   mark,
   title,
   detail,
+  warning = false,
 }: {
   checked: boolean;
   disabled: boolean;
@@ -1360,6 +1561,8 @@ function RowButton({
   mark: ReactNode;
   title: string;
   detail: string;
+  /** The second line says why this cannot run. */
+  warning?: boolean;
 }) {
   return (
     <button
@@ -1380,7 +1583,12 @@ function RowButton({
         <span className="block truncate text-body font-medium text-foreground">
           {title}
         </span>
-        <span className="block truncate text-caption text-muted-foreground">
+        <span
+          className={cn(
+            'block truncate text-caption',
+            warning ? 'text-warning' : 'text-muted-foreground',
+          )}
+        >
           {detail}
         </span>
       </span>

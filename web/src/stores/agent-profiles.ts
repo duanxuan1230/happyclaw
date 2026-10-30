@@ -9,6 +9,7 @@ import type {
   AgentProfileRuntimePolicy,
   AgentProfileRuntimePolicyPatch,
   GroupInfo,
+  InheritedModel,
   ModelConfigOption,
 } from '../types';
 import { useChatStore } from './chat';
@@ -37,6 +38,8 @@ export interface AgentPromptRefinement extends Omit<
 interface AgentProfilesState {
   profiles: AgentProfile[];
   modelConfigs: ModelConfigOption[];
+  /** What an Agent without its own binding follows; null until loaded. */
+  inheritedModel: InheritedModel | null;
   governanceByProfile: Record<string, AgentProfileGovernance | undefined>;
   governanceLoading: Record<string, boolean | undefined>;
   governanceErrors: Record<string, string | undefined>;
@@ -135,6 +138,7 @@ export interface AgentProfileImportResult {
 export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
   profiles: [],
   modelConfigs: [],
+  inheritedModel: null,
   governanceByProfile: {},
   governanceLoading: {},
   governanceErrors: {},
@@ -148,6 +152,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       const data = await api.get<{
         profiles: AgentProfile[];
         model_configs: ModelConfigOption[];
+        inherited_model?: InheritedModel;
       }>('/api/agent-profiles');
       set({
         profiles: data.profiles.map((profile) =>
@@ -156,6 +161,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
             : profile,
         ),
         modelConfigs: data.model_configs ?? [],
+        inheritedModel: data.inherited_model ?? null,
         loading: false,
         profilesError: null,
         error: null,
@@ -174,6 +180,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
     const data = await api.get<{
       profiles: AgentProfile[];
       model_configs: ModelConfigOption[];
+      inherited_model?: InheritedModel;
     }>('/api/agent-profiles');
     const profile = data.profiles.find((candidate) => candidate.id === id);
     if (!profile) throw new Error('智能体配置不存在');
@@ -182,6 +189,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
         candidate.id === id ? profile : candidate,
       ),
       modelConfigs: data.model_configs ?? [],
+      inheritedModel: data.inherited_model ?? null,
       governanceByProfile: {
         ...state.governanceByProfile,
         [id]: state.governanceByProfile[id]

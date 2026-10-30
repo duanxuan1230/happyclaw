@@ -105,7 +105,6 @@ import {
 import {
   getContainerEnvConfig,
   getProviders,
-  getUsableDefaultProvider,
   getSystemSettings,
   providerHasCredentials,
   saveContainerEnvConfig,
@@ -118,14 +117,17 @@ import { hasPermission } from '../permissions.js';
 import {
   buildCodexSelectionView,
   chatGptDefaultModel,
-  listSessionPickerModels,
+  listConnectionModels,
   readStoredChoice,
   readStoredConnectionChoice,
-  unpickedLaunchEffort,
-  unpickedLaunchModel,
+  resolveAgentLaunchModel,
   validateSessionChoice,
   type CodexSelectionView,
 } from '../session-model-overrides.js';
+import {
+  resolveModelBinding,
+  summarizeModelBinding,
+} from '../container-runner.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { notifyConversationContextCleared } from '../context-usage-events.js';
 import { readSessionContextUsage } from '../session-context-usage.js';
@@ -2481,6 +2483,22 @@ function resolveSessionModelSelectionScope(
   return { group, agentId };
 }
 
+/**
+ * The model a pick without a model runs on `provider`: the Agent's, when the
+ * pick is on the Agent's own connection and it still offers that model.
+ */
+function agentModelOn(
+  provider: ReturnType<typeof getProviders>[number],
+  profile: { model_config_id: string | null; model: string | null } | undefined,
+  groupFolder: string,
+): string | undefined {
+  if (profile?.model_config_id !== provider.id) return undefined;
+  return resolveAgentLaunchModel(provider, profile.model, {
+    groupFolder,
+    warn: false,
+  });
+}
+
 function buildSessionModelSelectionPayload(
   group: RegisteredGroup,
   agentId: string | null,
@@ -2491,40 +2509,22 @@ function buildSessionModelSelectionPayload(
     !!id && providers.some((provider) => provider.id === id);
   const stored = getSessionModelSelectionDetail(group.folder, agentId);
   const profile = peekAgentProfileForWorkspace(group.folder, group.created_by);
-  const enabled = providers.filter((provider) => provider.enabled);
-  const envOverride = getContainerEnvConfig(group.folder);
   const canExceedCeiling = hasPermission(chooser, 'manage_system_config');
   const agentEffort = resolveAgentSdkEffort(profile?.runtime_policy);
 
-  // Mirrors resolvePinnedModelConfigId: the order decides what a conversation
-  // that picked nothing actually runs on.
-  let defaultSource:
-    | 'agent'
-    | 'default'
-    | 'single'
-    | 'pool'
-    | 'workspace_env'
-    | 'none';
-  let defaultModelConfigId: string | null = null;
-  const globalDefault = getUsableDefaultProvider();
-  if (exists(profile?.model_config_id)) {
-    defaultSource = 'agent';
-    defaultModelConfigId = profile.model_config_id;
-  } else if (
-    envOverride.anthropicApiKey ||
-    envOverride.anthropicAuthToken ||
-    envOverride.anthropicBaseUrl
-  ) {
-    defaultSource = 'workspace_env';
-  } else if (globalDefault) {
-    defaultSource = 'default';
-    defaultModelConfigId = globalDefault.id;
-  } else if (enabled.length === 1) {
-    defaultSource = 'single';
-    defaultModelConfigId = enabled[0].id;
-  } else {
-    defaultSource = enabled.length > 1 ? 'pool' : 'none';
-  }
+  // What a conversation that picked nothing runs on, resolved exactly as a
+  // launch resolves it.
+  const binding = resolveModelBinding(
+    { modelConfigId: profile?.model_config_id, model: profile?.model },
+    { groupFolder: group.folder, agentId },
+    { includeSession: false },
+  );
+  const summary = summarizeModelBinding(
+    binding,
+    group.folder,
+    agentId,
+    agentEffort,
+  );
 
   const codexViews = new Map<string, CodexSelectionView>();
   const options = providers.map((provider) => {
@@ -2532,19 +2532,13 @@ function buildSessionModelSelectionPayload(
       id: provider.id,
       name: provider.name,
       kind: provider.codexOAuthCredentials ? ('codex' as const) : provider.type,
-      enabled: provider.enabled,
       model: provider.anthropicModel,
       // A configuration without a credential (e.g. an old copy that lost its
       // key) would fail every turn; the picker shows it but cannot pick it.
       usable: providerHasCredentials(provider),
     };
     if (!provider.codexOAuthCredentials) {
-      // The picker lists the visible ones; a hidden model stays pickable by
-      // a choice that already names it.
-      return {
-        ...option,
-        models: listSessionPickerModels(provider, agentEffort),
-      };
+      return { ...option, models: listConnectionModels(provider) };
     }
     // The list is the account's own once its catalog has been fetched; ask for
     // a fresher one without making the picker wait for it.
@@ -2559,9 +2553,6 @@ function buildSessionModelSelectionPayload(
     return { ...option, codex };
   });
 
-  const defaultProvider = providers.find(
-    (provider) => provider.id === defaultModelConfigId,
-  );
   const selectedModelConfigId = exists(stored?.modelConfigId)
     ? stored.modelConfigId
     : null;
@@ -2577,17 +2568,22 @@ function buildSessionModelSelectionPayload(
     stored && view
       ? readStoredChoice(view, stored, canExceedCeiling)
       : stored && selectedProvider
-        ? readStoredConnectionChoice(selectedProvider, stored)
+        ? readStoredConnectionChoice(
+            selectedProvider,
+            stored,
+            agentModelOn(selectedProvider, profile, group.folder),
+          )
         : { model: null, effort: null };
-  const defaultModel = defaultProvider
-    ? unpickedLaunchModel(
-        defaultProvider,
-        defaultSource === 'agent' ? profile?.model : null,
-        group.folder,
-      )
-    : null;
-  const defaultView = defaultProvider
-    ? codexViews.get(defaultProvider.id)
+
+  // A ChatGPT default runs at the effort its gateway resolves: the Agent's,
+  // else the one inherited with the connection.
+  const defaultCodexView = summary.provider?.codexOAuthCredentials
+    ? !agentEffort && binding.inheritedEffort
+      ? buildCodexSelectionView(summary.provider, {
+          canExceedCeiling,
+          agentEffort: binding.inheritedEffort,
+        })
+      : codexViews.get(summary.provider.id)
     : undefined;
 
   return {
@@ -2595,17 +2591,16 @@ function buildSessionModelSelectionPayload(
     selectedModel: selected.model,
     selectedEffort: selected.effort,
     default: {
-      source: defaultSource,
-      modelConfigId: defaultModelConfigId,
-      // What "default" runs, resolved as a launch without a pick resolves it.
-      model: defaultModel,
-      effort: defaultView
-        ? (defaultView.models.find((entry) => entry.value === defaultModel)
-            ?.defaultEffort ?? defaultView.defaultEffort)
-        : defaultProvider
-          ? unpickedLaunchEffort(defaultProvider, defaultModel, agentEffort)
-          : null,
-      enabledCount: enabled.length,
+      source: summary.source,
+      modelConfigId: summary.modelConfigId,
+      // A set binding whose connection is gone: runs fail until it is fixed.
+      connectionMissing: summary.connectionMissing,
+      model: summary.model,
+      effort: defaultCodexView
+        ? (defaultCodexView.models.find(
+            (entry) => entry.value === summary.model,
+          )?.defaultEffort ?? defaultCodexView.defaultEffort)
+        : summary.effort,
     },
     options,
   };
@@ -2637,17 +2632,22 @@ function applySessionChoiceChange(
   },
 ): { drained: number; liveUpdated: number } {
   const providers = getProviders();
-  // The model a configuration actually runs: its pick, else its own.
+  const profile = peekAgentProfileForWorkspace(group.folder, group.created_by);
+  // The model a configuration actually runs: its pick, else the Agent's on
+  // the Agent's own connection, else the connection's own.
   const launchKey = (
     choice: { modelConfigId: string | null; model: string | null } | null,
   ): string => {
     if (!choice?.modelConfigId) return '';
     const provider = providers.find((item) => item.id === choice.modelConfigId);
+    const agentModel = provider
+      ? agentModelOn(provider, profile, group.folder)
+      : undefined;
     const model = !provider
       ? ''
       : provider.codexOAuthCredentials
-        ? (choice.model ?? chatGptDefaultModel(provider))
-        : (choice.model ?? provider.anthropicModel);
+        ? (choice.model ?? agentModel ?? chatGptDefaultModel(provider))
+        : (choice.model ?? agentModel ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
   const jids = agentId
@@ -2656,10 +2656,6 @@ function applySessionChoiceChange(
   const effortChanged = (previous?.effort ?? null) !== next.effort;
   let drained = 0;
   if (launchKey(previous) !== launchKey(next)) {
-    const profile = peekAgentProfileForWorkspace(
-      group.folder,
-      group.created_by,
-    );
     const ranAgentModel =
       !previous && !!profile?.model_config_id && !!profile.model;
     const target =
@@ -2755,6 +2751,11 @@ groupRoutes.put('/:jid/model-selection', authMiddleware, async (c) => {
         target,
         { model: requestedModel, effort: requestedEffort },
         authUser,
+        agentModelOn(
+          target,
+          peekAgentProfileForWorkspace(group.folder, group.created_by),
+          group.folder,
+        ),
       );
       if (!checked.ok) return c.json(checked.rejection, 400);
       ({ model, effort } = checked);

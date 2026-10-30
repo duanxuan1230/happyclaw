@@ -280,7 +280,9 @@ describe('v84 → v85', () => {
     process.env.HAPPYCLAW_MIGRATION_BACKUP_DIR = backupDir;
     db.initDatabase();
     expect(
-      fs.readdirSync(backupDir).some((f) => f.includes('v84-to-v85')),
+      fs
+        .readdirSync(backupDir)
+        .some((f) => f.includes(`v84-to-v${db.CURRENT_SCHEMA_VERSION}-`)),
     ).toBe(true);
 
     const byId = new Map(
@@ -373,7 +375,7 @@ describe('v84 → v85', () => {
       raw
         .prepare("SELECT value FROM router_state WHERE key = 'schema_version'")
         .get(),
-    ).toEqual({ value: '85' });
+    ).toEqual({ value: String(db.CURRENT_SCHEMA_VERSION) });
     raw.close();
   });
 
@@ -390,10 +392,8 @@ describe('v84 → v85', () => {
   test('a newer database is refused', () => {
     const raw = new Database(databasePath);
     raw
-      .prepare(
-        "UPDATE router_state SET value = '86' WHERE key = 'schema_version'",
-      )
-      .run();
+      .prepare("UPDATE router_state SET value = ? WHERE key = 'schema_version'")
+      .run(String(db.CURRENT_SCHEMA_VERSION + 1));
     raw.close();
     expect(() => db.initDatabase()).toThrow(/refusing downgrade/);
   });

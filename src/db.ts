@@ -82,6 +82,7 @@ import {
 } from './agent-profile-identity.js';
 import { assertDatabaseMaintenanceAccess } from './database-maintenance.js';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
+import { splitOneMillionSuffix } from './model-providers.js';
 import type {
   RouterCursorChange,
   RouterCursorKind,
@@ -5431,7 +5432,7 @@ export function setSessionModelSelection(
     groupFolder,
     effectiveAgentId,
     modelConfigId,
-    overrides?.model || null,
+    storedModelName(overrides?.model),
     overrides?.effort || null,
     updatedBy ?? null,
     new Date().toISOString(),
@@ -6544,6 +6545,11 @@ export function commitAgentBuilderDraft(
   })();
 }
 
+/** A model name as stored: never with Claude Code's `[1m]` switch. */
+function storedModelName(model: string | null | undefined): string | null {
+  return (model && splitOneMillionSuffix(model).model) || null;
+}
+
 const DEFAULT_AGENT_PROFILE_NAME = 'HappyClaw';
 const LEGACY_DEFAULT_AGENT_PROFILE_NAME = 'Default Agent';
 
@@ -6688,7 +6694,7 @@ export function createAgentProfile(input: {
     input.avatarColor ?? null,
     input.avatarUrl ?? null,
     input.modelConfigId ?? null,
-    (input.modelConfigId && input.model) || null,
+    (input.modelConfigId && storedModelName(input.model)) || null,
     runtimePolicyJson,
     identityHash,
     now,
@@ -6770,7 +6776,7 @@ export function updateAgentProfile(
   const nextModel = !nextModelConfigId
     ? null
     : updates.model !== undefined
-      ? updates.model || null
+      ? storedModelName(updates.model)
       : modelConfigChanged
         ? null
         : existing.model;
@@ -7171,6 +7177,52 @@ export function peekAgentProfileForWorkspace(
   }
   if (!ownerUserId) return undefined;
   return readDefaultProfile(ownerUserId);
+}
+
+/** A user's main Agent (their default profile), without creating it. */
+export function peekDefaultAgentProfile(
+  userId: string,
+): AgentProfile | undefined {
+  const row = prepareCached(
+    "SELECT * FROM agent_profiles WHERE owner_user_id = ? AND is_default = 1 AND status = 'active' LIMIT 1",
+  ).get(userId) as Record<string, unknown> | undefined;
+  return row ? mapAgentProfileRow(row) : undefined;
+}
+
+/**
+ * The main Agent of the user who owns a workspace folder: the creator of its
+ * Web workspace, the home one first. Read-only.
+ */
+export function peekWorkspaceOwnerMainAgentProfile(
+  groupFolder: string,
+): AgentProfile | undefined {
+  const row = prepareCached(`SELECT created_by
+       FROM registered_groups
+       WHERE folder = ? AND jid LIKE 'web:%' AND created_by IS NOT NULL
+       ORDER BY is_home DESC, added_at ASC
+       LIMIT 1`).get(groupFolder) as { created_by: string } | undefined;
+  return row ? peekDefaultAgentProfile(row.created_by) : undefined;
+}
+
+/**
+ * The system main HappyClaw: the main Agent of the earliest-created admin. Every Agent that binds no connection, directly or through its
+ * owner's main Agent, falls back to its binding.
+ */
+export function peekSystemMainAgentProfile(): AgentProfile | undefined {
+  const adminId = getSystemMainAdminUserId();
+  return adminId ? peekDefaultAgentProfile(adminId) : undefined;
+}
+
+/**
+ * The earliest-created admin, whose main Agent is the system main. Status is
+ * not consulted, so disabling an admin does not move the system main.
+ */
+export function getSystemMainAdminUserId(): string | null {
+  const row = prepareCached(`SELECT id FROM users
+       WHERE role = 'admin'
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`).get() as { id: string } | undefined;
+  return row?.id ?? null;
 }
 
 export function getAgentProfileForWorkspace(

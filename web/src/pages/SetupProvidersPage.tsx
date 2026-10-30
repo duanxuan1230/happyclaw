@@ -86,7 +86,7 @@ export function SetupProvidersPage() {
       // 保存后确认初始化状态已生效，再进入后台
       const { setupStatus: latestStatus } = useAuthStore.getState();
       if (latestStatus?.needsSetup) {
-        setError('模型连接已保存但还没有启用，请在设置里启用后再试');
+        setError('模型连接已保存，但初始化状态还没有更新，请刷新页面后再试');
         return;
       }
       navigate('/settings?tab=claude', { replace: true });
@@ -146,8 +146,6 @@ export function SetupProvidersPage() {
               <div className="p-4">
                 <AddModelWizard
                   layout="page"
-                  enabledCount={0}
-                  showPoolSwitch={false}
                   onConnectionCreated={(provider) =>
                     setConnection({
                       provider,

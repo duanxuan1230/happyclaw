@@ -272,9 +272,9 @@ describe('POST /claude/oauth/callback', () => {
       ],
       claudeOAuthNeedsReLogin: false,
       claudeOAuthLastRefreshError: null,
-      // The only connection: it joins the pool.
-      enabled: true,
     });
+    // There is no pool to join.
+    expect(body).not.toHaveProperty('enabled');
     const provider = runtimeConfig.getProviderById(body.id)!;
     expect(provider.claudeOAuthCredentials).toMatchObject({
       accessToken: 'login-access',
@@ -296,14 +296,7 @@ describe('POST /claude/oauth/callback', () => {
     ).toBe(400);
   });
 
-  test('a new login does not join a pool that already has a member', async () => {
-    runtimeConfig.createProvider({
-      name: 'Relay',
-      type: 'third_party',
-      anthropicBaseUrl: 'https://relay.test',
-      anthropicAuthToken: 'relay-secret',
-      enabled: true,
-    });
+  test('a new login stays out of the legacy pool', async () => {
     const { state } = await startFlow();
     fullLoginFetch();
     const response = await post('/api/config/claude/oauth/callback', {
@@ -311,7 +304,10 @@ describe('POST /claude/oauth/callback', () => {
       code: `the-code#${state}`,
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ enabled: false });
+    const { id } = await response.json();
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).not.toContain(
+      id,
+    );
   });
 
   test('accepts a callback page URL without a separate state', async () => {

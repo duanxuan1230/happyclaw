@@ -118,7 +118,7 @@ const systemItems: NavItem[] = [
       'API Key',
       '密钥',
       '端点',
-      '负载均衡',
+      '模型',
     ],
   },
   {

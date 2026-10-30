@@ -17,6 +17,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const runtimeConfig = await import('../src/runtime-config.js');
+const loggerModule = await import('../src/logger.js');
 const { CODEX_GATEWAY_BASE_URL_PLACEHOLDER } =
   await import('../src/codex-gateway/types.js');
 
@@ -94,20 +95,30 @@ describe('stored model lists', () => {
     expect(runtimeConfig.toPublicProvider(provider).models).toEqual([]);
   });
 
-  test('creating stores the list, the default first and visible, and the preset', () => {
+  test('creating stores the list in the new shape, with the connection model, and the preset', () => {
     createThirdParty({
       presetId: 'zhipu-glm-cn',
       models: [
-        { id: 'glm-5.3-flash[1m]', effort: 'high' },
-        { id: 'glm-5.3', hidden: true },
-        { id: 'glm-5.2', hidden: true },
+        {
+          id: 'glm-5.3-flash',
+          contextWindow: 1_000_000,
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+        },
+        { id: 'glm-5.3' },
+        { id: 'glm-5.2', contextWindow: 128_000 },
       ],
     });
     const stored = readFile().providers[0];
     expect(stored.models).toEqual([
-      { id: 'glm-5.3-flash[1m]', effort: 'high' },
+      {
+        id: 'glm-5.3-flash',
+        contextWindow: 1_000_000,
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+      },
       { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true },
+      { id: 'glm-5.2', contextWindow: 128_000 },
     ]);
     expect(stored.presetId).toBe('zhipu-glm-cn');
 
@@ -135,6 +146,7 @@ describe('stored model lists', () => {
       { id: 'has space' },
       { id: 'glm-5.2', hidden: true, effort: 'turbo', extra: 1 },
       { id: 'glm-5.2' },
+      { id: 'glm-5.1[1m]', effort: 'high', efforts: ['max', 'nope'] },
       42,
     ];
     file.providers[0].presetId = 'no-such-preset';
@@ -142,9 +154,16 @@ describe('stored model lists', () => {
     writeFile(file);
 
     const [provider] = runtimeConfig.getProviders();
+    // `[1m]` is read as the window, `effort` as the default; `hidden` is gone.
     expect(provider.models).toEqual([
       { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true },
+      { id: 'glm-5.2' },
+      {
+        id: 'glm-5.1',
+        contextWindow: 1_000_000,
+        efforts: ['max'],
+        defaultEffort: 'high',
+      },
     ]);
     expect(provider.presetId).toBeUndefined();
     expect(provider.lastTest).toBeUndefined();
@@ -236,18 +255,15 @@ describe('editing a list', () => {
     ).toEqual([{ id: 'glm-5.2' }, { id: 'glm-5.3' }]);
   });
 
-  test('a new list replaces the old one; the default is shown even if sent hidden', () => {
+  test('a new list replaces the old one; the connection model stays in it', () => {
     const { id } = createThirdParty({
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
     });
     const updated = runtimeConfig.updateProvider(id, {
-      models: [
-        { id: 'glm-5.3', hidden: true, effort: 'low' },
-        { id: 'glm-5.1' },
-      ],
+      models: [{ id: 'glm-5.3', defaultEffort: 'low' }, { id: 'glm-5.1' }],
     });
     expect(updated.models).toEqual([
-      { id: 'glm-5.3', effort: 'low' },
+      { id: 'glm-5.3', defaultEffort: 'low' },
       { id: 'glm-5.1' },
     ]);
     // A list without the default gets it back in front.
@@ -422,12 +438,11 @@ describe('what a test describes', () => {
       }).lastTest,
     ).toBeUndefined();
 
+    // The background model is probed too, so changing it is a new test.
     const beforeHaiku = runtimeConfig.getProviderById(created.id)!;
     runtimeConfig.updateProvider(created.id, {
-      customEnv: {
-        ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: b',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash',
-      },
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.3-flash' }],
+      roles: { smallFast: 'glm-5.3-flash' },
     });
     expect(
       runtimeConfig.recordProviderTest(created.id, beforeHaiku, PASSED),
@@ -479,5 +494,311 @@ describe('what a test describes', () => {
         ),
       }),
     ).toThrow('最多 100 个模型');
+  });
+});
+
+describe('reading a connection saved before models carried their settings', () => {
+  /** Writes the file an earlier release left: env keys, `[1m]`, no marker. */
+  function legacy(patch: Record<string, unknown>): void {
+    createThirdParty();
+    const file = readFile();
+    const [stored] = file.providers;
+    delete stored.envPrefill;
+    Object.assign(stored, patch);
+    writeFile(file);
+  }
+
+  test('moves model env keys into the list and roles, and prefills the env once', () => {
+    legacy({
+      anthropicModel: 'glm-5.3[1m]',
+      models: [{ id: 'glm-5.3[1m]' }, { id: 'glm-5.3-flash', hidden: true }],
+      customEnv: {
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash',
+        CLAUDE_CODE_SUBAGENT_MODEL: 'glm-5.3[1m]',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'not-a-model-of-it',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: '',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        API_TIMEOUT_MS: '600000',
+        CUSTOM_FLAG: 'kept',
+      },
+    });
+
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.anthropicModel).toBe('glm-5.3');
+    // The compact window lowered the 1M `[1m]` gave; it and the effort
+    // applied to every launch, so every entry without its own gets them. A
+    // model a key named but the list lacked is added, and the effort is
+    // declared for it since nothing is known about its efforts.
+    expect(provider.models).toEqual([
+      { id: 'glm-5.3', contextWindow: 800_000, defaultEffort: 'high' },
+      { id: 'glm-5.3-flash', contextWindow: 800_000, defaultEffort: 'high' },
+      {
+        id: 'not-a-model-of-it',
+        contextWindow: 800_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+    ]);
+    // The sub-agent key named the connection's own model: no role.
+    expect(provider.roles).toEqual({
+      smallFast: 'glm-5.3-flash',
+      opus: 'not-a-model-of-it',
+    });
+    expect(provider.customEnv).toEqual({
+      API_TIMEOUT_MS: '600000',
+      CUSTOM_FLAG: 'kept',
+      CLAUDE_CODE_NO_FLICKER: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    });
+    expect(provider.envPrefill).toBe(1);
+
+    // Written back once; reading again changes nothing.
+    const migrated = fs.readFileSync(configFile, 'utf-8');
+    expect(JSON.parse(migrated).version).toBe(5);
+    expect(migrated).not.toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL');
+    expect(runtimeConfig.getProviders()[0]).toEqual(provider);
+    expect(fs.readFileSync(configFile, 'utf-8')).toBe(migrated);
+  });
+
+  test('the compact window and effort apply to a model without a window', () => {
+    legacy({
+      anthropicModel: 'k3',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'max',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    // Nothing is known about k3's efforts: the old effort stays usable.
+    expect(provider.models).toEqual([
+      {
+        id: 'k3',
+        contextWindow: 256_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'max',
+      },
+    ]);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_MODEL=k3[1m]');
+    expect(env).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=256000');
+    expect(env).toContain('API_TIMEOUT_MS=3000000');
+    expect(
+      env.some((line) => line.startsWith('CLAUDE_CODE_EFFORT_LEVEL=')),
+    ).toBe(false);
+    expect(runtimeConfig.providerEffortLevel(provider)).toBe('max');
+  });
+
+  test('a compact window below 1M is the window of a [1m] model', () => {
+    legacy({
+      anthropicModel: 'x-model[1m]',
+      customEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toEqual([
+      { id: 'x-model', contextWindow: 400_000 },
+    ]);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_MODEL=x-model[1m]');
+    expect(env).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000');
+  });
+
+  test('a declared window or effort is not overridden', () => {
+    legacy({
+      anthropicModel: 'k3',
+      models: [
+        { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
+        { id: 'k3-big', contextWindow: 1_000_000 },
+        'k3-long[1m]',
+      ],
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    const all = ['low', 'medium', 'high', 'xhigh', 'max'];
+    // A declared 1M stays; a 1M that only came from `[1m]` in the stored
+    // list was a ceiling the compact window lowered.
+    expect(provider.models).toEqual([
+      { id: 'k3', contextWindow: 128_000, defaultEffort: 'low' },
+      {
+        id: 'k3-big',
+        contextWindow: 1_000_000,
+        efforts: all,
+        defaultEffort: 'high',
+      },
+      {
+        id: 'k3-long',
+        contextWindow: 256_000,
+        efforts: all,
+        defaultEffort: 'high',
+      },
+    ]);
+  });
+
+  test('a window the user declares later is not lowered by a kept legacy key', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000' },
+    });
+    const [relay] = runtimeConfig.getProviders();
+    // The wizard declares GLM-5.3 at 1M on the relay that kept the key.
+    runtimeConfig.updateProvider(relay.id, {
+      models: [{ id: 'glm-5.3', contextWindow: 1_000_000 }],
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toEqual([
+      { id: 'glm-5.3', contextWindow: 1_000_000 },
+    ]);
+  });
+
+  test('editing the env keeps the legacy keys the API does not show', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        OLD_FLAG: 'x',
+      },
+    });
+    const [relay] = runtimeConfig.getProviders();
+    const shown = runtimeConfig.toPublicProvider(relay).customEnv;
+    expect(shown).not.toHaveProperty('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+    // The editor saves what it was shown, minus one key.
+    const { OLD_FLAG: _dropped, ...edited } = shown;
+    const updated = runtimeConfig.updateProvider(relay.id, {
+      customEnv: { ...edited, NEW_FLAG: 'y' },
+    });
+    expect(updated.customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      NEW_FLAG: 'y',
+    });
+    expect(updated.customEnv).not.toHaveProperty('OLD_FLAG');
+    expect(readFile().providers[0].customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    });
+  });
+
+  test('a pass-through relay turns role keys into roles with their models', () => {
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-5-5',
+        CLAUDE_CODE_SUBAGENT_MODEL: 'relay-big[1m]',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.anthropicModel).toBe('');
+    expect(provider.models).toEqual([
+      { id: 'claude-haiku-5-5' },
+      { id: 'relay-big', contextWindow: 1_000_000 },
+    ]);
+    expect(provider.roles).toEqual({
+      smallFast: 'claude-haiku-5-5',
+      subagent: 'relay-big',
+    });
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5');
+    expect(env).toContain('CLAUDE_CODE_SUBAGENT_MODEL=relay-big[1m]');
+    expect(env.some((line) => line.startsWith('ANTHROPIC_MODEL='))).toBe(false);
+  });
+
+  test('a pass-through relay with no entry keeps its window and effort keys', () => {
+    const { logger } = loggerModule;
+    vi.mocked(logger.warn).mockClear();
+    legacy({
+      anthropicModel: '',
+      customEnv: {
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        CUSTOM_FLAG: 'kept',
+      },
+    });
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.models).toBeUndefined();
+    expect(provider.customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      CUSTOM_FLAG: 'kept',
+    });
+    // Kept in the file, said once, not injected, not offered for editing.
+    expect(readFile().providers[0].customEnv).toMatchObject({
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '400000',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+    });
+    const saved = fs.readFileSync(configFile, 'utf-8');
+    runtimeConfig.getProviders();
+    expect(fs.readFileSync(configFile, 'utf-8')).toBe(saved);
+    expect(
+      vi
+        .mocked(logger.warn)
+        .mock.calls.filter((call) =>
+          String(call[1]).includes('keeps legacy env keys'),
+        ),
+    ).toHaveLength(1);
+    const env = runtimeConfig.buildClaudeEnvLines(
+      runtimeConfig.providerToConfig(provider),
+      provider.customEnv,
+    );
+    expect(env).toContain('CUSTOM_FLAG=kept');
+    expect(
+      env.some(
+        (line) =>
+          line.startsWith('CLAUDE_CODE_AUTO_COMPACT_WINDOW=') ||
+          line.startsWith('CLAUDE_CODE_EFFORT_LEVEL='),
+      ),
+    ).toBe(false);
+    expect(
+      runtimeConfig.toPublicProvider(provider).customEnv,
+    ).not.toHaveProperty('CLAUDE_CODE_EFFORT_LEVEL');
+  });
+
+  test('a key the user deleted after the prefill stays deleted', () => {
+    const created = createThirdParty();
+    runtimeConfig.updateProvider(created.id, { customEnv: {} });
+    expect(runtimeConfig.getProviderById(created.id)!.customEnv).toEqual({});
+    expect(readFile().providers[0].envPrefill).toBe(1);
+  });
+
+  test('an official connection gets no prefill, only the marker', () => {
+    runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      anthropicApiKey: 'sk-ant-api03-abcdefghijklmnop',
+      anthropicModel: 'claude-sonnet-5[1m]',
+    });
+    const file = readFile();
+    delete file.providers[0].envPrefill;
+    writeFile(file);
+    const [provider] = runtimeConfig.getProviders();
+    expect(provider.customEnv).toEqual({});
+    expect(provider.anthropicModel).toBe('claude-sonnet-5');
+    expect(provider.models).toEqual([
+      { id: 'claude-sonnet-5', contextWindow: 1_000_000 },
+    ]);
+    // The declared window keeps the billed 1M opt-in it had.
+    expect(
+      runtimeConfig.buildClaudeEnvLines(
+        runtimeConfig.providerToConfig(provider),
+        provider.customEnv,
+      ),
+    ).toContain('ANTHROPIC_MODEL=claude-sonnet-5[1m]');
+  });
+
+  test('without a declared default effort a connection implies none', () => {
+    const created = createThirdParty({ anthropicModel: 'k3' });
+    expect(runtimeConfig.providerEffortLevel(created)).toBeNull();
   });
 });

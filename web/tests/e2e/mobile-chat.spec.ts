@@ -437,13 +437,12 @@ test('the phone header’s ⋯ sheet says how full the context is; its buttons t
         selectedModelConfigId: null,
         selectedModel: null,
         selectedEffort: null,
-        default: { source: 'pool', modelConfigId: null, enabledCount: 1 },
+        default: { source: 'none', modelConfigId: null },
         options: [
           {
             id: 'official',
             name: 'Claude 官方',
             kind: 'official',
-            enabled: true,
             model: 'opus',
             usable: true,
           },

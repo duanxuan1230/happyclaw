@@ -27,27 +27,49 @@
 export const MODEL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ModelEffort = (typeof MODEL_EFFORTS)[number];
 
+export function isModelEffort(value: unknown): value is ModelEffort {
+  return (
+    typeof value === 'string' &&
+    (MODEL_EFFORTS as readonly string[]).includes(value)
+  );
+}
+
 /**
- * One model a connection offers. `id` is exactly what Claude Code is given as
- * ANTHROPIC_MODEL; a trailing `[1m]` asks for the 1M context window.
+ * One model a connection offers. `id` is the upstream model name exactly as
+ * the gateway spells it, never with Claude Code's `[1m]` suffix: whether the
+ * suffix is sent follows from `contextWindow` at launch.
  */
 export interface ProviderModelEntry {
   id: string;
-  /** Left out of the chat picker; an explicit binding may still name it. */
-  hidden?: boolean;
-  /** Effort this model runs at unless the Agent sets its own. */
-  effort?: ModelEffort;
+  /** Context window in tokens, when the user, the vendor or a preset says. */
+  contextWindow?: number;
+  /**
+   * Efforts the user declared for a model the registry does not know (or
+   * overrode). Absent: the registry decides.
+   */
+  efforts?: ModelEffort[];
+  /** The effort this model runs at when neither the Agent nor the chat picks. */
+  defaultEffort?: ModelEffort;
 }
 
 export const MAX_PROVIDER_MODELS = 100;
 export const MAX_PROVIDER_MODEL_ID_LENGTH = 200;
+export const MIN_CONTEXT_WINDOW = 1_000;
+export const MAX_CONTEXT_WINDOW = 10_000_000;
 
 const ONE_MILLION_SUFFIX = '[1m]';
 const ONE_MILLION_SUFFIX_RE = /(?:\[1m\])+$/i;
 
-/** Context windows at or above this run with the `[1m]` suffix. */
+/** Claude Code's window for a model it does not recognize, without `[1m]`. */
+export const CLAUDE_CODE_DEFAULT_CONTEXT = 200_000;
+/** The window `[1m]` gives a model. */
 export const ONE_MILLION_CONTEXT = 1_000_000;
 
+/**
+ * Splits Claude Code's `[1m]` switch off a model name. The suffix is not part
+ * of the model: Claude Code strips it before the request and only raises its
+ * context ceiling to 1M.
+ */
 export function splitOneMillionSuffix(id: string): {
   model: string;
   oneMillion: boolean;
@@ -77,10 +99,34 @@ export function isValidModelId(id: string): boolean {
   );
 }
 
+/** A context window from untrusted input, or undefined when it is not one. */
+export function normalizeContextWindow(value: unknown): number | undefined {
+  const number =
+    typeof value === 'string' && value.trim() ? Number(value) : value;
+  if (typeof number !== 'number' || !Number.isFinite(number)) return undefined;
+  const floored = Math.floor(number);
+  return floored >= MIN_CONTEXT_WINDOW && floored <= MAX_CONTEXT_WINDOW
+    ? floored
+    : undefined;
+}
+
+/** Efforts from untrusted input, deduplicated in the low → max order. */
+export function normalizeEfforts(value: unknown): ModelEffort[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const set = new Set(value.filter(isModelEffort));
+  const efforts = MODEL_EFFORTS.filter((effort) => set.has(effort));
+  return efforts.length ? efforts : undefined;
+}
+
 /**
  * Reads a model list from untrusted input (a request body, a stored file):
  * trims ids, drops invalid and duplicate ones, keeps only known fields, caps
  * the length. Returns null when the input is not a list at all.
+ *
+ * Lists saved before the context window was a field spelled 1M as a `[1m]`
+ * suffix on the id and the default effort as `effort`; both are read into
+ * the current fields. `hidden` is no longer a thing: every model a
+ * connection keeps is offered.
  */
 export function normalizeProviderModels(
   input: unknown,
@@ -97,17 +143,22 @@ export function normalizeProviderModels(
           ? (raw as Record<string, unknown>)
           : null;
     if (!record || typeof record.id !== 'string') continue;
-    const id = record.id.trim();
+    const { model: id, oneMillion } = splitOneMillionSuffix(record.id);
     if (!isValidModelId(id) || seen.has(id)) continue;
     seen.add(id);
     const entry: ProviderModelEntry = { id };
-    if (record.hidden === true) entry.hidden = true;
-    if (
-      typeof record.effort === 'string' &&
-      (MODEL_EFFORTS as readonly string[]).includes(record.effort)
-    ) {
-      entry.effort = record.effort as ModelEffort;
-    }
+    const contextWindow =
+      normalizeContextWindow(record.contextWindow) ??
+      (oneMillion ? ONE_MILLION_CONTEXT : undefined);
+    if (contextWindow) entry.contextWindow = contextWindow;
+    const efforts = normalizeEfforts(record.efforts);
+    if (efforts) entry.efforts = efforts;
+    const defaultEffort = isModelEffort(record.defaultEffort)
+      ? record.defaultEffort
+      : isModelEffort(record.effort)
+        ? record.effort
+        : undefined;
+    if (defaultEffort) entry.defaultEffort = defaultEffort;
     out.push(entry);
   }
   return out;
@@ -116,52 +167,230 @@ export function normalizeProviderModels(
 /**
  * The models a connection offers. A connection saved before it had a list
  * offers its one model; a pass-through connection (no model) offers none and
- * lets the client pick. The default model is always in the list and never
- * hidden, since the connection runs on it when nothing else is chosen.
+ * lets the client pick. The connection's own model is always in the list.
  */
 export function effectiveProviderModels(provider: {
   anthropicModel: string;
   models?: readonly ProviderModelEntry[] | null;
 }): ProviderModelEntry[] {
   const models = normalizeProviderModels(provider.models ?? []) ?? [];
-  const defaultModel = provider.anthropicModel.trim();
+  const { model: defaultModel, oneMillion } = splitOneMillionSuffix(
+    provider.anthropicModel,
+  );
   if (!defaultModel) return models;
-  const index = models.findIndex((entry) => entry.id === defaultModel);
-  if (index < 0) return [{ id: defaultModel }, ...models];
-  if (models[index].hidden) {
-    const { hidden: _hidden, ...visible } = models[index];
-    models[index] = visible;
-  }
-  return models;
+  if (models.some((entry) => entry.id === defaultModel)) return models;
+  return [
+    oneMillion
+      ? { id: defaultModel, contextWindow: ONE_MILLION_CONTEXT }
+      : { id: defaultModel },
+    ...models,
+  ];
+}
+
+/** The entry for `id` (with or without `[1m]`), if the list has it. */
+export function findModelEntry(
+  models: readonly ProviderModelEntry[],
+  id: string,
+): ProviderModelEntry | undefined {
+  const { model } = splitOneMillionSuffix(id);
+  return models.find((entry) => entry.id === model);
 }
 
 /**
- * Adds the newly discovered ids to a list without touching what is there.
- * New models come in hidden, so a refresh never changes the chat picker by
- * itself; the user shows the ones they want.
+ * Adds the newly discovered models to a list without touching what is there.
+ * A discovered context window or effort list comes along; existing entries
+ * keep what the user set.
  */
 export function mergeDiscoveredModels(
   existing: readonly ProviderModelEntry[],
-  discoveredIds: readonly string[],
+  discovered: readonly (DiscoveredModel | string)[],
 ): { models: ProviderModelEntry[]; added: string[] } {
-  const known = new Set(
-    existing.map((entry) => splitOneMillionSuffix(entry.id).model),
-  );
-  const added: string[] = [];
-  for (const raw of discoveredIds) {
-    const id = raw.trim();
-    if (!isValidModelId(id) || known.has(splitOneMillionSuffix(id).model)) {
-      continue;
+  const known = new Set(existing.map((entry) => entry.id));
+  const additions: ProviderModelEntry[] = [];
+  for (const raw of discovered) {
+    const item = typeof raw === 'string' ? { id: raw } : raw;
+    const { model: id, oneMillion } = splitOneMillionSuffix(item.id);
+    if (!isValidModelId(id) || known.has(id)) continue;
+    known.add(id);
+    const entry: ProviderModelEntry = { id };
+    const contextWindow =
+      normalizeContextWindow(item.contextWindow) ??
+      (oneMillion ? ONE_MILLION_CONTEXT : undefined);
+    if (contextWindow) entry.contextWindow = contextWindow;
+    const efforts = normalizeEfforts(item.efforts);
+    if (efforts) entry.efforts = efforts;
+    if (
+      isModelEffort(item.defaultEffort) &&
+      efforts?.includes(item.defaultEffort)
+    ) {
+      entry.defaultEffort = item.defaultEffort;
     }
-    known.add(splitOneMillionSuffix(id).model);
-    added.push(id);
+    additions.push(entry);
   }
   const room = Math.max(0, MAX_PROVIDER_MODELS - existing.length);
-  const kept = added.slice(0, room);
+  const kept = additions.slice(0, room);
   return {
-    models: [...existing, ...kept.map((id) => ({ id, hidden: true }))],
-    added: kept,
+    models: [...existing, ...kept],
+    added: kept.map((entry) => entry.id),
   };
+}
+
+// ─── Roles: which model Claude Code uses for what ──────────────
+
+/**
+ * Which of a connection's models Claude Code uses besides the one a turn runs
+ * on. Every role names a model of the same connection, since one Claude Code
+ * process talks to one endpoint with one credential, so the names are the
+ * gateway's own. An absent role follows the model the turn runs on.
+ */
+export interface ConnectionModelRoles {
+  /** Sub-agents (Task): CLAUDE_CODE_SUBAGENT_MODEL. */
+  subagent?: string;
+  /** Background calls (titles, summaries, WebFetch): the haiku tier. */
+  smallFast?: string;
+  /** `model: "opus"` in a Task, and Claude Code's opus tier. */
+  opus?: string;
+  /** `model: "sonnet"` in a Task, and Claude Code's sonnet tier. */
+  sonnet?: string;
+}
+
+export const CONNECTION_MODEL_ROLES = [
+  'subagent',
+  'smallFast',
+  'opus',
+  'sonnet',
+] as const satisfies readonly (keyof ConnectionModelRoles)[];
+
+/**
+ * Roles from untrusted input. A role that names a model the connection does
+ * not offer is dropped (it then follows the turn's model) rather than sent to
+ * a gateway that would refuse it.
+ */
+export function normalizeConnectionModelRoles(
+  input: unknown,
+  models: readonly ProviderModelEntry[],
+): ConnectionModelRoles {
+  if (!input || typeof input !== 'object') return {};
+  const record = input as Record<string, unknown>;
+  const roles: ConnectionModelRoles = {};
+  for (const role of CONNECTION_MODEL_ROLES) {
+    const value = record[role];
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const entry = findModelEntry(models, value);
+    if (entry) roles[role] = entry.id;
+  }
+  return roles;
+}
+
+// ─── Context window and Claude Code's `[1m]` switch ────────────
+
+/**
+ * The model name Claude Code is given for a model with this window. Claude
+ * Code caps a model it does not know at 200K and only lowers that with
+ * CLAUDE_CODE_AUTO_COMPACT_WINDOW, so anything above 200K needs `[1m]` to
+ * lift the ceiling first; the compact window then brings it back down.
+ */
+export function launchModelName(
+  id: string,
+  contextWindow: number | null | undefined,
+): string {
+  const { model } = splitOneMillionSuffix(id);
+  return withOneMillionSuffix(
+    model,
+    !!contextWindow && contextWindow > CLAUDE_CODE_DEFAULT_CONTEXT,
+  );
+}
+
+/**
+ * CLAUDE_CODE_AUTO_COMPACT_WINDOW for a model with this window, or null when
+ * Claude Code's own ceiling already matches (200K plain, 1M with `[1m]`) or
+ * the window is unknown, in which case nothing is injected.
+ */
+export function autoCompactWindowFor(
+  contextWindow: number | null | undefined,
+): number | null {
+  if (!contextWindow) return null;
+  if (contextWindow === CLAUDE_CODE_DEFAULT_CONTEXT) return null;
+  if (contextWindow >= ONE_MILLION_CONTEXT) return null;
+  return contextWindow;
+}
+
+/** Keys the launch derives from the models and roles; not free env. */
+export const CONNECTION_MODEL_ENV_KEYS = [
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  'CLAUDE_CODE_EFFORT_LEVEL',
+] as const;
+
+/**
+ * What a new third-party connection's environment starts with. The user may
+ * change or delete each; a key that is not in the saved environment is not
+ * injected.
+ */
+export const CONNECTION_ENV_PREFILL: Readonly<Record<string, string>> = {
+  API_TIMEOUT_MS: '3000000',
+  CLAUDE_CODE_NO_FLICKER: '1',
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+};
+
+export interface ConnectionModelEnvInput {
+  /** The model this turn runs on (with or without `[1m]`); '' for none. */
+  model: string;
+  models: readonly ProviderModelEntry[];
+  roles?: ConnectionModelRoles | null;
+}
+
+/**
+ * The model environment of one launch on a third-party endpoint: the turn's
+ * model with `[1m]` when its window needs it, each tier and the sub-agent
+ * model from the roles or else the turn's model, and the compact window of
+ * the turn's model. A pass-through connection (no model) only gets the roles
+ * it names.
+ */
+export function buildConnectionModelEnv(
+  input: ConnectionModelEnvInput,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  const roles = input.roles ?? {};
+  const named = (id: string | undefined): string | undefined =>
+    id ? launchModelName(id, windowOf(input.models, id)) : undefined;
+  const current = named(input.model.trim() || undefined);
+  if (current) env.ANTHROPIC_MODEL = current;
+  const opus = named(roles.opus) ?? current;
+  const sonnet = named(roles.sonnet) ?? current;
+  const haiku = named(roles.smallFast) ?? current;
+  const subagent = named(roles.subagent) ?? current;
+  if (opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
+  if (sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
+  if (haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
+  if (subagent) env.CLAUDE_CODE_SUBAGENT_MODEL = subagent;
+  if (input.model.trim()) {
+    const window = autoCompactWindowFor(windowOf(input.models, input.model));
+    if (window) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(window);
+  }
+  return env;
+}
+
+/**
+ * The context window a launch of `id` assumes: the window declared on the
+ * connection's entry, else 1M for a name still carrying `[1m]` (a choice
+ * saved before the window was a field), else unknown. A registry window is
+ * only a suggestion for the add flow: it never turns on `[1m]` by itself,
+ * since a gateway may serve less and 1M may be billed as long context.
+ */
+export function windowOf(
+  models: readonly ProviderModelEntry[],
+  id: string,
+): number | null {
+  const { model, oneMillion } = splitOneMillionSuffix(id);
+  const known = resolveModelCapabilities(
+    findModelEntry(models, model) ?? { id: model },
+  ).contextWindow;
+  return known ?? (oneMillion ? ONE_MILLION_CONTEXT : null);
 }
 
 // ─── Connection tests ──────────────────────────────────────────
@@ -185,6 +414,9 @@ export interface DiscoveredModel {
   id: string;
   name?: string;
   contextWindow?: number;
+  /** Efforts the vendor declares; absent when it says nothing. */
+  efforts?: ModelEffort[];
+  defaultEffort?: ModelEffort;
 }
 
 // ─── Presets ───────────────────────────────────────────────────
@@ -706,13 +938,13 @@ export function getModelPreset(
   return MODEL_PRESETS.find((preset) => preset.id === id) ?? null;
 }
 
-/** The id a preset model is offered under: 1M-window models get `[1m]`. */
-export function presetModelEntryId(model: ModelPresetModel): string {
-  return withOneMillionSuffix(
-    model.id,
-    splitOneMillionSuffix(model.id).oneMillion ||
-      (model.contextWindow ?? 0) >= ONE_MILLION_CONTEXT,
-  );
+/** The entry a preset model is offered as, with its known window. */
+export function presetModelEntry(model: ModelPresetModel): ProviderModelEntry {
+  const { model: id, oneMillion } = splitOneMillionSuffix(model.id);
+  const contextWindow =
+    normalizeContextWindow(model.contextWindow) ??
+    (oneMillion ? ONE_MILLION_CONTEXT : undefined);
+  return contextWindow ? { id, contextWindow } : { id };
 }
 
 /** Presets listed for a region first, the rest after, each in catalog order. */
@@ -862,9 +1094,66 @@ export function parseModelList(json: unknown): DiscoveredModel[] | null {
           .find((value) => value !== undefined)
       : undefined;
     if (contextWindow) model.contextWindow = contextWindow;
+    if (record) {
+      const declared = declaredEfforts(record);
+      if (declared.efforts) model.efforts = declared.efforts;
+      if (declared.defaultEffort) model.defaultEffort = declared.defaultEffort;
+    }
     out.push(model);
   }
   return out;
+}
+
+/** `minimal` and `none` have no Claude Code level; `ultra` is Codex-only. */
+function vendorEffort(value: unknown): ModelEffort | undefined {
+  const raw =
+    typeof value === 'string'
+      ? value
+      : value && typeof value === 'object'
+        ? [
+            (value as Record<string, unknown>).effort,
+            (value as Record<string, unknown>).id,
+            (value as Record<string, unknown>).value,
+          ].find((item): item is string => typeof item === 'string')
+        : undefined;
+  const effort = raw?.trim().toLowerCase();
+  return isModelEffort(effort) ? effort : undefined;
+}
+
+/**
+ * The efforts a list entry declares, in the spellings vendors use
+ * (adapted from cindy's modelDiscovery.ts): `reasoning.supported_efforts`,
+ * `supported_efforts`, Codex `supported_reasoning_levels`, Vercel
+ * `reasoning_options`, with `default_effort` / `default_reasoning_level`.
+ * Nothing is inferred from a list that does not mention efforts.
+ */
+function declaredEfforts(record: Record<string, unknown>): {
+  efforts?: ModelEffort[];
+  defaultEffort?: ModelEffort;
+} {
+  const reasoning =
+    record.reasoning && typeof record.reasoning === 'object'
+      ? (record.reasoning as Record<string, unknown>)
+      : undefined;
+  const list = [
+    reasoning?.supported_efforts,
+    record.supported_efforts,
+    record.supported_reasoning_levels,
+    record.reasoning_options,
+  ].find(Array.isArray) as unknown[] | undefined;
+  const efforts = normalizeEfforts(list?.map(vendorEffort));
+  if (!efforts) return {};
+  const preferred = vendorEffort(
+    reasoning?.default_effort ??
+      record.default_effort ??
+      record.default_reasoning_level,
+  );
+  return {
+    efforts,
+    ...(preferred && efforts.includes(preferred)
+      ? { defaultEffort: preferred }
+      : {}),
+  };
 }
 
 // ─── Model capabilities ────────────────────────────────────────
@@ -873,8 +1162,9 @@ export function parseModelList(json: unknown): DiscoveredModel[] | null {
  * What a model can do, as far as the picker and the runtime care: its context
  * window and the reasoning efforts it takes. Adapted from cindy's model
  * registry (`catalog/model-registry.json` base models, Apache-2.0); only the
- * efforts Claude Code accepts are kept. A model missing here takes no effort
- * choice and gets the window its `[1m]` suffix implies.
+ * efforts Claude Code accepts are kept. Read through
+ * `resolveModelCapabilities`, which adds a connection's own declarations and
+ * family inference.
  */
 export interface ModelCapabilities {
   id: string;
@@ -1628,6 +1918,177 @@ export function modelCapabilities(id: string): ModelCapabilities | null {
         ),
       }
     : capabilities;
+}
+
+/**
+ * The registry entry a model id not in the registry borrows from, following
+ * cindy's generation inheritance: for GPT a sibling of the same generation
+ * (`gpt-6.1-terra` → `gpt-6.1-sol`), else the same variant of the newest
+ * older generation (`gpt-6.1-terra` → `gpt-5.6-terra`); for Claude only the
+ * same variant of an older generation. Only efforts are inferred.
+ */
+const familyCache = new Map<string, ModelCapabilities | null>();
+
+function inferredFamilyCapabilities(id: string): ModelCapabilities | null {
+  const { model } = splitOneMillionSuffix(id);
+  if (!familyCache.has(model)) {
+    // Bounded: a picker lists at most a few hundred distinct ids.
+    if (familyCache.size > 2000) familyCache.clear();
+    familyCache.set(model, computeFamilyCapabilities(model));
+  }
+  return familyCache.get(model) ?? null;
+}
+
+function computeFamilyCapabilities(model: string): ModelCapabilities | null {
+  const key = model.toLowerCase();
+  const bare = key.includes('/') ? key.slice(key.lastIndexOf('/') + 1) : key;
+  const gpt = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/.exec(bare);
+  const claude = /^claude-([a-z]+)-(\d+(?:-\d+)?)$/.exec(bare);
+  const unique = [...new Set(capabilityLookup().values())];
+  const version = (value: string) =>
+    value.split(/[.-]/).map((part) => Number(part));
+  const newer = (a: string, b: string) => {
+    const left = version(a);
+    const right = version(b);
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const diff = (left[i] ?? 0) - (right[i] ?? 0);
+      if (diff) return diff;
+    }
+    return 0;
+  };
+  const pick = (
+    parse: (entryKey: string) => { version: string; variant: string } | null,
+    wanted: { version: string; variant: string },
+    allowSibling: boolean,
+  ): ModelCapabilityEntry | undefined => {
+    const parsed = unique
+      .map((entry) => {
+        const entryKey = entry.id.toLowerCase();
+        const name = entryKey.slice(entryKey.lastIndexOf('/') + 1);
+        const info = parse(name);
+        return info ? { entry, ...info } : null;
+      })
+      .filter((item): item is NonNullable<typeof item> => !!item);
+    const sibling = allowSibling
+      ? parsed.find((item) => item.version === wanted.version)
+      : undefined;
+    if (sibling) return sibling.entry;
+    return parsed
+      .filter(
+        (item) =>
+          item.variant === wanted.variant &&
+          newer(item.version, wanted.version) < 0,
+      )
+      .sort((a, b) => newer(b.version, a.version))[0]?.entry;
+  };
+  let found: ModelCapabilityEntry | undefined;
+  if (gpt) {
+    found = pick(
+      (name) => {
+        const m = /^gpt-(\d+(?:\.\d+)?)-([a-z]+)$/.exec(name);
+        return m ? { version: m[1], variant: m[2] } : null;
+      },
+      { version: gpt[1], variant: gpt[2] },
+      // GPT generations ship every variant with the same efforts.
+      true,
+    );
+  } else if (claude) {
+    found = pick(
+      (name) => {
+        const m = /^claude-([a-z]+)-(\d+(?:-\d+)?)$/.exec(name);
+        return m ? { version: m[2], variant: m[1] } : null;
+      },
+      { version: claude[2], variant: claude[1] },
+      // Claude variants differ (haiku takes fewer efforts than opus).
+      false,
+    );
+  }
+  if (!found) return null;
+  // Only efforts are borrowed: a window decides `[1m]`, so it is never guessed.
+  return {
+    id: model,
+    ...(found.efforts ? { efforts: found.efforts } : {}),
+    ...(found.defaultEffort ? { defaultEffort: found.defaultEffort } : {}),
+  };
+}
+
+/** cindy's order for a model that names no default effort. */
+const DEFAULT_EFFORT_PREFERENCE: readonly ModelEffort[] = [
+  'medium',
+  'high',
+  'low',
+  'xhigh',
+  'max',
+];
+
+/** The effort a model with these efforts runs at when nothing is picked. */
+export function defaultEffortFor(
+  efforts: readonly ModelEffort[],
+  preferred?: ModelEffort | null,
+): ModelEffort | null {
+  if (preferred && efforts.includes(preferred)) return preferred;
+  return DEFAULT_EFFORT_PREFERENCE.find((e) => efforts.includes(e)) ?? null;
+}
+
+/**
+ * Where a model's efforts come from: the user declared them, the registry
+ * knows the model, they are borrowed from its family, or nothing is known.
+ * Only `registry` counts as verified in the UI.
+ */
+export type ModelCapabilitySource = 'declared' | 'registry' | 'family' | 'none';
+
+export interface ResolvedModelCapabilities {
+  /** The window launches use: declared on the entry, or null (unknown). */
+  contextWindow: number | null;
+  /** What the registry knows, offered as the add flow's starting value. */
+  suggestedContextWindow: number | null;
+  efforts: ModelEffort[];
+  defaultEffort: ModelEffort | null;
+  effortsSource: ModelCapabilitySource;
+  contextSource: ModelCapabilitySource;
+}
+
+/**
+ * Everything the picker and the launch need to know about one model of a
+ * connection. Efforts: the entry's own, else the registry's, else the
+ * family's. The window is the entry's own only (see windowOf). A model
+ * nothing is known about takes no effort and has no window, and the launch
+ * injects neither.
+ */
+export function resolveModelCapabilities(
+  entry: ProviderModelEntry,
+): ResolvedModelCapabilities {
+  const registry = modelCapabilities(entry.id);
+  const family = registry?.efforts
+    ? null
+    : inferredFamilyCapabilities(entry.id);
+  const effortsSource: ModelCapabilitySource = entry.efforts?.length
+    ? 'declared'
+    : registry?.efforts?.length
+      ? 'registry'
+      : family?.efforts?.length
+        ? 'family'
+        : 'none';
+  const efforts = [
+    ...(entry.efforts?.length
+      ? entry.efforts
+      : (registry?.efforts ?? family?.efforts ?? [])),
+  ];
+  const contextSource: ModelCapabilitySource = entry.contextWindow
+    ? 'declared'
+    : 'none';
+  const contextWindow = entry.contextWindow ?? null;
+  return {
+    contextWindow,
+    suggestedContextWindow: registry?.contextWindow ?? null,
+    efforts,
+    defaultEffort: defaultEffortFor(
+      efforts,
+      entry.defaultEffort ?? registry?.defaultEffort ?? family?.defaultEffort,
+    ),
+    effortsSource,
+    contextSource,
+  };
 }
 
 // ─── Upstream errors ───────────────────────────────────────────

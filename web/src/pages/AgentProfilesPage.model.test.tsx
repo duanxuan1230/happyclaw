@@ -5,12 +5,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
-import type { AgentProfile, ModelConfigOption } from '../types';
+import type { AgentProfile, InheritedModel, ModelConfigOption } from '../types';
 import { choose, combobox } from '../components/settings/test-helpers';
 
 const mocks = vi.hoisted(() => ({
   profiles: [] as unknown[],
   modelConfigs: [] as unknown[],
+  inheritedModel: null as unknown,
   updateProfile: vi.fn(),
   createProfile: vi.fn(),
   toastError: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock('../stores/agent-profiles', () => {
   const state = () => ({
     profiles: mocks.profiles,
     modelConfigs: mocks.modelConfigs,
+    inheritedModel: mocks.inheritedModel,
     loading: false,
     profilesError: null,
     loadProfiles: vi.fn(async () => undefined),
@@ -116,24 +118,37 @@ const CONFIGS: ModelConfigOption[] = [
     id: 'official',
     name: 'Claude 官方',
     type: 'official',
-    enabled: true,
-    anthropic_model: 'opus',
-    is_default: true,
+    model: 'opus',
+    usable: true,
     models: [
-      { id: 'opus', hidden: false },
-      { id: 'sonnet', hidden: false },
-      { id: 'haiku', hidden: true },
+      model('opus', ['low', 'medium', 'high', 'xhigh', 'max'], 'xhigh'),
+      model('sonnet', ['low', 'medium', 'high'], 'high'),
+      model('haiku'),
     ],
   },
   {
     id: 'relay',
     name: '中转站',
     type: 'third_party',
-    enabled: true,
-    anthropic_model: '',
-    models: [{ id: 'deepseek-v4', hidden: false }],
+    model: '',
+    usable: true,
+    models: [model('deepseek-v4')],
   },
 ];
+
+function model(
+  id: string,
+  efforts: ModelConfigOption['models'][number]['efforts'] = [],
+  defaultEffort: ModelConfigOption['models'][number]['defaultEffort'] = null,
+): ModelConfigOption['models'][number] {
+  return { id, efforts, defaultEffort, contextWindow: null };
+}
+
+const INHERITED: InheritedModel = {
+  owner_main: { model_config_id: 'official', model: 'sonnet', effort: null },
+  system_main: { model_config_id: 'official', model: 'opus', effort: null },
+  system_main_profile_id: null,
+};
 
 function profile(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -182,12 +197,18 @@ afterEach(async () => {
   container = null;
   mocks.profiles = [];
   mocks.modelConfigs = [];
+  mocks.inheritedModel = null;
   vi.clearAllMocks();
 });
 
-async function renderPage(profiles: AgentProfile[], configs = CONFIGS) {
+async function renderPage(
+  profiles: AgentProfile[],
+  configs = CONFIGS,
+  inheritedModel: InheritedModel | null = INHERITED,
+) {
   mocks.profiles = profiles;
   mocks.modelConfigs = configs;
+  mocks.inheritedModel = inheritedModel;
   mocks.updateProfile.mockImplementation(
     async (_id: string, changes: Partial<AgentProfile>) => ({
       ...profiles[0],
@@ -211,13 +232,25 @@ async function renderPage(profiles: AgentProfile[], configs = CONFIGS) {
   await act(async () => {
     root?.render(<RouterProvider router={router} />);
   });
-  await vi.waitFor(() =>
-    expect(container?.textContent).toContain('推理努力档位'),
-  );
+  await vi.waitFor(() => expect(container?.textContent).toContain('推理等级'));
 }
 
-const configSelect = () => combobox('智能体模型配置');
+const configSelect = () => combobox('智能体模型连接');
 const modelSelect = () => combobox('智能体模型');
+const effortSelect = () => combobox('智能体推理等级');
+
+async function optionsOf(select: HTMLButtonElement): Promise<string[]> {
+  await act(async () => select.click());
+  const texts = [
+    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ].map((item) => item.textContent ?? '');
+  await act(async () => {
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+  });
+  return texts;
+}
 
 function buttonByText(text: string): HTMLButtonElement {
   const button = [
@@ -227,7 +260,7 @@ function buttonByText(text: string): HTMLButtonElement {
   return button;
 }
 
-describe('Agent model within its configuration', () => {
+describe('Agent model within its connection', () => {
   test('picking a configuration, then a model, saves both', async () => {
     await renderPage([profile()]);
     expect(modelSelect().disabled).toBe(true);
@@ -275,22 +308,65 @@ describe('Agent model within its configuration', () => {
     });
   });
 
-  test('following the automatic choice disables the model select', async () => {
+  test('the connection select follows the main Agent, then lists every connection', async () => {
+    await renderPage([profile()]);
+    expect(configSelect().textContent).toBe(
+      '跟随主智能体（Claude 官方 · sonnet）',
+    );
+    expect(await optionsOf(configSelect())).toEqual([
+      '跟随主智能体（Claude 官方 · sonnet）',
+      'Claude 官方 · opus',
+      '中转站',
+    ]);
+  });
+
+  test('a main Agent without a binding is followed through to the system one', async () => {
+    await renderPage([profile()], CONFIGS, { ...INHERITED, owner_main: null });
+    expect(configSelect().textContent).toBe(
+      '跟随主智能体（Claude 官方 · opus）',
+    );
+  });
+
+  test('following the main Agent disables the model select', async () => {
     await renderPage([
       profile({ model_config_id: 'official', model: 'sonnet' }),
     ]);
     expect(modelSelect().disabled).toBe(false);
-    await choose(configSelect(), '跟随默认模型');
+    await choose(configSelect(), '跟随主智能体');
     expect(modelSelect().disabled).toBe(true);
-    expect(modelSelect().textContent).toContain('由模型配置决定');
+    expect(modelSelect().textContent).toContain('随跟随的智能体');
   });
 
-  test('a profile pinned to a hidden model shows it selected', async () => {
+  test('a profile pinned to any model shows it selected', async () => {
     await renderPage([
       profile({ model_config_id: 'official', model: 'haiku' }),
     ]);
-    expect(modelSelect().textContent).toContain('haiku（已隐藏）');
+    expect(modelSelect().textContent).toBe('haiku');
     expect(container!.textContent).not.toContain('有未保存修改');
+  });
+
+  test('the effort select offers the model default and only its levels', async () => {
+    await renderPage([
+      profile({ model_config_id: 'official', model: 'sonnet' }),
+    ]);
+    expect(await optionsOf(effortSelect())).toEqual([
+      '模型默认（高）',
+      '低',
+      '中',
+      '高',
+    ]);
+    await choose(effortSelect(), '中');
+    // A model without efforts drops the level.
+    await choose(modelSelect(), 'haiku');
+    expect(effortSelect().textContent).toBe('模型默认');
+    await act(async () => buttonByText('保存').click());
+    expect(mocks.updateProfile).toHaveBeenCalledWith(
+      'research',
+      expect.objectContaining({ model: 'haiku' }),
+    );
+    expect(mocks.updateProfile.mock.calls[0][1]).not.toHaveProperty(
+      'runtime_policy',
+    );
   });
 
   test('a refused model reads as such', async () => {
@@ -328,15 +404,5 @@ describe('Agent model within its configuration', () => {
     )!;
     await act(async () => create.click());
     expect(mocks.createProfile).toHaveBeenCalledWith({ name: '新智能体' });
-  });
-
-  test('an older server without model lists shows no model select', async () => {
-    await renderPage(
-      [profile()],
-      CONFIGS.map(({ models: _models, ...config }) => config),
-    );
-    expect(
-      container!.querySelector('[role="combobox"][aria-label="智能体模型"]'),
-    ).toBeNull();
   });
 });

@@ -353,6 +353,7 @@ describe('POST /:id/duplicate', () => {
       anthropicBaseUrl: 'https://copy.example.test',
       anthropicAuthToken: 'copy-token',
       anthropicModel: 'copy-model',
+      models: [{ id: 'copy-model', efforts: ['low', 'high'] }],
       enabled: true,
     });
     const source = db.createAgentProfile({
@@ -882,19 +883,23 @@ describe('governance and capability preview', () => {
       model_config_id: bound.id,
       model_config_name: 'Bound connection',
       model: 'bound-large',
+      effort: null,
       connection_missing: false,
     });
 
-    runtimeConfig.setDefaultModelConfig(bound.id);
+    // An unbound Agent follows its owner's main Agent.
+    const main = db.getOrCreateDefaultAgentProfile(MEMBER);
+    db.updateAgentProfile(main.id, MEMBER, { modelConfigId: bound.id });
     const unbound = db.createAgentProfile({
       ownerUserId: MEMBER,
       name: 'Unbound',
     });
     expect(await preview(unbound.id)).toEqual({
-      source: 'default',
+      source: 'owner_main',
       model_config_id: bound.id,
       model_config_name: 'Bound connection',
       model: 'bound-default',
+      effort: null,
       connection_missing: false,
     });
 
@@ -906,7 +911,7 @@ describe('governance and capability preview', () => {
       source: 'session',
       model: 'bound-large',
     });
-    runtimeConfig.setDefaultModelConfig(null);
+    db.updateAgentProfile(main.id, MEMBER, { modelConfigId: null });
   });
 
   test('resolves the unsaved binding of the same preview and flags a deleted connection', async () => {
@@ -964,10 +969,12 @@ describe('governance and capability preview', () => {
       (await resolve({ model_config_id: 'deleted-connection', model: null }))
         .body.model_resolution,
     ).toEqual({
+      // A set binding is authoritative: runs fail until it is chosen again.
       source: 'agent',
       model_config_id: 'deleted-connection',
       model_config_name: null,
       model: null,
+      effort: null,
       connection_missing: true,
     });
   });

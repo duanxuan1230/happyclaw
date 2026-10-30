@@ -211,7 +211,7 @@ export function SettingsPage() {
     security: '修改密码，查看并撤销其他设备上的登录会话。',
     appearance:
       '系统品牌影响站点标题、欢迎文案和侧边栏 Logo，不会改变 HappyClaw 或自定义智能体的名称。',
-    claude: '管理智能体可用的模型网关、凭据与负载均衡策略。',
+    claude: '添加模型连接和它们提供的模型；用哪个模型在智能体和对话里选。',
     system: '管理工作区运行边界、日志和执行容量。',
     registration: '管理注册入口、邀请码，以及登录与注册请求的认证限流策略。',
     'main-agent':

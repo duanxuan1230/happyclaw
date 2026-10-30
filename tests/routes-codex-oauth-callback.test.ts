@@ -161,24 +161,20 @@ describe('POST /api/config/codex/oauth/callback', () => {
       codexOAuthNeedsReauth: false,
       codexOAuthLastRefreshError: null,
       codexDefaultEffort: 'low',
-      // The only connection: it joins the pool.
-      enabled: true,
       models: [],
     });
+    // There is no pool to join.
+    expect(provider).not.toHaveProperty('enabled');
   });
 
-  test('a new login does not join a pool that already has a member', async () => {
-    runtimeConfig.createProvider({
-      name: 'Relay',
-      type: 'third_party',
-      anthropicBaseUrl: 'https://relay.test',
-      anthropicAuthToken: 'relay-secret',
-      enabled: true,
-    });
+  test('a new login stays out of the legacy pool', async () => {
     const state = await startFlow();
     const response = await callback(state, callbackUrl(state));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ enabled: false });
+    const { id } = await response.json();
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).not.toContain(
+      id,
+    );
   });
 
   test('an error= callback is explained and the flow stays usable', async () => {

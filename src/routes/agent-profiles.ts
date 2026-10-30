@@ -58,6 +58,7 @@ import {
   mergeAgentProfileRuntimePolicy,
   migrateAgentProfileWorkspacesAndArchive,
   normalizeAgentProfileRuntimePolicy,
+  peekSystemMainAgentProfile,
   updateAgentProfile,
 } from '../db.js';
 import {
@@ -67,7 +68,12 @@ import {
   parseAgentProfileExport,
   stripHostGrants,
 } from '../agent-profile-transfer.js';
-import { resolvePinnedModelConfig } from '../container-runner.js';
+import {
+  bindingFromMainProfile,
+  resolveModelBinding,
+  summarizeModelBinding,
+} from '../container-runner.js';
+import { resolveAgentSdkEffort } from '../agent-effort.js';
 import {
   SYSTEM_CAPABILITY_LOCK_KEY,
   userCapabilityLockKey,
@@ -89,11 +95,11 @@ import {
   getRunContextSnapshot,
   hashRuntimePolicy,
 } from '../run-context-snapshot.js';
-import { getProviders, getUsableDefaultProvider } from '../runtime-config.js';
+import { getProviders, providerHasCredentials } from '../runtime-config.js';
+import { splitOneMillionSuffix } from '../model-providers.js';
 import {
   listConnectionModels,
-  resolveSessionLaunchOverrides,
-  unpickedLaunchModel,
+  modelEffortsFor,
 } from '../session-model-overrides.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
@@ -142,8 +148,7 @@ function usesFourPartPromptPayload(input: {
 agentProfileRoutes.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const profiles = listAgentProfilesForUser(user.id);
-  // What an Agent that binds no configuration actually follows.
-  const defaultModelConfigId = getUsableDefaultProvider()?.id ?? null;
+  const systemMain = peekSystemMainAgentProfile();
   return c.json({
     profiles: profiles.map((profile) => ({
       ...profile,
@@ -157,14 +162,84 @@ agentProfileRoutes.get('/', authMiddleware, (c) => {
       id: provider.id,
       name: provider.name,
       type: provider.type,
-      enabled: provider.enabled,
-      anthropic_model: provider.anthropicModel,
-      is_default: provider.id === defaultModelConfigId,
-      // What an Agent may bind within the configuration, hidden ones too.
+      model: provider.anthropicModel,
+      usable: providerHasCredentials(provider),
       models: listConnectionModels(provider),
     })),
+    // What an Agent without its own binding follows, for 「跟随主智能体」.
+    inherited_model: {
+      owner_main: inheritedModelOf(
+        'owner_main',
+        profiles.find((profile) => profile.is_default),
+      ),
+      system_main: inheritedModelOf('system_main', systemMain),
+      // Only the owner learns which profile is the system main.
+      system_main_profile_id:
+        systemMain?.owner_user_id === user.id ? systemMain.id : null,
+    },
   });
 });
+
+/** The connection, model and effort a main Agent hands down, if usable. */
+function inheritedModelOf(
+  source: 'owner_main' | 'system_main',
+  profile: AgentProfile | undefined,
+): {
+  model_config_id: string;
+  model: string | null;
+  effort: string | null;
+} | null {
+  const binding = bindingFromMainProfile(source, profile);
+  if (!binding?.provider) return null;
+  const summary = summarizeModelBinding(binding, '', null, undefined);
+  return {
+    model_config_id: binding.provider.id,
+    model: summary.model,
+    effort: summary.effort,
+  };
+}
+
+/**
+ * Why an Agent's explicit effort cannot run on the model it binds, or null.
+ * Only an Agent's own binding is checked; an inherited one may change under
+ * it, and a launch then skips an effort the model does not take.
+ */
+function agentEffortRejection(
+  modelConfigId: string | null,
+  model: string | null,
+  effort: string | undefined,
+): { error: string; code: 'EFFORT_NOT_SUPPORTED' } | null {
+  if (!effort || !modelConfigId) return null;
+  const provider = getProviders().find((item) => item.id === modelConfigId);
+  if (!provider) return null;
+  const runs = model || provider.anthropicModel;
+  return modelEffortsFor(provider, runs).includes(effort)
+    ? null
+    : {
+        error: runs
+          ? `模型 ${runs} 不支持推理档位 ${effort}`
+          : '该模型配置未指定模型，不能设置推理档位',
+        code: 'EFFORT_NOT_SUPPORTED',
+      };
+}
+
+/**
+ * A copied policy whose effort its bound model no longer takes: the copy
+ * inherits instead, rather than refusing to copy what the source runs with.
+ */
+function withRunnableEffort(
+  policy: AgentProfileRuntimePolicy,
+  modelConfigId: string | null,
+  model: string | null,
+): AgentProfileRuntimePolicy {
+  return agentEffortRejection(
+    modelConfigId,
+    model,
+    resolveAgentSdkEffort(policy),
+  )
+    ? { ...policy, reasoning: { ...policy.reasoning, effort: 'inherit' } }
+    : policy;
+}
 
 function modelConfigExists(modelConfigId: string): boolean {
   return getProviders().some((provider) => provider.id === modelConfigId);
@@ -172,8 +247,7 @@ function modelConfigExists(modelConfigId: string): boolean {
 
 /**
  * Why `model` cannot be an Agent's model within `modelConfigId`, or null when
- * it can. A model needs a configuration that offers it; a hidden one counts,
- * since an Agent names it explicitly.
+ * it can: the configuration has to offer it.
  */
 function agentModelRejection(
   modelConfigId: string | null | undefined,
@@ -190,7 +264,8 @@ function agentModelRejection(
       code: 'MODEL_NOT_IN_CONNECTION',
     };
   }
-  if (listConnectionModels(provider).some((entry) => entry.id === model)) {
+  const { model: id } = splitOneMillionSuffix(model);
+  if (listConnectionModels(provider).some((entry) => entry.id === id)) {
     return null;
   }
   return {
@@ -342,6 +417,12 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
         model: parsed.data.model,
       });
       if (rejection) return c.json(rejection.body, rejection.status);
+      const effortRejection = agentEffortRejection(
+        parsed.data.model_config_id ?? null,
+        parsed.data.model ?? null,
+        resolveAgentSdkEffort(runtimePolicy),
+      );
+      if (effortRejection) return c.json(effortRejection, 400);
       const conflict = findAgentProfileNameConflict(user.id, parsed.data.name);
       if (conflict) return c.json(agentNameTaken(conflict), 409);
       const profile = createAgentProfile({
@@ -410,9 +491,14 @@ agentProfileRoutes.post('/:id/duplicate', authMiddleware, async (c) => {
       if (source.is_default) {
         return c.json({ error: '内置 HappyClaw 不能复制' }, 400);
       }
-      const { policy, stripped } = stripHostGrants(
+      const { policy: granted, stripped } = stripHostGrants(
         source.runtime_policy,
         user.role === 'admin',
+      );
+      const policy = withRunnableEffort(
+        granted,
+        source.model_config_id,
+        source.model,
       );
       const rejection = newProfileRejection(user, {
         runtimePolicy: policy,
@@ -560,39 +646,39 @@ agentProfileRoutes.post('/generate', authMiddleware, async (c) => {
 });
 
 /**
- * The connection and model a run of this Agent uses, and which step of the
- * pinning order chose it. With a Workspace this is its main Session, so a
- * conversation pick and the Workspace's own provider environment count.
+ * The connection, model and effort a run of this Agent uses, and which step
+ * of the order chose it (resolveModelBinding, the same function a launch
+ * calls). With a Workspace this is its main Session, so a conversation pick
+ * and the Workspace's own provider environment count.
  */
 function resolveAgentModelResolution(
-  binding: Pick<AgentProfile, 'model_config_id' | 'model'>,
+  profile: Pick<
+    AgentProfile,
+    'model_config_id' | 'model' | 'owner_user_id' | 'runtime_policy'
+  >,
   workspace?: RegisteredGroup,
 ) {
-  const pinned = resolvePinnedModelConfig(
-    binding.model_config_id,
-    workspace ? { groupFolder: workspace.folder, agentId: null } : undefined,
-  );
-  const provider = pinned.id
-    ? getProviders().find((item) => item.id === pinned.id)
-    : undefined;
   const folder = workspace?.folder ?? '';
-  const model = !provider
-    ? null
-    : pinned.source === 'session'
-      ? (resolveSessionLaunchOverrides(folder, null, provider, { warn: false })
-          .model ?? unpickedLaunchModel(provider, null, folder))
-      : unpickedLaunchModel(
-          provider,
-          pinned.source === 'agent' ? binding.model : null,
-          folder,
-        );
+  const binding = resolveModelBinding(
+    { modelConfigId: profile.model_config_id, model: profile.model },
+    workspace ? { groupFolder: folder, agentId: null } : undefined,
+    { ownerUserId: profile.owner_user_id },
+  );
+  const summary = summarizeModelBinding(
+    binding,
+    folder,
+    null,
+    resolveAgentSdkEffort(profile.runtime_policy),
+  );
   return {
-    source: pinned.source,
-    model_config_id: pinned.id,
-    model_config_name: provider?.name ?? null,
-    model,
-    // A binding to a deleted connection makes every run fail.
-    connection_missing: !!pinned.id && !provider,
+    source: summary.source,
+    model_config_id: summary.modelConfigId,
+    model_config_name: summary.provider?.name ?? null,
+    model: summary.model,
+    effort: summary.effort,
+    // The binding that decides names a connection that is gone or has no
+    // credential: runs fail until it is chosen again.
+    connection_missing: summary.connectionMissing,
   };
 }
 
@@ -718,7 +804,11 @@ agentProfileRoutes.post(
     return c.json({
       preview,
       model_resolution: resolveAgentModelResolution(
-        modelBinding,
+        {
+          ...modelBinding,
+          owner_user_id: existing.owner_user_id,
+          runtime_policy: previewRuntimePolicy,
+        },
         workspace?.group,
       ),
       run_context: runContext,
@@ -936,6 +1026,30 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
             { error: 'Custom host skills require at least one selected skill' },
             400,
           );
+        }
+        // The effort is judged with the binding it will run on, whenever
+        // this request touches either.
+        if (
+          parsed.data.model_config_id !== undefined ||
+          parsed.data.model !== undefined ||
+          parsed.data.runtime_policy?.reasoning !== undefined
+        ) {
+          const nextModelConfigId =
+            parsed.data.model_config_id === undefined
+              ? existing.model_config_id
+              : parsed.data.model_config_id;
+          const nextModel =
+            parsed.data.model !== undefined
+              ? parsed.data.model
+              : nextModelConfigId === existing.model_config_id
+                ? existing.model
+                : null;
+          const effortRejection = agentEffortRejection(
+            nextModelConfigId,
+            nextModel,
+            resolveAgentSdkEffort(effectiveRuntimePolicy),
+          );
+          if (effortRejection) return c.json(effortRejection, 400);
         }
         const invalidReferences = validateRuntimePolicyReferences(
           user.id,

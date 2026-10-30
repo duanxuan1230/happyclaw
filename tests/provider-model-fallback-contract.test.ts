@@ -69,8 +69,6 @@ describe('provider fallback source contracts', () => {
     expect(
       hostRunner.match(/if \(output\.providerFailureRetrying\)/g),
     ).toHaveLength(2);
-    expect(hostRunner).toContain('!providerFailureReported &&');
-    expect(hostRunner).toContain('!hostProviderFailureReported &&');
     expect(hostRunner).not.toContain('ownerHomeFolder,\n    fallbackModel');
     expect(agentRunner).not.toMatch(
       /providerFailure:\s*true,\s*providerFailureRetrying:\s*true/,
@@ -101,34 +99,20 @@ describe('provider fallback source contracts', () => {
     expect(agentRunner).toContain('new SdkFirstResponseWatchdog(');
   });
 
-  test('host quarantines before projection and chooses retry vs terminal', () => {
+  test('host decides retry vs terminal before projection', () => {
     expect(
       hostRunner.match(/applyProviderFailureDisposition\(/g)?.length,
     ).toBeGreaterThanOrEqual(5);
     expect(hostRunner).toMatch(
-      /quarantineFromOutput\(selectedProfileId, output\);[\s\S]*?applyProviderFailureDisposition\([\s\S]*?await onOutput\(output\)/,
+      /providerId: selectedProfileId,\s*result: output\.result,[\s\S]*?applyProviderFailureDisposition\([\s\S]*?await onOutput\(output\)/,
     );
     expect(hostRunner).toMatch(
-      /quarantineFromOutput\(hostSelectedProfileId, output\);[\s\S]*?applyProviderFailureDisposition\([\s\S]*?await onOutput\(output\)/,
+      /providerId: hostSelectedProfileId,\s*result: output\.result,[\s\S]*?applyProviderFailureDisposition\([\s\S]*?await onOutput\(output\)/,
     );
-    // Quarantine granularity must follow the reported scope: a model wall may
-    // never take the whole account out of rotation, and the upstream reset
-    // stamp must reach the pool so the pair is not resurrected early.
-    expect(hostRunner).toContain("output.providerRateLimitScope === 'model'");
-    expect(hostRunner).toContain('providerPool.reportModelFailure(');
-    expect(hostRunner).toMatch(
-      /providerPool\.reportFailure\(profileId, true, output\.providerRateLimitResetsAt\)/,
-    );
-    // The terminal boundary spans both dimensions, not account health alone.
-    expect(hostRunner).toContain('poolCanStillServe()');
-    expect(hostRunner).toMatch(
-      /hasCandidateForTier\(primaryTier\)[\s\S]*?hasCandidateForTier\(fallbackModel\)/,
-    );
+    // A connection is authoritative: there is no pool to fail over to.
+    expect(hostRunner).not.toContain('providerPool');
     expect(agentRunner).toMatch(
       /publishProviderFailure\(\{\s*error: 'rate_limit',\s*failureClass: 'account',\s*rateLimitResetsAt: info\.resetsAt,\s*\}\)/,
-    );
-    expect(hostRunner).toMatch(
-      /providerPool\.refreshFromConfig\([\s\S]*?providerPool\.refreshRecoveryState\(\)/,
     );
   });
 

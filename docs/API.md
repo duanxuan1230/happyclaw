@@ -118,26 +118,22 @@ Public：
 
 `model-selection` 以 `agentId`（GET 查询参数、PUT 请求体）区分 Runtime Session，
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
-`default.source` 取值 `agent`（智能体绑定）、`workspace_env`（工作区自带 Provider
-环境变量）、`default`（`PUT /api/config/claude/default` 设置的全局默认）、`single`
-（唯一启用的配置）、`pool`（已启用配置间自动轮换）、`none`，顺序与运行时解析一致；
-`default.model` 是不选择时实际运行的模型：`agent` 为智能体绑定的模型（配置已不再
-提供时为该配置的默认模型），`default`、`single` 为该配置的默认模型（ChatGPT 订阅按
-其目录解析），其余来源与直通中转为 `null`；`default.effort` 是不选择时运行的推理档位
-（该模型可选推理档位时才有，否则为 `null`）。
+`default.source` 按与运行时相同的函数解析，取值 `agent`（智能体自己的绑定）、
+`workspace_env`（工作区自带 Provider 环境变量）、`owner_main`（工作区所有者的主智能体）、
+`system_main`（系统主 HappyClaw：最早创建的 admin 的主智能体）、`none`；未设置的一步
+跳过，已设置但连接已删除或没有凭据时 `default.connectionMissing` 为 true，本轮失败并提示
+重新选择（不改用别的连接）；`none` 时同样失败，提示为主 HappyClaw 选择模型。`default.model` 是不选择时实际运行的模型（不带 `[1m]`；
+`workspace_env`、`none` 与直通中转为 `null`），`default.effort` 是不选择时运行的推理
+等级（该模型不支持档位时为 `null`）。
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, 模型）优先于智能体
-绑定的（配置, 模型），可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束
-后退出，下一条消息使用新选择。
+绑定；切换后该会话的暖 Runner 在当前轮次结束后退出，下一条消息使用新选择。
 
-每个配置都可以在配置内选择具体模型。ChatGPT 订阅以外的选项带
-`models[]`（`id`、`hidden`、`efforts?`、`defaultEffort?`、`contextWindow?`）：该配置的
-模型列表，默认模型（选项的 `model`）总在其中且不隐藏；`hidden: true` 的模型不在选择器
-中列出，但显式选择仍可使用。`efforts` 与 `contextWindow` 来自模型能力表
-（`modelCapabilities`），没有 `efforts` 的模型不能选推理档位；`defaultEffort` 是不选
-档位时运行的档位：智能体显式档位，其次该模型在连接里配置的档位，其次连接环境变量
-`CLAUDE_CODE_EFFORT_LEVEL`（第三方端点缺省 `max`）；都没有时由 Claude Code 自行决定，
-不返回 `defaultEffort`（`default.effort` 为 `null`）。直通中转没有默认模型时 `model`
-为空字符串。
+每个配置都可以在配置内选择具体模型。选项带 `usable`（有凭据才可选）；ChatGPT 订阅以外
+的选项带 `models[]`：`id`、`efforts`（可选档位，空数组表示不能选）、`defaultEffort`
+（不选档位时运行的档位：智能体显式档位且该模型支持时用它，否则模型默认档位，没有则
+`null`）、`contextWindow`（未知为 `null`）、`effortsSource`（`declared` 连接里声明、
+`registry` 能力表、`family` 同系列推断、`none`）。全部模型都会列出。直通中转没有默认
+模型时 `model` 为空字符串。
 
 ChatGPT 订阅配置（`kind: "codex"`）不带 `models`，而是带 `codex`，并且还能选择推理
 档位：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时实际使用的档位，
@@ -153,12 +149,13 @@ Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`s
 
 PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只写 `modelConfigId`
 会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 最长 200 个字符，
-必须在所选配置的模型列表内（可以是隐藏模型），ChatGPT 订阅则必须在该账号当前目录
-内；`effort` 必须在（所选或配置默认的）模型的 `efforts` 内，否则 ChatGPT 以外返回
-`EFFORT_NOT_SUPPORTED`；两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
+必须在所选配置的模型列表内，ChatGPT 订阅则必须在该账号当前目录内；`effort` 必须在
+（所选或配置默认的）模型的 `efforts` 内，否则 ChatGPT 以外返回 `EFFORT_NOT_SUPPORTED`；
+两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
 `MODEL_NOT_IN_CONNECTION`、`EFFORT_NOT_SUPPORTED`、`MODEL_UNAVAILABLE`、
-`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、`MODEL_CONFIG_REQUIRED`。会话档位优先于
-智能体档位，其次模型配置的档位，最后是连接环境变量；会话档位写入
+`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、`MODEL_CONFIG_REQUIRED`。推理等级按会话
+档位 → 智能体显式档位 → 模型默认档位解析，只取所运行模型支持的档位，不支持档位的
+模型不写 `CLAUDE_CODE_EFFORT_LEVEL`；没有默认 `max`。会话档位写入
 `CLAUDE_CODE_EFFORT_LEVEL`（Claude Code 让它优先于 Runner 为智能体传的 SDK `effort`），
 不改动交给 Runner 的智能体配置。ChatGPT 以外只改档位时退出暖 Runner（下一条消息
 重启），但保留 SDK 会话。高于 `max` 的档位（目前是
@@ -174,22 +171,24 @@ PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只
 当前 SDK 会话的 transcript 读取：`usedTokens` 是最后一次主线程请求的 input + cache
 read + cache creation（不含子代理请求），`model` 是该请求的上游模型，`updatedAt` 是
 那次回复写入的时间；`contextWindow` 依次取 Claude Code 本进程上报的窗口（同一模型）、
-连接的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`、`[1m]` 模型的 1M、官方连接下模型自己的窗口，
-其余为模型窗口与 200K 中的较小者；用量超过该窗口时改用模型窗口，仍超过则
+模型条目的上下文长度（声明、能力表或同系列推断）、官方连接下模型自己的窗口，
+其余为 200K；用量超过该窗口时改用模型窗口，仍超过则
 `percentage` 记为 100。`percentage` 保留一位小数。
 每个回合完成后，以及会话被清除时，工作区的 Web 会话收到 WebSocket 消息
 `{ type: 'context_usage', chatJid, agentId?, usedTokens, contextWindow, percentage, model, updatedAt }`。
 
-Runner 启动时，选中的模型取代配置的默认模型成为 `ANTHROPIC_MODEL`，第三方端点的
-各档模型映射和 `[1m]` 模型的压缩窗口随之变化。模型条目带 `effort` 时以该档位运行
-（`CLAUDE_CODE_EFFORT_LEVEL`，取代配置自己的档位），智能体显式设置的档位优先；自动池
-升级到兜底模型时按兜底模型自己的条目判断。已选模型被移出列表后，按配置默认模型运行
-并记录告警，不让本轮失败。
+Runner 启动时，选中的模型取代配置的默认模型成为 `ANTHROPIC_MODEL`。第三方端点的模型
+环境由 `buildConnectionModelEnv` 按本轮模型生成：上下文长度大于 200K 时模型名加 `[1m]`
+（Claude Code 的开关，请求前剥掉，只把上下文上限抬到 1M），小于 1M 且不等于 200K 时
+写 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 压回实际长度，未知时两者都不写；opus/sonnet/haiku
+档与 `CLAUDE_CODE_SUBAGENT_MODEL` 取连接的 `roles`，未设置时跟随本轮模型。官方连接只在
+模型条目声明了大于 200K 的上下文时加 `[1m]`（可能按长上下文计费）。已选模型被移出列表
+后，按配置默认模型运行并记录告警，不让本轮失败。
 
 换配置或换模型（包括取消选择回到默认模型）会让下一条消息在新的底层会话上开始，并带
 上最近的对话记录：每种配置都记录会话运行的模型，一个底层会话只在一个模型上运行；
-记录这一信息之前就存在的会话视为运行在配置默认模型上，自动池升级到兜底模型档也不
-重置会话。只改档位不会重置，存活 Runner 的下一个上游请求就使用新档位。
+记录这一信息之前就存在的会话视为运行在配置默认模型上。只改档位或只改上下文长度不会
+重置，存活 Runner 的下一个上游请求就使用新档位。
 选择的（配置, 模型, 档位）都没变时不退出任何 Runner，按名字选中配置的默认模型也不算
 变化；已经在所选配置上运行的暖 Runner 只在不涉及模型时保留，即新旧选择都没有指定
 模型，且之前未选择时也没有运行智能体绑定的模型。
@@ -589,12 +588,17 @@ worktree 的会话、主会话，或自定义目录相同的其他工作区）�
 
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
 脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”；`model_resolution`
-（`source`、`model_config_id`、`model_config_name`、`model`、`connection_missing`）
+（`source`、`model_config_id`、`model_config_name`、`model`、`effort`、`connection_missing`）
 说明运行实际用的连接与模型。请求体可带未保存的 `model_config_id`、`model`，与未保存
 的 `runtime_policy` 一样按它们计算；绑定的连接已删除时 `connection_missing` 为 true。
 `source` 按固定顺序取 `session`（会话手选，仅指定 `workspace_jid` 时看该
-工作区主会话）、`agent`（智能体绑定）、`default`（全局默认，工作区自带 Provider 环境
-变量时让位）、`single`（唯一启用）、`workspace_env`、`pool`（自动池）或 `none`。
+工作区主会话）、`agent`（智能体绑定）、`workspace_env`、`owner_main`（所有者的主智能体）、
+`system_main`（系统主 HappyClaw）或 `none`。`GET /api/agent-profiles` 另返回
+`model_configs[]`（每个连接 `{ id, name, type, model, usable, models }`，`models` 形状同
+`model-selection`）和 `inherited_model`（`owner_main`、`system_main` 各为
+`{ model_config_id, model, effort }` 或 `null`；`system_main_profile_id` 只在调用者拥有
+系统主 HappyClaw 时给出，否则为 `null`），供表单显示「跟随主智能体」。保存绑定或档位时
+档位必须是所绑定模型支持的。
 
 `GET /:id/workspaces` 的每个工作区带 `active_conversations`：该工作区运行时中正在
 执行或有排队输入的个数，即一次会重启 Runner 的保存会中断的对话数；只在等待输入的
@@ -764,17 +768,24 @@ PersonalAgent 应用）。`POST` 请求体 `{ name?, brand? }`，向飞书申请
 Provider（模型连接：一份凭据和一个端点，提供一组模型）：
 
 - `GET /api/config/claude`
-- `GET|POST /api/config/claude/providers`；公开 Provider 带 `models`
-  （`{ id, hidden?, effort? }[]`，默认模型 `anthropicModel` 总在其中且不隐藏；
-  ChatGPT 订阅为 `[]`，模型取自其目录）、`presetId`（起步的厂商预设，只在地址
-  仍是该预设的地址时保留，否则为 `null`）和 `lastTest`（最近一次测试
+- `GET|POST /api/config/claude/providers`；设置页只添加和维护连接，没有全局默认、
+  启用开关和自动池，选哪个模型属于智能体和会话。公开 Provider 带 `models`
+  （`{ id, contextWindow?, efforts?, defaultEffort? }[]`：`id` 是上游原名，从不带
+  `[1m]`；连接自己的模型 `anthropicModel` 总在其中；ChatGPT 订阅为 `[]`，模型取自
+  其目录）、`roles`（`{ subagent?, smallFast?, opus?, sonnet? }`，各自是本连接的一个
+  模型，未设置时跟随本轮模型）、`presetId`（起步的厂商预设，只在地址仍是该预设的地址
+  时保留，否则为 `null`）和 `lastTest`（最近一次测试
   `{ ok, code, status, model, latencyMs, at }`，未测过为 `null`；端点、认证方式、
-  凭据、`ANTHROPIC_CUSTOM_HEADERS` 或 `ANTHROPIC_DEFAULT_HAIKU_MODEL` 变更后清空）。
-  创建请求可带 `models`、`presetId`（未知预设 400），`models` 不含默认模型时把它
-  加在最前，超过 100 个模型返回 400；模型名不能含空白。
-  每种类型创建时都必须带凭据，否则 400 `{ error: '新建模型配置需要凭据' }`；
-  未指定 `enabled` 时，只有当前没有已启用的连接才默认启用，两个 OAuth 回调新建
-  连接时同样如此，均不自动设为全局默认。可用 `claudeCredentialInput` 提交官方
+  凭据、`ANTHROPIC_CUSTOM_HEADERS` 或轻量后台模型变更后清空）。
+  创建请求可带 `models`、`roles`（指向不在列表里的模型时丢弃）、`presetId`（未知预设
+  400），`models` 不含 `anthropicModel` 时把它加在最前，超过 100 个模型返回 400；模型名
+  不能含空白，带 `[1m]` 的旧写法按 1M 上下文读入。`customEnv` 只注入非空值，新连接由
+  Web 预填 `API_TIMEOUT_MS`、`CLAUDE_CODE_NO_FLICKER`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`；
+  含 `CONNECTION_MODEL_ENV_KEYS` 里的键（模型、各档、子代理、压缩窗口、推理等级）返回
+  400 `{ error, code: 'RESERVED_ENV_KEY' }`。旧连接的这些键在读取时一次性迁移为
+  `roles`、上下文长度和默认档位。`enabled`、`weight` 被忽略。
+  每种类型创建时都必须带凭据，否则 400 `{ error: '新建模型配置需要凭据' }`。
+  可用 `claudeCredentialInput` 提交官方
   凭据原文（`.credentials.json` 内容或 setup-token），由服务端解析，格式无效时
   返回 400；官方 Provider 同一时刻只保留 OAuth、setup-token、API Key 中的一种
 - `PATCH|DELETE /api/config/claude/providers/:id`，第三方 Provider 的 PATCH
@@ -782,26 +793,16 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   请求内提交；删除 ChatGPT 订阅型 Provider 后在后台尽力吊销其 refresh token，
   吊销结果不影响响应。PATCH 的 `models` 是完整的新列表（未列出的即移除），
   `presetId: null` 清除预设，`anthropicAuthMode: null` 清除认证方式、回到按令牌
-  推断（测试时也重新尝试两种方式）；改名称、权重、预设、模型的显示/隐藏、推理档位
-  （含默认模型的）或新增模型时不停 Runner、不清会话，推理档位在下次启动 Runner 时
-  生效；端点、凭据、认证方式（含清除）、环境变量、默认模型变更或移除模型时停
+  推断（测试时也重新尝试两种方式）；改名称、预设、模型的上下文长度或档位、`roles`
+  或新增模型时不停 Runner、不清会话，在下次启动 Runner 时生效；端点、凭据、认证方式（含清除）、环境变量、默认模型变更或移除模型时停
   Runner；改 `anthropicModel` 仍按协议字段处理，未带
   `models` 时旧默认模型保留在列表中（列表已满 100 个时返回 400）；只改默认模型时
-  只清除跑在旧默认模型上或没有记录模型的会话，选了该连接其他模型的会话保留，只切换
-  `[1m]` 不清会话。移除（含切换 1M 改名）仍被智能体使用的模型返回 409
+  只清除跑在旧默认模型上或没有记录模型的会话，选了该连接其他模型的会话保留，只改
+  上下文长度不清会话。移除仍被智能体使用的模型返回 409
   `{ error, code: 'MODEL_IN_USE', agents: [{ id, name }] }`；会话里选了被移除模型的
   在下次运行时回到连接的默认模型
 - `PUT /api/config/claude/providers/:id/secrets`，同样接受
   `claudeCredentialInput`；凭据变更只排空该 Provider 的 Runner
-- `POST /api/config/claude/providers/:id/toggle`，没有可用凭据的 Provider
-  不能启用；全局默认的 Provider 不能禁用
-- `PUT /api/config/claude/default`，请求体 `{ modelConfigId: string | null }`：
-  设置全局默认模型配置，`null` 取消并回到已启用配置间的自动轮换。没有会话选择、
-  智能体绑定和工作区环境变量的运行都使用它，不再参与负载均衡；未启用的配置在
-  设为默认时同时启用，没有可用凭据的配置返回 400；删除默认配置会清除默认，
-  响应带 `defaultCleared: true`；默认配置被清除凭据时默认同时清除（之后补回凭据
-  也不会自动恢复）。`GET /api/config/claude/providers` 返回
-  `defaultModelConfigId`（无默认为 `null`）
 - `POST /api/config/claude/providers/:id/duplicate`，服务端连同加密密钥复制为
   停用的新 Provider；OAuth 授权的 Provider 拒绝复制
 - `POST /api/config/claude/providers/test`，测试任意类型的连接。请求体为
@@ -835,16 +836,16 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   认证方式回退同测试；官方 API Key 读 `https://api.anthropic.com/v1/models`；
   Claude 订阅不发请求，返回内置别名；ChatGPT 订阅返回其模型目录。成功为
   `{ ok: true, models, source, authMode? }`，`models` 为
-  `{ id, name?, contextWindow? }[]`，`source` 为 `endpoint`、`builtin` 或
+  `{ id, name?, contextWindow?, efforts?, defaultEffort? }[]`（档位取自上游声明的
+  `supported_reasoning_levels`、`supported_efforts` 等字段，`minimal`/`ultra` 丢弃），`source` 为 `endpoint`、`builtin` 或
   `catalog`；失败仍为 200
   `{ ok: false, code, status, message }`：列表地址 404 为 `ENDPOINT_NOT_FOUND`，
   返回内容不是模型列表为 `UNKNOWN`
 - `GET /api/config/claude/providers/:id/impact`，返回
   `{ activeRunners, stoppedRunners }`：正在使用该连接的 Runner 数，以及修改其
   协议字段（端点、密钥、认证方式、默认模型、环境变量）时实际会停掉的 Runner 数
-  （连接已启用、被智能体绑定或被会话选用时为全部存活 Runner，否则为 0）
-- `POST /api/config/claude/providers/:id/reset-health`
-- `GET /api/config/claude/providers/health`
+  （连接是系统主 HappyClaw 的连接、有会话记录、被智能体绑定或被会话选用时为全部存活
+  Runner，否则为 0）
 - `GET /api/config/claude/providers/:id/usage`，读不到用量时以 `status`
   区分 `unsupported`（setup-token、仅推理权限或非 OAuth 凭据，见
   `unsupportedReason`）与 `needs_relogin`（刷新授权被拒）；ChatGPT 订阅型
@@ -854,7 +855,6 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   `limitId`、`limitName`、`primary`/`secondary` 窗口（`usedPercent` 0–100、
   `windowMinutes`、`resetsAt` epoch 秒）和 `credits`（`hasCredits`、
   `unlimited`、`balance`），服务重启后为空
-- `PUT /api/config/claude/balancing`
 - `POST /api/config/claude/apply`
 - `POST /api/config/claude/oauth/start`，可选 `targetProviderId`（必须是已有的
   官方 Provider）与 `profile`（`full` 默认，或 `setup_token`）；流程绑定发起用户

@@ -17,12 +17,16 @@ import {
   normalizeProviderBaseUrl,
   normalizeProviderModels,
   parseModelList,
-  presetModelEntryId,
+  presetModelEntry,
+  autoCompactWindowFor,
+  buildConnectionModelEnv,
+  launchModelName,
+  normalizeConnectionModelRoles,
+  resolveModelCapabilities,
   sortPresetsForRegion,
   splitOneMillionSuffix,
   withOneMillionSuffix,
 } from '../shared/model-providers.js';
-import { isOneMillionContextModel } from '../src/runtime-config.js';
 
 describe('model ids', () => {
   test('the [1m] suffix splits and joins like the runtime reads it', () => {
@@ -33,11 +37,6 @@ describe('model ids', () => {
     expect(withOneMillionSuffix('glm-5.3[1m]', false)).toBe('glm-5.3');
     expect(withOneMillionSuffix('glm-5.3', true)).toBe('glm-5.3[1m]');
     expect(withOneMillionSuffix('', true)).toBe('');
-    for (const id of ['glm-5.3[1m]', 'glm-5.3']) {
-      expect(isOneMillionContextModel(id)).toBe(
-        splitOneMillionSuffix(id).oneMillion,
-      );
-    }
   });
 
   test('ids that would break an env file are refused', () => {
@@ -56,14 +55,24 @@ describe('model ids', () => {
         { id: 'glm-5.3' },
         { id: 'glm-5.2', hidden: true, effort: 'max', extra: 1 },
         { id: 'glm-5.1', hidden: 'yes', effort: 'ultra' },
+        { id: 'glm-5.0[1m]' },
+        {
+          id: 'glm-4.9',
+          contextWindow: '262144',
+          efforts: ['max', 'low', 'x'],
+        },
+        { id: 'glm-4.8', contextWindow: 12, defaultEffort: 'high' },
         { id: 'bad id' },
         42,
         null,
       ]),
     ).toEqual([
       { id: 'glm-5.3' },
-      { id: 'glm-5.2', hidden: true, effort: 'max' },
+      { id: 'glm-5.2', defaultEffort: 'max' },
       { id: 'glm-5.1' },
+      { id: 'glm-5.0', contextWindow: 1_000_000 },
+      { id: 'glm-4.9', contextWindow: 262_144, efforts: ['low', 'max'] },
+      { id: 'glm-4.8', defaultEffort: 'high' },
     ]);
     expect(normalizeProviderModels('glm-5.3')).toBeNull();
     const many = Array.from({ length: MAX_PROVIDER_MODELS + 5 }, (_, i) => ({
@@ -79,34 +88,47 @@ describe('model ids', () => {
     expect(effectiveProviderModels({ anthropicModel: '' })).toEqual([]);
   });
 
-  test('the default model is always offered and never hidden', () => {
+  test('the default model is always offered, without its [1m]', () => {
     expect(
       effectiveProviderModels({
-        anthropicModel: 'glm-5.3',
+        anthropicModel: 'glm-5.3[1m]',
         models: [{ id: 'glm-5.2' }],
       }),
-    ).toEqual([{ id: 'glm-5.3' }, { id: 'glm-5.2' }]);
+    ).toEqual([{ id: 'glm-5.3', contextWindow: 1_000_000 }, { id: 'glm-5.2' }]);
     expect(
       effectiveProviderModels({
         anthropicModel: 'glm-5.3',
-        models: [{ id: 'glm-5.2' }, { id: 'glm-5.3', hidden: true }],
+        models: [{ id: 'glm-5.2' }, { id: 'glm-5.3', hidden: true } as never],
       }),
     ).toEqual([{ id: 'glm-5.2' }, { id: 'glm-5.3' }]);
   });
 
-  test('a refresh only adds, and what it adds starts hidden', () => {
-    const existing = [{ id: 'glm-5.3[1m]' }, { id: 'glm-5.2', hidden: true }];
+  test('a refresh only adds, with what the vendor says about each', () => {
+    const existing = [
+      { id: 'glm-5.3', contextWindow: 1_000_000 },
+      { id: 'glm-5.2' },
+    ];
     const merged = mergeDiscoveredModels(existing, [
-      'glm-5.3',
+      'glm-5.3[1m]',
       'glm-5.2',
-      'glm-5.4',
+      {
+        id: 'glm-5.4',
+        contextWindow: 262_144,
+        efforts: ['high', 'low'],
+        defaultEffort: 'high',
+      },
       ' glm-5.4 ',
       'bad id',
     ]);
     expect(merged.added).toEqual(['glm-5.4']);
     expect(merged.models).toEqual([
       ...existing,
-      { id: 'glm-5.4', hidden: true },
+      {
+        id: 'glm-5.4',
+        contextWindow: 262_144,
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+      },
     ]);
   });
 
@@ -133,7 +155,7 @@ describe('presets', () => {
       expect(describeBaseUrlProblem(preset.baseUrl)).toBeNull();
       expect(preset.models.length).toBeGreaterThan(0);
       for (const model of preset.models) {
-        expect(isValidModelId(presetModelEntryId(model))).toBe(true);
+        expect(isValidModelId(presetModelEntry(model).id)).toBe(true);
       }
       for (const url of [preset.keyUrl, preset.docsUrl, preset.modelsUrl]) {
         if (url) expect(url).toMatch(/^https:\/\//);
@@ -141,19 +163,17 @@ describe('presets', () => {
     }
   });
 
-  test('1M-window preset models are offered with [1m], once', () => {
+  test('preset models carry their window, never a [1m] id', () => {
     expect(
-      presetModelEntryId({ id: 'glm-5.3', contextWindow: 1_048_576 }),
-    ).toBe('glm-5.3[1m]');
-    expect(
-      presetModelEntryId({ id: 'glm-5.3[1m]', contextWindow: 1_000_000 }),
-    ).toBe('glm-5.3[1m]');
-    expect(
-      presetModelEntryId({ id: 'kimi-k2.6', contextWindow: 262_144 }),
-    ).toBe('kimi-k2.6');
-    expect(presetModelEntryId({ id: 'ark-code-latest' })).toBe(
-      'ark-code-latest',
-    );
+      presetModelEntry({ id: 'glm-5.3', contextWindow: 1_048_576 }),
+    ).toEqual({ id: 'glm-5.3', contextWindow: 1_048_576 });
+    expect(presetModelEntry({ id: 'glm-5.3[1m]' })).toEqual({
+      id: 'glm-5.3',
+      contextWindow: 1_000_000,
+    });
+    expect(presetModelEntry({ id: 'ark-code-latest' })).toEqual({
+      id: 'ark-code-latest',
+    });
   });
 
   test('a base URL finds its preset regardless of case and trailing slash', () => {
@@ -447,5 +467,190 @@ describe('model capabilities', () => {
       if (caps?.defaultEffort)
         expect(caps.efforts).toContain(caps.defaultEffort);
     }
+  });
+});
+
+describe('context window and [1m]', () => {
+  test('only windows above 200K get [1m]', () => {
+    expect(launchModelName('m', null)).toBe('m');
+    expect(launchModelName('m', 128_000)).toBe('m');
+    expect(launchModelName('m', 200_000)).toBe('m');
+    expect(launchModelName('m', 262_144)).toBe('m[1m]');
+    expect(launchModelName('m[1m]', 1_050_000)).toBe('m[1m]');
+    expect(launchModelName('m[1m]', 128_000)).toBe('m');
+  });
+
+  test('the compact window is injected only where Claude Code would be wrong', () => {
+    expect(autoCompactWindowFor(null)).toBeNull();
+    expect(autoCompactWindowFor(200_000)).toBeNull();
+    expect(autoCompactWindowFor(1_000_000)).toBeNull();
+    expect(autoCompactWindowFor(1_050_000)).toBeNull();
+    expect(autoCompactWindowFor(128_000)).toBe(128_000);
+    expect(autoCompactWindowFor(262_144)).toBe(262_144);
+  });
+});
+
+describe('connection model env', () => {
+  const models = [
+    { id: 'big', contextWindow: 262_144 },
+    { id: 'small', contextWindow: 128_000 },
+    { id: 'plain' },
+  ];
+
+  test('every tier follows the turn model unless a role names one', () => {
+    expect(buildConnectionModelEnv({ model: 'big', models })).toEqual({
+      ANTHROPIC_MODEL: 'big[1m]',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'big[1m]',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'big[1m]',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'big[1m]',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'big[1m]',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '262144',
+    });
+    expect(
+      buildConnectionModelEnv({
+        model: 'plain',
+        models,
+        roles: { smallFast: 'small', subagent: 'big' },
+      }),
+    ).toEqual({
+      ANTHROPIC_MODEL: 'plain',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'plain',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'plain',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'big[1m]',
+    });
+  });
+
+  test('a pass-through connection only gets the roles it names', () => {
+    expect(buildConnectionModelEnv({ model: '', models })).toEqual({});
+    expect(
+      buildConnectionModelEnv({
+        model: '',
+        models,
+        roles: { smallFast: 'small' },
+      }),
+    ).toEqual({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' });
+  });
+
+  test('a choice saved with [1m] keeps its 1M window', () => {
+    expect(
+      buildConnectionModelEnv({ model: 'unknown-x[1m]', models: [] })
+        .ANTHROPIC_MODEL,
+    ).toBe('unknown-x[1m]');
+  });
+
+  test('roles naming a model the connection lacks are dropped', () => {
+    expect(
+      normalizeConnectionModelRoles(
+        { subagent: 'big[1m]', smallFast: 'gone', opus: 3 },
+        models,
+      ),
+    ).toEqual({ subagent: 'big' });
+  });
+});
+
+describe('resolved capabilities', () => {
+  test('declared efforts win, else the registry, else the family', () => {
+    expect(
+      resolveModelCapabilities({ id: 'mystery', efforts: ['low', 'high'] }),
+    ).toMatchObject({
+      efforts: ['low', 'high'],
+      effortsSource: 'declared',
+      defaultEffort: 'high',
+    });
+    expect(resolveModelCapabilities({ id: 'gpt-6.1-sol' })).toMatchObject({
+      effortsSource: 'registry',
+      defaultEffort: 'medium',
+    });
+    const terra = resolveModelCapabilities({ id: 'codex/gpt-6.1-terra' });
+    expect(terra.effortsSource).toBe('family');
+    expect(terra.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(terra.defaultEffort).toBe('medium');
+    expect(resolveModelCapabilities({ id: 'mystery' })).toEqual({
+      contextWindow: null,
+      suggestedContextWindow: null,
+      efforts: [],
+      defaultEffort: null,
+      effortsSource: 'none',
+      contextSource: 'none',
+    });
+  });
+
+  test('the default effort is never max unless that is all there is', () => {
+    expect(
+      resolveModelCapabilities({ id: 'x', efforts: ['high', 'max'] })
+        .defaultEffort,
+    ).toBe('high');
+    expect(
+      resolveModelCapabilities({ id: 'x', efforts: ['max'] }).defaultEffort,
+    ).toBe('max');
+    expect(
+      resolveModelCapabilities({
+        id: 'x',
+        efforts: ['low', 'max'],
+        defaultEffort: 'max',
+      }).defaultEffort,
+    ).toBe('max');
+  });
+
+  test('only a declared window is used; the registry only suggests', () => {
+    expect(
+      resolveModelCapabilities({ id: 'gpt-6.1-sol', contextWindow: 272_000 }),
+    ).toMatchObject({ contextWindow: 272_000, contextSource: 'declared' });
+    expect(resolveModelCapabilities({ id: 'gpt-6.1-sol' })).toMatchObject({
+      contextWindow: null,
+      suggestedContextWindow: 1_050_000,
+      contextSource: 'none',
+    });
+    // A registry window never adds [1m] at launch.
+    expect(
+      buildConnectionModelEnv({ model: 'claude-opus-5-5', models: [] })
+        .ANTHROPIC_MODEL,
+    ).toBe('claude-opus-5-5');
+  });
+
+  test('family inference lends efforts only, and Claude only within a variant', () => {
+    const terra = resolveModelCapabilities({ id: 'codex/gpt-6.1-terra' });
+    expect(terra.contextWindow).toBeNull();
+    expect(terra.suggestedContextWindow).toBeNull();
+    expect(
+      resolveModelCapabilities({ id: 'claude-haiku-9-9' }).effortsSource,
+    ).toBe('family');
+    // No haiku-4-5 efforts are borrowed from opus-4-5.
+    expect(
+      resolveModelCapabilities({ id: 'claude-haiku-4-5' }).effortsSource,
+    ).toBe('none');
+  });
+});
+
+describe('vendor efforts in a model list', () => {
+  test('the spellings vendors use are read; minimal and ultra are dropped', () => {
+    expect(
+      parseModelList({
+        data: [
+          {
+            id: 'a',
+            supported_reasoning_levels: [
+              { effort: 'low' },
+              { effort: 'high' },
+              { effort: 'ultra' },
+            ],
+            default_reasoning_level: 'high',
+          },
+          {
+            id: 'b',
+            reasoning: {
+              supported_efforts: ['minimal', 'medium'],
+              default_effort: 'minimal',
+            },
+          },
+          { id: 'c' },
+        ],
+      }),
+    ).toEqual([
+      { id: 'a', efforts: ['low', 'high'], defaultEffort: 'high' },
+      { id: 'b', efforts: ['medium'] },
+      { id: 'c' },
+    ]);
   });
 });

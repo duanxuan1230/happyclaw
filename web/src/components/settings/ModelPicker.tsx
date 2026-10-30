@@ -6,47 +6,116 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import {
   isValidModelId,
-  presetModelEntryId,
+  modelCapabilities,
+  normalizeProviderModels,
   splitOneMillionSuffix,
-  withOneMillionSuffix,
+  type ConnectionModelRoles,
+  type DiscoveredModel,
+  type ModelPresetModel,
   type ProviderErrorCode,
+  type ProviderModelEntry,
 } from '@/lib/model-providers';
-import { cn } from '@/lib/utils';
 import { errorCopy } from './model-connections';
+import {
+  ModelCapabilityFields,
+  ModelRolesFields,
+  withAddDefaults,
+} from './ModelCapabilityFields';
 
 /** One model the wizard may save with the connection. */
-export interface ModelCandidate {
-  /** Model id without `[1m]`: stays put while the 1M switch flips. */
-  base: string;
-  oneMillion: boolean;
+export interface ModelCandidate extends ProviderModelEntry {
   picked: boolean;
   name?: string;
   origin: 'preset' | 'discovered' | 'manual';
+  /** Efforts filled in with every level because nothing is known. */
+  effortsUnverified?: boolean;
+  /** The window is the registry's suggestion, not one the user picked. */
+  windowSuggested?: boolean;
 }
 
-export function candidateId(candidate: ModelCandidate): string {
-  return withOneMillionSuffix(candidate.base, candidate.oneMillion);
+/** What the connection stores for a candidate. */
+export function candidateEntry(candidate: ModelCandidate): ProviderModelEntry {
+  const entry: ProviderModelEntry = { id: candidate.id };
+  if (candidate.contextWindow) entry.contextWindow = candidate.contextWindow;
+  if (candidate.efforts?.length) entry.efforts = candidate.efforts;
+  if (candidate.defaultEffort) entry.defaultEffort = candidate.defaultEffort;
+  return entry;
+}
+
+/**
+ * A model as a candidate: its window from the vendor or the preset (`[1m]`
+ * spelled the old way counts as 1M), its vendor efforts, and what an added
+ * model starts with (see withAddDefaults).
+ */
+function toCandidate(
+  model: DiscoveredModel | ModelPresetModel,
+  origin: ModelCandidate['origin'],
+  picked: boolean,
+  declareSuggestedWindow: boolean,
+): ModelCandidate {
+  const [normalized] = normalizeProviderModels([model]) ?? [];
+  const { entry, effortsUnverified, windowSuggested } = withAddDefaults(
+    normalized,
+    declareSuggestedWindow,
+  );
+  const candidate: ModelCandidate = { ...entry, picked, origin };
+  if (model.name) candidate.name = model.name;
+  if (effortsUnverified) candidate.effortsUnverified = true;
+  if (windowSuggested) candidate.windowSuggested = true;
+  return candidate;
+}
+
+/**
+ * A kept candidate under another source. An official connection takes no
+ * suggested window (above 200K it is the billed 1M opt-in); a third-party one
+ * takes the suggestion where the candidate has no window. A window the user
+ * picked stays either way.
+ */
+export function candidateForSource(
+  candidate: ModelCandidate,
+  thirdParty: boolean,
+): ModelCandidate {
+  if (!thirdParty) {
+    if (!candidate.windowSuggested) return candidate;
+    const next = { ...candidate };
+    delete next.contextWindow;
+    delete next.windowSuggested;
+    return next;
+  }
+  if (candidate.contextWindow) return candidate;
+  const { entry, windowSuggested } = withAddDefaults(candidate, true);
+  return windowSuggested
+    ? { ...candidate, contextWindow: entry.contextWindow, windowSuggested }
+    : candidate;
 }
 
 /**
  * Adds models the list does not have yet, leaving the ones it has (and the
- * user's choices on them) alone. A model of a 1M window comes in with `[1m]`.
+ * user's choices on them) alone. `picked: 'known'` checks the models the
+ * registry knows and leaves the rest unchecked. A third-party connection
+ * declares the registry's window (`declareSuggestedWindow`).
  */
 export function addCandidates(
   existing: readonly ModelCandidate[],
-  models: ReadonlyArray<{ id: string; name?: string; contextWindow?: number }>,
+  models: ReadonlyArray<DiscoveredModel | ModelPresetModel>,
   origin: ModelCandidate['origin'],
-  picked: boolean,
+  picked: boolean | 'known',
+  declareSuggestedWindow: boolean,
 ): ModelCandidate[] {
-  const known = new Set(existing.map((candidate) => candidate.base));
+  const known = new Set(existing.map((candidate) => candidate.id));
   const next = [...existing];
   for (const model of models) {
-    const { model: base, oneMillion } = splitOneMillionSuffix(
-      presetModelEntryId(model),
+    const id = splitOneMillionSuffix(model.id).model;
+    if (!id || known.has(id) || !isValidModelId(id)) continue;
+    known.add(id);
+    next.push(
+      toCandidate(
+        model,
+        origin,
+        picked === 'known' ? modelCapabilities(id) !== null : picked,
+        declareSuggestedWindow,
+      ),
     );
-    if (!base || known.has(base) || !isValidModelId(base)) continue;
-    known.add(base);
-    next.push({ base, oneMillion, picked, origin, name: model.name });
   }
   return next;
 }
@@ -64,70 +133,69 @@ export type DiscoveryState =
 interface ModelPickerProps {
   candidates: ModelCandidate[];
   onCandidatesChange: (next: ModelCandidate[]) => void;
-  /** Base id of the default model; '' = none (pass-through). */
-  defaultBase: string;
-  onDefaultChange: (base: string) => void;
-  /** Offer "no default model", for endpoints that route names themselves. */
-  passThrough: { label: string; hint: string } | null;
+  /** Third-party connections pick models for sub-agents and background calls. */
+  roles: ConnectionModelRoles | null;
+  /** Added models declare the registry's window (third-party connections). */
+  declareSuggestedWindow: boolean;
+  onRolesChange: (next: ConnectionModelRoles) => void;
   discovery: DiscoveryState;
   onRetryDiscovery: () => void;
 }
 
-const FILTER_THRESHOLD = 12;
-
-/** Step 3 of the wizard: which models the connection offers, and its default. */
+/** Step 3 of the wizard: which models the connection offers, and how. */
 export function ModelPicker({
   candidates,
   onCandidatesChange,
-  defaultBase,
-  onDefaultChange,
-  passThrough,
+  roles,
+  onRolesChange,
+  declareSuggestedWindow,
   discovery,
   onRetryDiscovery,
 }: ModelPickerProps) {
   const [filter, setFilter] = useState('');
 
   const picked = candidates.filter((candidate) => candidate.picked);
-  const defaultCandidate = candidates.find(
-    (candidate) => candidate.base === defaultBase,
-  );
   const query = filter.trim().toLowerCase();
   const shown = query
     ? candidates.filter(
         (candidate) =>
-          candidate.base.toLowerCase().includes(query) ||
+          candidate.id.toLowerCase().includes(query) ||
           candidate.name?.toLowerCase().includes(query),
       )
     : candidates;
 
-  const update = (base: string, patch: Partial<ModelCandidate>) => {
-    const next = candidates.map((candidate) =>
-      candidate.base === base ? { ...candidate, ...patch } : candidate,
+  const replace = (id: string, next: ModelCandidate) =>
+    onCandidatesChange(
+      candidates.map((candidate) => (candidate.id === id ? next : candidate)),
     );
-    onCandidatesChange(next);
-    if (patch.picked === undefined) return;
-    // The default is always one of the saved models. Checking a model while
-    // there is none makes it the default: a relay given glm-5.2 should run
-    // it, not whatever Claude model name Claude Code sends. 不指定 stays a
-    // deliberate pick.
-    if (patch.picked && !defaultBase) onDefaultChange(base);
-    if (!patch.picked && defaultBase === base) {
-      const first = next.find((candidate) => candidate.picked);
-      onDefaultChange(first?.base ?? '');
-    }
+  // 全选 / 清空 act on what the search shows.
+  const pickShown = (next: boolean) => {
+    const ids = new Set(shown.map((candidate) => candidate.id));
+    onCandidatesChange(
+      candidates.map((candidate) =>
+        ids.has(candidate.id) ? { ...candidate, picked: next } : candidate,
+      ),
+    );
   };
 
   const addManual = (raw: string) => {
-    const { model: base, oneMillion } = splitOneMillionSuffix(raw);
-    if (candidates.some((candidate) => candidate.base === base)) {
-      update(base, { picked: true, ...(oneMillion ? { oneMillion } : {}) });
-      return true;
-    }
-    onCandidatesChange([
-      ...candidates,
-      { base, oneMillion, picked: true, origin: 'manual' },
-    ]);
-    if (!defaultBase) onDefaultChange(base);
+    const existing = candidates.find(
+      (candidate) => candidate.id === splitOneMillionSuffix(raw).model,
+    );
+    onCandidatesChange(
+      existing
+        ? candidates.map((candidate) =>
+            candidate === existing ? { ...candidate, picked: true } : candidate,
+          )
+        : addCandidates(
+            candidates,
+            [{ id: raw }],
+            'manual',
+            true,
+            declareSuggestedWindow,
+          ),
+    );
+    setFilter('');
     return true;
   };
 
@@ -135,100 +203,103 @@ export function ModelPicker({
     <div className="space-y-3">
       <DiscoveryLine discovery={discovery} onRetry={onRetryDiscovery} />
 
-      {candidates.length > FILTER_THRESHOLD && (
+      <div className="flex flex-wrap items-center gap-2">
         <Input
           type="search"
           enterKeyHint="search"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
-          placeholder={`在 ${candidates.length} 个模型中筛选`}
-          aria-label="筛选模型"
+          placeholder="搜索模型"
+          aria-label="搜索模型"
+          className="min-w-0 flex-1 basis-48"
         />
-      )}
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => pickShown(true)}
+            disabled={shown.every((candidate) => candidate.picked)}
+          >
+            全选
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => pickShown(false)}
+            disabled={shown.every((candidate) => !candidate.picked)}
+          >
+            清空
+          </Button>
+        </div>
+      </div>
 
       <div
         role="group"
         aria-label="可用模型"
-        className="max-h-[min(22rem,45dvh)] divide-y divide-surface-border overflow-y-auto overscroll-contain rounded-lg ring-1 ring-surface-border"
+        className="max-h-[min(26rem,50dvh)] divide-y divide-surface-border overflow-y-auto overscroll-contain rounded-lg ring-1 ring-surface-border"
       >
-        {passThrough && (
-          <label className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2">
-            <input
-              type="radio"
-              name="wizard-default-model"
-              checked={defaultBase === ''}
-              onChange={() => onDefaultChange('')}
-              className="size-4 accent-primary"
-            />
-            <span className="min-w-0">
-              <span className="block text-label text-foreground">
-                {passThrough.label}
-              </span>
-              <span className="block text-caption text-muted-foreground">
-                {passThrough.hint}
-              </span>
-            </span>
-          </label>
-        )}
         {shown.map((candidate) => {
-          const id = candidateId(candidate);
-          const checkboxId = `wizard-model-${candidate.base}`;
-          const isDefault = candidate.picked && defaultBase === candidate.base;
+          const checkboxId = `wizard-model-${candidate.id}`;
           return (
-            <div
-              key={candidate.base}
-              className="flex min-h-11 items-center gap-3 px-3 py-1.5"
-            >
-              <Checkbox
-                id={checkboxId}
-                checked={candidate.picked}
-                onCheckedChange={(next) =>
-                  update(candidate.base, { picked: next === true })
-                }
-                aria-label={`使用 ${id}`}
-              />
-              <label
-                htmlFor={checkboxId}
-                className="min-w-0 flex-1 cursor-pointer"
-              >
-                <span className="block truncate font-mono text-caption text-foreground">
-                  {id}
-                </span>
-                {(candidate.name || candidate.origin === 'manual') && (
-                  <span className="block truncate text-micro text-muted-foreground">
-                    {candidate.name ?? '手动添加'}
-                  </span>
-                )}
-              </label>
-              <OneMillionToggle
-                id={id}
-                on={candidate.oneMillion}
-                onToggle={() =>
-                  update(candidate.base, { oneMillion: !candidate.oneMillion })
-                }
-              />
-              <label
-                className={cn(
-                  'flex shrink-0 items-center gap-1.5 text-caption',
-                  candidate.picked
-                    ? 'cursor-pointer text-muted-foreground'
-                    : 'cursor-default text-faint-foreground',
-                )}
-              >
-                <input
-                  type="radio"
-                  name="wizard-default-model"
-                  checked={isDefault}
-                  onChange={() => onDefaultChange(candidate.base)}
-                  disabled={!candidate.picked}
-                  aria-label={`把 ${id} 设为默认模型`}
-                  className="size-4 accent-primary"
+            <div key={candidate.id} className="min-w-0 space-y-2 px-3 py-2">
+              <div className="flex min-h-7 min-w-0 items-center gap-3">
+                <Checkbox
+                  id={checkboxId}
+                  checked={candidate.picked}
+                  onCheckedChange={(next) =>
+                    replace(candidate.id, {
+                      ...candidate,
+                      picked: next === true,
+                    })
+                  }
+                  aria-label={`使用 ${candidate.id}`}
                 />
-                <span className="max-sm:sr-only">默认</span>
-              </label>
+                <label
+                  htmlFor={checkboxId}
+                  className="min-w-0 flex-1 cursor-pointer"
+                >
+                  <span className="block truncate font-mono text-caption text-foreground">
+                    {candidate.id}
+                  </span>
+                  {(candidate.name || candidate.origin === 'manual') && (
+                    <span className="block truncate text-micro text-muted-foreground">
+                      {candidate.name ?? '手动添加'}
+                    </span>
+                  )}
+                </label>
+              </div>
+              {/* Only a checked model is saved, so only it is configured. */}
+              {candidate.picked && (
+                <div className="pl-7">
+                  <ModelCapabilityFields
+                    entry={candidateEntry(candidate)}
+                    effortsUnverified={candidate.effortsUnverified}
+                    onChange={(entry, effortsTouched) =>
+                      replace(candidate.id, {
+                        ...entry,
+                        picked: true,
+                        name: candidate.name,
+                        origin: candidate.origin,
+                        // An effort or window the user set is theirs, not a
+                        // guess.
+                        effortsUnverified:
+                          candidate.effortsUnverified && !effortsTouched,
+                        windowSuggested:
+                          candidate.windowSuggested &&
+                          entry.contextWindow === candidate.contextWindow,
+                      })
+                    }
+                  />
+                </div>
+              )}
             </div>
           );
         })}
+        {shown.length === 0 && candidates.length > 0 && (
+          <p className="px-3 py-4 text-caption text-muted-foreground">
+            没有匹配「{filter.trim()}」的模型，可以在下方手动添加。
+          </p>
+        )}
         {candidates.length === 0 && discovery.status !== 'loading' && (
           <p className="px-3 py-4 text-caption text-muted-foreground">
             还没有模型。在下方手动添加，或重新获取模型列表。
@@ -236,19 +307,22 @@ export function ModelPicker({
         )}
       </div>
 
+      <p className="text-caption text-muted-foreground" aria-live="polite">
+        已选 {picked.length} / 共 {candidates.length}
+      </p>
+
       <ManualModelInput
-        placeholder="手动添加模型名，例如 glm-5.3 或 glm-5.3[1m]"
+        placeholder="手动添加模型名，例如 glm-5.3"
         onAdd={addManual}
       />
 
-      <p className="text-caption text-muted-foreground">
-        已选 {picked.length} 个模型
-        {defaultBase
-          ? ` · 默认 ${defaultCandidate ? candidateId(defaultCandidate) : defaultBase}`
-          : passThrough
-            ? ' · 不指定默认模型'
-            : ''}
-      </p>
+      {roles && (
+        <ModelRolesFields
+          models={picked.map((candidate) => candidate.id)}
+          roles={roles}
+          onChange={onRolesChange}
+        />
+      )}
     </div>
   );
 }
@@ -276,7 +350,7 @@ function DiscoveryLine({
       <p className="text-caption text-muted-foreground">
         {discovery.builtin
           ? '这类连接使用内置的模型别名。'
-          : `从服务商获取到 ${discovery.count} 个模型；新发现的默认不勾选。`}
+          : `从服务商获取到 ${discovery.count} 个模型；已知的模型默认勾选。`}
       </p>
     );
   }
@@ -310,35 +384,8 @@ function DiscoveryLine({
   );
 }
 
-/** The `[1m]` switch of one model, shared by the wizard and the detail. */
-export function OneMillionToggle({
-  id,
-  on,
-  onToggle,
-  disabled = false,
-}: {
-  id: string;
-  on: boolean;
-  onToggle: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      aria-label={`${id} 使用 1M 上下文`}
-      title="1M 上下文：模型名后加 [1m]"
-      onClick={onToggle}
-      disabled={disabled}
-      className="inline-flex h-7 shrink-0 items-center rounded-md px-1.5 font-mono text-micro text-muted-foreground ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50 aria-pressed:bg-surface-selected aria-pressed:text-foreground pointer-coarse:h-9"
-    >
-      1M
-    </button>
-  );
-}
-
 /**
- * A model name typed by hand. `onAdd` gets a valid id (`[1m]` allowed) and
+ * A model name typed by hand. `onAdd` gets a valid id and
  * says whether it was taken; the field clears only then.
  */
 export function ManualModelInput({

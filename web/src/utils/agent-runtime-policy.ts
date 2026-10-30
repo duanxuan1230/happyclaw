@@ -1,7 +1,6 @@
 import type { Skill } from '../stores/skills';
 import {
   getAgentContextSource,
-  type AgentEffortLevel,
   type AgentProfileRuntimePolicy,
 } from '../types';
 import { buildMcpPolicyOptions } from './mcp-servers';
@@ -71,18 +70,6 @@ export function hostSkillPolicyForMode(
     ids: mode === 'custom' ? [...new Set(ids)] : [],
   };
 }
-
-export const AGENT_EFFORT_OPTIONS: Array<{
-  value: AgentEffortLevel;
-  label: string;
-}> = [
-  { value: 'inherit', label: '跟随模型配置' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'xhigh', label: '超高' },
-  { value: 'max', label: '最高' },
-];
 
 const HOST_SKILL_SOURCE_LABEL = '宿主机';
 

@@ -1,18 +1,23 @@
 /**
- * Provider Pool — 多提供商负载均衡
+ * Provider health — per-connection account and model-tier quarantine.
  *
- * 支持三种策略：round-robin、weighted-round-robin、failover
- * 健康状态纯内存管理，配置由 runtime-config V4 注入（不再自行管理配置文件）
+ * Health is in-memory only. It records upstream verdicts (usage limits with
+ * their reset times, model walls) so a launch can tell whether a connection
+ * can serve a turn and when it can again (usage-limit waits, the ChatGPT rate
+ * limit snapshot). A binding picks the connection; nothing here selects one.
  */
 import { logger } from './logger.js';
-import type { BalancingConfig } from './runtime-config.js';
 
 // ─── 类型定义 ──────────────────────────────────────────────
 
 export interface ProviderPoolMember {
   profileId: string;
-  weight: number;
-  enabled: boolean;
+}
+
+/** When failures make a member unhealthy, and how long until it recovers. */
+export interface ProviderHealthThresholds {
+  unhealthyThreshold: number;
+  recoveryIntervalMs: number;
 }
 
 /**
@@ -139,34 +144,21 @@ function normalizeReportedResetStamp(
 
 export class ProviderPool {
   private members: ProviderPoolMember[] = [];
-  private strategy: BalancingConfig['strategy'] = 'round-robin';
   private unhealthyThreshold = DEFAULT_UNHEALTHY_THRESHOLD;
   private recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS;
   private healthMap: Map<string, ProviderHealthStatus> = new Map();
   private modelQuarantine: Map<string, ModelQuarantine> = new Map();
-  private roundRobinIndex = 0;
 
-  /** True when the strategy rotates on every request rather than on failure. */
-  get rotatesPerRequest(): boolean {
-    return this.strategy !== 'failover';
-  }
-
-  /**
-   * Refresh internal state from V4 provider config.
-   * Called by container-runner before selection, and by routes after config changes.
-   */
+  /** Refresh the members health is tracked for, and the thresholds. */
   refreshFromConfig(
-    providers: Array<{ id: string; enabled: boolean; weight: number }>,
-    balancing: BalancingConfig,
+    providers: ReadonlyArray<{ id: string }>,
+    thresholds?: Partial<ProviderHealthThresholds>,
   ): void {
-    this.members = providers.map((p) => ({
-      profileId: p.id,
-      weight: Math.max(1, Math.min(100, p.weight || 1)),
-      enabled: p.enabled,
-    }));
-    this.strategy = balancing.strategy;
-    this.unhealthyThreshold = balancing.unhealthyThreshold;
-    this.recoveryIntervalMs = balancing.recoveryIntervalMs;
+    this.members = providers.map((p) => ({ profileId: p.id }));
+    this.unhealthyThreshold =
+      thresholds?.unhealthyThreshold ?? DEFAULT_UNHEALTHY_THRESHOLD;
+    this.recoveryIntervalMs =
+      thresholds?.recoveryIntervalMs ?? DEFAULT_RECOVERY_INTERVAL_MS;
 
     // Clean up health entries for removed members
     const memberIds = new Set(this.members.map((m) => m.profileId));
@@ -231,7 +223,7 @@ export class ProviderPool {
   }
 
   /**
-   * Enabled members that are account-healthy and not quarantined for the tier.
+   * Members that are account-healthy and not quarantined for the tier.
    *
    * A tier is either one shared model name (the system fallback tier) or a
    * per-account map (the primary tier, where each account carries its own
@@ -242,7 +234,6 @@ export class ProviderPool {
     now: number,
   ): ProviderPoolMember[] {
     return this.members.filter((m) => {
-      if (!m.enabled) return false;
       const health = this.healthMap.get(m.profileId);
       if (health && !health.healthy) return false;
       const model =
@@ -251,7 +242,7 @@ export class ProviderPool {
     });
   }
 
-  /** Whether any enabled, account-healthy member can still serve the tier. */
+  /** Whether any account-healthy member can still serve the tier. */
   hasCandidateForTier(tier: ProviderTier): boolean {
     this.refreshRecoveryState();
     return this.candidatesForTier(tier, Date.now()).length > 0;
@@ -275,7 +266,6 @@ export class ProviderPool {
     this.refreshRecoveryState(now);
     const accountWalls = this.members
       .filter((member) => {
-        if (!member.enabled) return false;
         const health = this.healthMap.get(member.profileId);
         return !!health && !health.healthy;
       })
@@ -287,9 +277,7 @@ export class ProviderPool {
       if (now >= recoverAt) {
         this.modelQuarantine.delete(key);
       } else if (
-        this.members.some(
-          (member) => member.profileId === modelKeyOwner(key) && member.enabled,
-        )
+        this.members.some((member) => member.profileId === modelKeyOwner(key))
       ) {
         modelWalls.push(key);
       }
@@ -313,7 +301,7 @@ export class ProviderPool {
     this.refreshRecoveryState(now);
     let earliest: number | null = null;
     for (const member of this.members) {
-      if (!member.enabled || member.profileId === excludeProfileId) continue;
+      if (member.profileId === excludeProfileId) continue;
       const health = this.healthMap.get(member.profileId);
       let accountAt = now;
       if (health && !health.healthy) {
@@ -335,83 +323,6 @@ export class ProviderPool {
       if (earliest === null || memberAt < earliest) earliest = memberAt;
     }
     return earliest;
-  }
-
-  // ─── 选择算法 ────────────────────────────────────────────
-
-  /**
-   * 选择一个提供商，返回 profileId。
-   *
-   * @param tier When given, only accounts that can still serve this model
-   * tier are eligible. Callers drain the primary tier across every account
-   * before retrying with the fallback tier.
-   */
-  selectProvider(tier: ProviderTier = ''): string {
-    const { strategy, members } = this;
-    this.refreshRecoveryState();
-
-    const candidates = this.candidatesForTier(tier, Date.now());
-
-    if (candidates.length === 0) {
-      // All unhealthy — best-effort: return first enabled member, or first member
-      const firstEnabled = members.find((m) => m.enabled);
-      const fallback = firstEnabled || members[0];
-      if (fallback) {
-        logger.warn(
-          { profileId: fallback.profileId, strategy },
-          'All providers unhealthy, falling back to first available',
-        );
-        return fallback.profileId;
-      }
-      // No members at all
-      throw new Error('Provider pool has no members configured');
-    }
-
-    let selected: ProviderPoolMember;
-
-    switch (strategy) {
-      case 'round-robin': {
-        const idx = this.roundRobinIndex % candidates.length;
-        selected = candidates[idx];
-        this.roundRobinIndex = idx + 1;
-        break;
-      }
-
-      case 'weighted-round-robin': {
-        const totalWeight = candidates.reduce(
-          (sum, c) => sum + Math.max(1, Math.min(100, c.weight || 1)),
-          0,
-        );
-        const target = this.roundRobinIndex % totalWeight;
-        let cumulative = 0;
-        selected = candidates[0];
-        for (const c of candidates) {
-          cumulative += Math.max(1, Math.min(100, c.weight || 1));
-          if (target < cumulative) {
-            selected = c;
-            break;
-          }
-        }
-        this.roundRobinIndex += 1;
-        break;
-      }
-
-      case 'failover': {
-        selected = candidates[0];
-        break;
-      }
-
-      default: {
-        selected = candidates[0];
-        break;
-      }
-    }
-
-    logger.debug(
-      { profileId: selected.profileId, strategy },
-      'Selected provider for session',
-    );
-    return selected.profileId;
   }
 
   // ─── 健康上报 ────────────────────────────────────────────
@@ -498,7 +409,6 @@ export class ProviderPool {
    */
   refreshRecoveryState(now = Date.now()): void {
     for (const member of this.members) {
-      if (!member.enabled) continue;
       const health = this.healthMap.get(member.profileId);
       if (!health || health.healthy || health.unhealthySince === null) continue;
       // An upstream-reported reset is authoritative over the local interval:

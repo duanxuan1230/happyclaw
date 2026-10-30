@@ -1,14 +1,16 @@
+import { Link } from 'react-router-dom';
+
 import { Badge } from '@/components/ui/badge';
+import { useAuthStore } from '@/stores/auth';
 import type { AgentModelResolution } from '@/types';
 
 const SOURCE_LABELS: Record<AgentModelResolution['source'], string> = {
   session: '会话手选',
   agent: '智能体绑定',
-  default: '全局默认',
-  single: '唯一启用',
+  owner_main: '跟随主智能体',
+  system_main: '跟随主 HappyClaw',
   workspace_env: '工作区环境变量',
-  pool: '自动池',
-  none: '无可用配置',
+  none: '未选择模型',
 };
 
 /**
@@ -30,7 +32,9 @@ export function readModelResolution(
 }
 
 function describe(resolution: AgentModelResolution): string {
-  if (resolution.connection_missing) return '绑定的连接不存在，运行会失败';
+  if (resolution.connection_missing) {
+    return '连接不可用，绑定的连接已删除或缺少凭据，运行会失败';
+  }
   if (resolution.model_config_id) {
     return [resolution.model_config_name, resolution.model]
       .filter(Boolean)
@@ -39,23 +43,25 @@ function describe(resolution: AgentModelResolution): string {
   if (resolution.source === 'workspace_env') {
     return '使用工作区自带的 Provider 环境变量';
   }
-  if (resolution.source === 'pool') {
-    return '每轮从已启用的模型配置中自动选择';
-  }
-  return '没有启用的模型配置，无法运行';
+  return '未选择模型';
 }
 
 /**
  * The connection and model a run of this Agent uses and which step of the
- * order chose it: conversation pick, Agent binding, global default, the only
- * enabled configuration, or the automatic pool.
+ * order chose it: conversation pick, the Agent's own binding, the workspace
+ * env, the owner's main Agent or the system main HappyClaw. A binding whose
+ * connection is gone or has no credential fails; it never falls back.
  */
 export function ModelResolutionRow({
   resolution,
 }: {
   resolution: AgentModelResolution | null;
 }) {
+  const canAddModel = useAuthStore((s) =>
+    s.hasPermission('manage_system_config'),
+  );
   if (!resolution) return null;
+  const unset = resolution.source === 'none' && !resolution.connection_missing;
   return (
     <div className="grid gap-2 px-4 py-3 sm:grid-cols-[120px_1fr] sm:items-start">
       <div className="text-caption font-medium text-muted-foreground">模型</div>
@@ -64,14 +70,29 @@ export function ModelResolutionRow({
           className={
             resolution.connection_missing
               ? 'text-caption text-warning'
-              : resolution.source === 'none'
+              : unset
                 ? 'text-caption text-error'
                 : 'min-w-0 text-label break-all text-foreground'
           }
         >
           {describe(resolution)}
         </span>
-        <Badge variant="neutral">{SOURCE_LABELS[resolution.source]}</Badge>
+        {unset ? (
+          canAddModel ? (
+            <Link
+              to="/settings?tab=claude"
+              className="text-caption text-primary-text hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              添加模型
+            </Link>
+          ) : (
+            <span className="text-caption text-muted-foreground">
+              请联系管理员添加模型
+            </span>
+          )
+        ) : (
+          <Badge variant="neutral">{SOURCE_LABELS[resolution.source]}</Badge>
+        )}
       </div>
     </div>
   );
