@@ -1,7 +1,6 @@
 import type { Skill } from '../stores/skills';
 import {
   getAgentContextSource,
-  type AgentEffortLevel,
   type AgentProfileRuntimePolicy,
 } from '../types';
 import { buildMcpPolicyOptions } from './mcp-servers';
