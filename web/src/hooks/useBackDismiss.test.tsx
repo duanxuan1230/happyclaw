@@ -4,6 +4,7 @@ import { act, StrictMode, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { flushHistory } from '@/components/ui/overlay-test-utils';
 import { useBackDismiss } from './useBackDismiss';
 
 (
@@ -26,12 +27,7 @@ afterEach(async () => {
   await settle();
 });
 
-/** Lets deferred releases, step-overs and traversals (popstate) run. */
-async function settle() {
-  for (let i = 0; i < 25; i += 1) {
-    await act(() => new Promise((resolve) => setTimeout(resolve, 10)));
-  }
-}
+const settle = () => flushHistory(act);
 
 const overlays = () =>
   ((window.history.state ?? {}) as { __happyclawOverlays?: string[] })

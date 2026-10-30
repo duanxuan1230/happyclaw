@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
-import { useComposedRefs } from 'radix-ui/internal';
+import { useComposedRefs, useControllableState } from 'radix-ui/internal';
 
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -14,12 +14,12 @@ function Dialog({
   onOpenChange,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
-  const open = openProp ?? uncontrolledOpen;
-  const setOpen = (next: boolean) => {
-    if (openProp === undefined) setUncontrolledOpen(next);
-    onOpenChange?.(next);
-  };
+  const [open, setOpen] = useControllableState({
+    prop: openProp,
+    defaultProp: defaultOpen,
+    onChange: onOpenChange,
+    caller: 'Dialog',
+  });
   useBackDismiss(open, () => setOpen(false));
   return (
     <DialogPrimitive.Root

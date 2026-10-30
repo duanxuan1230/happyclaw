@@ -1,5 +1,7 @@
 import { useEffect, useRef, type PointerEvent, type MouseEvent } from 'react';
 
+import { useStableCallback } from './useStableCallback';
+
 /** A finger that wanders further than this is scrolling, not pressing. */
 const MOVE_TOLERANCE = 8;
 /** How long after a long press's release its click may still arrive. */
@@ -23,10 +25,7 @@ export function useLongPress(
   onContextMenu: (event: MouseEvent<Element>) => void;
 } {
   const ms = opts?.ms ?? 500;
-  const onLongPressRef = useRef(onLongPress);
-  useEffect(() => {
-    onLongPressRef.current = onLongPress;
-  });
+  const fire = useStableCallback(onLongPress);
   const pressRef = useRef<{
     pointerId: number;
     x: number;
@@ -76,7 +75,7 @@ export function useLongPress(
         timer: window.setTimeout(() => {
           pressRef.current = null;
           firedRef.current = true;
-          onLongPressRef.current();
+          fire();
         }, ms),
       };
     },
@@ -99,7 +98,7 @@ export function useLongPress(
     onPointerCancel: cancel,
     onContextMenu(event) {
       // Android fires contextmenu for a held finger.
-      if (touchRef.current || firedRef.current) event.preventDefault();
+      if (touchRef.current) event.preventDefault();
     },
   };
 }

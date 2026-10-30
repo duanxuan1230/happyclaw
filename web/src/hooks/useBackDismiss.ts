@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { useIsPhone } from '../components/layout/phone';
+import { useStableCallback } from './useStableCallback';
 
 /**
  * The history entries an open overlay owns carry this key in their state:
@@ -112,10 +113,7 @@ export function useBackDismiss(
 ): void {
   const isPhone = useIsPhone();
   const enabled = opts?.enabled ?? isPhone;
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  });
+  const close = useStableCallback(onClose);
   // The entry this overlay holds, and the pending release of it.
   const heldRef = useRef<{ id: string; timer?: number } | null>(null);
   const openRef = useRef(open);
@@ -138,7 +136,7 @@ export function useBackDismiss(
       heldRef.current = {
         id: claim(() => {
           heldRef.current = null;
-          onCloseRef.current();
+          close();
           window.setTimeout(() => {
             if (openRef.current && !heldRef.current) setReclaims((n) => n + 1);
           }, 0);

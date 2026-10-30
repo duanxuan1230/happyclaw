@@ -1,4 +1,5 @@
-import { Fragment, useState, type JSX, type ReactElement } from 'react';
+import { Fragment, type JSX, type ReactElement } from 'react';
+import { useControllableState } from 'radix-ui/internal';
 import type { LucideIcon } from 'lucide-react';
 
 import {
@@ -43,13 +44,12 @@ export function ResponsiveMenu({
   onOpenChange?: (o: boolean) => void;
 }): JSX.Element {
   const isPhone = useIsPhone();
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const open = openProp ?? uncontrolledOpen;
-  const setOpen = (next: boolean) => {
-    if (openProp === undefined) setUncontrolledOpen(next);
-    onOpenChange?.(next);
-  };
-  const shown = groups.filter((group) => group.length > 0);
+  const [open, setOpen] = useControllableState({
+    prop: openProp,
+    defaultProp: false,
+    onChange: onOpenChange,
+    caller: 'ResponsiveMenu',
+  });
 
   if (isPhone) {
     return (
@@ -58,7 +58,7 @@ export function ResponsiveMenu({
         onOpenChange={setOpen}
         title={title}
         description={description}
-        groups={shown}
+        groups={groups}
         trigger={trigger}
       />
     );
@@ -68,24 +68,26 @@ export function ResponsiveMenu({
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent align={align} aria-label={title} className="w-auto">
-        {shown.map((group, index) => (
-          <Fragment key={group[0].label}>
-            {index > 0 && <DropdownMenuSeparator />}
-            {group.map(
-              ({ label, icon: Icon, onSelect, disabled, destructive }) => (
-                <DropdownMenuItem
-                  key={label}
-                  disabled={disabled}
-                  variant={destructive ? 'destructive' : 'default'}
-                  onSelect={onSelect}
-                >
-                  {Icon && <Icon aria-hidden="true" />}
-                  {label}
-                </DropdownMenuItem>
-              ),
-            )}
-          </Fragment>
-        ))}
+        {groups
+          .filter((group) => group.length > 0)
+          .map((group, index) => (
+            <Fragment key={group[0].label}>
+              {index > 0 && <DropdownMenuSeparator />}
+              {group.map(
+                ({ label, icon: Icon, onSelect, disabled, destructive }) => (
+                  <DropdownMenuItem
+                    key={label}
+                    disabled={disabled}
+                    variant={destructive ? 'destructive' : 'default'}
+                    onSelect={onSelect}
+                  >
+                    {Icon && <Icon aria-hidden="true" />}
+                    {label}
+                  </DropdownMenuItem>
+                ),
+              )}
+            </Fragment>
+          ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

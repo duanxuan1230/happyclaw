@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Dialog as SheetPrimitive } from 'radix-ui';
-import { useComposedRefs } from 'radix-ui/internal';
+import { useComposedRefs, useControllableState } from 'radix-ui/internal';
 
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -17,12 +17,12 @@ function Sheet({
   onOpenChange,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Root>) {
-  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
-  const open = openProp ?? uncontrolledOpen;
-  const setOpen = (next: boolean) => {
-    if (openProp === undefined) setUncontrolledOpen(next);
-    onOpenChange?.(next);
-  };
+  const [open, setOpen] = useControllableState({
+    prop: openProp,
+    defaultProp: defaultOpen,
+    onChange: onOpenChange,
+    caller: 'Sheet',
+  });
   useBackDismiss(open, () => setOpen(false));
   return (
     <SheetPrimitive.Root
@@ -177,12 +177,13 @@ function BottomSheetContent({
   const setContentRef = useComposedRefs(ref, contentRef);
   const closeRef = React.useRef<HTMLButtonElement>(null);
   const dragRef = React.useRef<DragState | null>(null);
-  const [uncontrolledSnap, setUncontrolledSnap] = React.useState<Snap>('half');
-  const snap: Snap | null = detents ? (snapProp ?? uncontrolledSnap) : null;
-  const setSnap = (next: Snap) => {
-    if (snapProp === undefined) setUncontrolledSnap(next);
-    onSnapChange?.(next);
-  };
+  const [detent, setSnap] = useControllableState<Snap>({
+    prop: snapProp,
+    defaultProp: 'half',
+    onChange: onSnapChange,
+    caller: 'SheetContent',
+  });
+  const snap = detents ? detent : null;
 
   // The snapped height is written here, not through React's style prop, so
   // a drag can move it frame by frame and hand it back on release. It
@@ -260,7 +261,7 @@ function BottomSheetContent({
       }
       // Back to a detent, eased from where it was let go.
       element.style.height = `${heights[settled]}px`;
-      if (settled !== snap) setSnap(settled);
+      setSnap(settled);
       return;
     }
     if (flick || offset > Math.max(80, element.offsetHeight * 0.3)) {
