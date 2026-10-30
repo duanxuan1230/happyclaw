@@ -102,11 +102,14 @@ function DialogContent({
   autoFocusOnPhone?: boolean;
 }) {
   // A field's own autoFocus runs before Radix's focus scope, which then
-  // sees focus inside and skips onOpenAutoFocus: undo it as the content
-  // attaches.
+  // sees focus inside and skips onOpenAutoFocus: undo it once, as the
+  // content attaches (Radix re-attaches the ref on later renders).
+  const attachedRef = React.useRef<HTMLDivElement | null>(null);
   const blurAutoFocusedField = React.useCallback(
     (node: HTMLDivElement | null) => {
-      if (!node || autoFocusOnPhone || !isCoarsePointer()) return;
+      if (!node || node === attachedRef.current) return;
+      attachedRef.current = node;
+      if (autoFocusOnPhone || !isCoarsePointer()) return;
       const active = document.activeElement;
       if (active && node.contains(active) && isTextEntry(active)) {
         (active as HTMLElement).blur();

@@ -54,10 +54,8 @@ function onPopState() {
   const top = chain.at(-1);
   if (top === undefined || stack.some((overlay) => overlay.id === top)) return;
   stepOverTimer = window.setTimeout(() => {
-    const current = topOverlayEntry();
-    if (current === top && !stack.some((overlay) => overlay.id === top)) {
-      window.history.back();
-    }
+    // Unless an overlay opened meanwhile and put its own entry on top.
+    if (topOverlayEntry() === top) window.history.back();
   }, STEP_OVER_DELAY_MS);
 }
 

@@ -72,15 +72,11 @@ function Harness({
   );
 }
 
-function render(
-  props: Partial<Parameters<typeof Harness>[0]> = {},
-  strict = false,
-) {
+function render(props: Partial<Parameters<typeof Harness>[0]> = {}) {
   const controls = {} as Controls;
   container = document.body.appendChild(document.createElement('div'));
   root = createRoot(container);
-  const tree = <Harness controls={controls} {...props} />;
-  act(() => root!.render(strict ? <StrictMode>{tree}</StrictMode> : tree));
+  act(() => root!.render(<Harness controls={controls} {...props} />));
   return controls;
 }
 
@@ -252,12 +248,52 @@ describe('useBackDismiss', () => {
   });
 
   test('StrictMode does not stack a second entry', async () => {
-    const controls = render({}, true);
     const before = window.history.length;
-    act(() => controls.setOuter(true));
+    function OpenOnMount() {
+      const [open, setOpen] = useState(true);
+      useBackDismiss(open, () => setOpen(false), { enabled: true });
+      return open ? <span data-open="outer" /> : null;
+    }
+    container = document.body.appendChild(document.createElement('div'));
+    root = createRoot(container);
+    // StrictMode runs the effect, its cleanup and the effect again.
+    act(() =>
+      root!.render(
+        <StrictMode>
+          <OpenOnMount />
+        </StrictMode>,
+      ),
+    );
     await settle();
     expect(window.history.length).toBe(before + 1);
     expect(overlays()).toHaveLength(1);
+    // One back closes it: no orphan entry under it.
+    act(() => window.history.back());
+    await settle();
+    expect(isOpen('outer')).toBe(false);
+    expect(window.history.state).toEqual({ usr: null, key: 'base', idx: 0 });
+  });
+
+  test('an overlay opened right after landing on a stale entry stays open', async () => {
+    const controls = render();
+    act(() => controls.setOuter(true));
+    await settle();
+    window.history.pushState(
+      { usr: null, key: 'next', idx: 1 },
+      '',
+      '/settings',
+    );
+    act(() => root!.unmount());
+    root = null;
+    await settle();
+    const next = render();
+    act(() => window.history.back());
+    // Landed on the stale entry; an overlay opens before it is stepped over.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    act(() => next.setInner(true));
+    await settle();
+    expect(isOpen('inner')).toBe(true);
+    expect(overlays()).toHaveLength(2);
   });
 
   test('disabled (a desktop) it leaves history alone', async () => {
