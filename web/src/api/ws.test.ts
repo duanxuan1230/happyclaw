@@ -28,6 +28,11 @@ class FakeSocket {
     this.onmessage?.({ data: JSON.stringify(data) });
   }
 
+  /** Closed while the page was frozen; the close event is not delivered yet. */
+  dieQuietly() {
+    this.readyState = FakeSocket.CLOSED;
+  }
+
   close() {
     this.closeCalls++;
     if (this.readyState === FakeSocket.CLOSED) return;
@@ -109,47 +114,51 @@ describe('wsManager', () => {
     expect(sockets()).toHaveLength(2);
   });
 
-  test('back in the foreground, a silent open socket is replaced and resynced', () => {
+  test('back in the foreground, a socket that died unreported is replaced and resynced', () => {
     const connected = vi.fn();
     const disconnected = vi.fn();
     manager.on('connected', connected);
     manager.on('disconnected', disconnected);
     manager.connect();
-    const stale = latest();
-    stale.open();
+    const dead = latest();
+    dead.open();
     expect(connected).toHaveBeenLastCalledWith({ reconnect: false });
 
     setVisibility('hidden');
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
+    dead.dieQuietly();
     setVisibility('visible');
 
-    expect(stale.closeCalls).toBe(1);
     expect(sockets()).toHaveLength(2);
-    // The replaced socket's close is not reported as an outage.
+    // Its close event, delivered late, is not reported as a new outage.
+    dead.onclose?.({ code: 1006 });
     expect(disconnected).not.toHaveBeenCalled();
     latest().open();
     expect(connected).toHaveBeenLastCalledWith({ reconnect: true });
   });
 
-  test('a quick tab switch keeps a quiet socket', () => {
+  test('an open socket is kept however long it has been quiet', () => {
     manager.connect();
     latest().open();
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS * 2);
     setVisibility('hidden');
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(10 * 60_000);
     setVisibility('visible');
+    window.dispatchEvent(new Event('online'));
+    const restored = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(restored, 'persisted', { value: true });
+    window.dispatchEvent(restored);
     expect(sockets()).toHaveLength(1);
+    expect(latest().closeCalls).toBe(0);
   });
 
-  test('back in the foreground, a socket that heard from the server recently is kept', () => {
+  test('a pending handshake is left alone and keeps its first-open meaning', () => {
+    const connected = vi.fn();
+    manager.on('connected', connected);
     manager.connect();
-    latest().open();
-    setVisibility('hidden');
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS - 1000);
-    latest().receive({ type: 'billing_update' });
-    vi.advanceTimersByTime(1000);
     setVisibility('visible');
+    window.dispatchEvent(new Event('online'));
     expect(sockets()).toHaveLength(1);
+    latest().open();
+    expect(connected).toHaveBeenCalledWith({ reconnect: false });
   });
 
   test('back in the foreground, a closed socket reconnects without waiting', () => {
@@ -160,27 +169,25 @@ describe('wsManager', () => {
     expect(sockets()).toHaveLength(2);
   });
 
-  test('a page restored from the back/forward cache reconnects', () => {
+  test('a page restored from the back/forward cache reconnects a dead socket', () => {
     manager.connect();
     latest().open();
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
+    latest().dieQuietly();
+    const firstLoad = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(firstLoad, 'persisted', { value: false });
+    window.dispatchEvent(firstLoad);
+    expect(sockets()).toHaveLength(1);
+
     const restored = new Event('pageshow') as PageTransitionEvent;
     Object.defineProperty(restored, 'persisted', { value: true });
     window.dispatchEvent(restored);
-    expect(sockets()).toHaveLength(2);
-    latest().open();
-
-    const firstLoad = new Event('pageshow') as PageTransitionEvent;
-    Object.defineProperty(firstLoad, 'persisted', { value: false });
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
-    window.dispatchEvent(firstLoad);
     expect(sockets()).toHaveLength(2);
   });
 
   test('resume events arriving together open one socket, not one each', () => {
     manager.connect();
     latest().open();
-    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
+    latest().dieQuietly();
     const restored = new Event('pageshow') as PageTransitionEvent;
     Object.defineProperty(restored, 'persisted', { value: true });
     window.dispatchEvent(restored);
@@ -196,6 +203,7 @@ describe('wsManager', () => {
     manager.disconnect();
     setVisibility('visible');
     window.dispatchEvent(new Event('online'));
+    vi.advanceTimersByTime(60_000);
     expect(sockets()).toHaveLength(1);
   });
 
