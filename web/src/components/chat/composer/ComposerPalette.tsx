@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 import { File, Folder, Loader2, Sparkles, SquareSlash } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -7,6 +7,60 @@ import type { ComposerPaletteState, PaletteItem } from './useComposerPalette';
 /** Id of a palette row, for the editor's `aria-activedescendant`. */
 export function paletteOptionId(listId: string, index: number): string {
   return `${listId}-option-${index}`;
+}
+
+/** The list's height: 16rem, or less when the keyboard leaves less room. */
+const LIST_MAX_PX = 256;
+/** Never shorter than about three rows. */
+const LIST_MIN_PX = 112;
+/** Room kept between the panel and the header above it. */
+const TOP_GAP_PX = 8;
+
+/**
+ * Cap the list so the panel ends below the conversation header in what is
+ * visible now (the keyboard shrinks the visual viewport, and iOS may scroll
+ * it), following the viewport while the panel is open.
+ */
+function useFitAboveAnchor(
+  panelRef: RefObject<HTMLDivElement | null>,
+  listRef: RefObject<HTMLDivElement | null>,
+) {
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const list = listRef.current;
+    const anchor = panel?.parentElement;
+    if (!panel || !list || !anchor) return;
+    const fit = () => {
+      const host = anchor.closest<HTMLElement>('[data-composer-dock-host]');
+      const header = host
+        ? parseFloat(
+            getComputedStyle(host).getPropertyValue('--chat-header-height'),
+          ) || 0
+        : 0;
+      const ceiling =
+        Math.max(
+          window.visualViewport?.offsetTop ?? 0,
+          host?.getBoundingClientRect().top ?? 0,
+        ) +
+        header +
+        TOP_GAP_PX;
+      // The panel sits mb-2 above the anchor; what it adds besides the list
+      // (border, the key hints) comes off the list.
+      const chrome = panel.offsetHeight - list.offsetHeight + 8;
+      const room = anchor.getBoundingClientRect().top - ceiling - chrome;
+      list.style.maxHeight = `${Math.max(LIST_MIN_PX, Math.min(LIST_MAX_PX, room))}px`;
+    };
+    fit();
+    const viewport = window.visualViewport;
+    viewport?.addEventListener('resize', fit);
+    viewport?.addEventListener('scroll', fit);
+    window.addEventListener('resize', fit);
+    return () => {
+      viewport?.removeEventListener('resize', fit);
+      viewport?.removeEventListener('scroll', fit);
+      window.removeEventListener('resize', fit);
+    };
+  }, [panelRef, listRef]);
 }
 
 const ICONS: Record<PaletteItem['kind'], typeof File> = {
@@ -31,8 +85,10 @@ export function ComposerPalette({
   /** The listbox id the editor points to (`aria-controls`). */
   listId: string;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const { items, activeIndex, status, kind } = palette;
+  useFitAboveAnchor(panelRef, listRef);
 
   useEffect(() => {
     listRef.current
@@ -53,6 +109,7 @@ export function ComposerPalette({
 
   return (
     <div
+      ref={panelRef}
       data-composer-palette={kind}
       className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-[12px] border border-surface-border bg-popover text-popover-foreground shadow-menu"
     >
