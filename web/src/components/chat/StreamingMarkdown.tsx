@@ -19,12 +19,15 @@ const MarkdownBlock = memo(function MarkdownBlock({
   content,
   open,
   fade,
+  settled,
   groupJid,
   variant,
 }: {
   content: string;
   open: boolean;
   fade?: StreamFade;
+  /** The reply has finished, not just this block. */
+  settled: boolean;
   groupJid?: string;
   variant: 'chat' | 'docs';
 }) {
@@ -35,6 +38,7 @@ const MarkdownBlock = memo(function MarkdownBlock({
       variant={variant}
       streaming={open}
       fade={fade}
+      settled={settled}
       // Margins between blocks must collapse as in one document.
       trimEdges={false}
     />
@@ -274,6 +278,7 @@ function MarkdownBlocks({
           // A block that closed keeps streaming until its words are in.
           open={streaming && (index === blocks.length - 1 || !!fades[index])}
           fade={fades[index]}
+          settled={!streaming}
           groupJid={groupJid}
           variant={variant}
         />

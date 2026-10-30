@@ -68,6 +68,13 @@ export interface MarkdownRendererProps {
   trimEdges?: boolean;
   /** Fade the words in as they arrive (the open block of a stream). */
   fade?: StreamFade;
+  /**
+   * The whole reply is final, so its text may wrap for looks (default:
+   * neither streaming nor fading). A block that closed while the rest of
+   * its reply streams is not: re-breaking its lines can change its height
+   * and move the text arriving under it.
+   */
+  settled?: boolean;
 }
 
 interface MarkdownContentProps extends MarkdownRendererProps {
@@ -816,6 +823,7 @@ export function MarkdownContent({
   streaming = false,
   trimEdges = true,
   fade,
+  settled = !streaming && !fade,
   remarkPlugins,
   rehypePlugins,
   pipeline,
@@ -886,10 +894,7 @@ export function MarkdownContent({
         trimEdges && '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
         // A settled reply wraps like edited text: no lone character or
         // punctuation on a paragraph's last line, headings in even lines.
-        // Not while it streams, where re-breaking the last lines as words
-        // arrive would make them jump.
-        !streaming &&
-          !fade &&
+        settled &&
           '[&_li]:text-pretty [&_p]:text-pretty [&_:is(h1,h2,h3,h4)]:text-balance',
       )}
     >
