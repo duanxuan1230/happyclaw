@@ -98,7 +98,7 @@ export function SetupProvidersPage() {
   };
 
   return (
-    <div className="h-dvh overflow-y-auto bg-background">
+    <div className="safe-area-top h-dvh overflow-y-auto bg-background">
       <PageContainer size="narrow" className="space-y-6">
         <header>
           <p className="text-caption text-muted-foreground">步骤 2/2</p>

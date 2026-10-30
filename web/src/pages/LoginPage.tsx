@@ -145,7 +145,7 @@ export function LoginPage() {
   }
 
   return (
-    <div className="landing-page relative flex h-dvh flex-col overflow-y-auto bg-background">
+    <div className="landing-page safe-area-top relative flex h-dvh flex-col overflow-y-auto bg-background">
       {/* Static brand wash — the login page keeps its scoped orange tokens. */}
       <div
         aria-hidden="true"
