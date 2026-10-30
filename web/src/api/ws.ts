@@ -4,6 +4,10 @@ type WsHandler = (data: any) => void;
 
 /** A handshake still pending after this long is abandoned and retried. */
 export const WS_HANDSHAKE_TIMEOUT_MS = 15_000;
+/** An open socket that answers nothing this long after a ping is replaced. */
+export const WS_PROBE_TIMEOUT_MS = 4_000;
+/** Back after this long hidden (or on `online`), an open socket is probed. */
+export const WS_PROBE_AFTER_HIDDEN_MS = 30_000;
 
 class WsManager {
   private ws: WebSocket | null = null;
@@ -17,6 +21,10 @@ class WsManager {
   private failedBeforeOpen = false;
   /** connect() was called and disconnect() has not been since. */
   private wanted = false;
+  /** Anything received on the current socket bumps this. */
+  private received = 0;
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private hiddenAt: number | null = null;
 
   connect() {
     this.wanted = true;
@@ -56,6 +64,7 @@ class WsManager {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
+      this.received += 1;
       let data: any;
       try {
         data = JSON.parse(event.data);
@@ -68,6 +77,7 @@ class WsManager {
     ws.onclose = (event: CloseEvent) => {
       if (this.ws !== ws) return;
       this.clearHandshakeTimer();
+      this.clearProbeTimer();
       if (!this.openedBefore) this.failedBeforeOpen = true;
       this.emit('disconnected', {});
       // 1008 = Policy Violation (backend auth failure), 4001 = custom auth error
@@ -90,6 +100,7 @@ class WsManager {
     this.wanted = false;
     this.clearReconnectTimer();
     this.clearHandshakeTimer();
+    this.clearProbeTimer();
     const ws = this.ws;
     // Detach first so its close is not taken for an outage to recover from.
     this.ws = null;
@@ -130,6 +141,11 @@ class WsManager {
     this.reconnectTimer = null;
   }
 
+  private clearProbeTimer() {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+  }
+
   private clearHandshakeTimer() {
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
@@ -156,17 +172,38 @@ class WsManager {
   /**
    * Reconnect now unless the socket is open or its handshake is pending
    * (resume often fires pageshow, online and visibilitychange together; the
-   * handshake deadline covers one that hangs). An open socket is trusted:
-   * the server's heartbeat pings are invisible to page JS and there is no
-   * app-level probe, so silence on an idle conversation proves nothing, and
-   * the server terminates a dead peer, which ends in a close here. A
-   * replaced socket's close is ignored; the new socket's open reports
-   * `reconnect: true`, which runs the usual missed-state sync.
+   * handshake deadline covers one that hangs). With `probe`, an open socket
+   * is asked for a pong: a phone back from the background or a network
+   * change can hold a socket that still reads OPEN but reaches nothing, and
+   * the server's protocol pings are invisible here. Any message within the
+   * deadline keeps it; silence replaces it. A replaced socket's close is
+   * ignored; the new socket's open reports `reconnect: true`, which runs the
+   * usual missed-state sync.
    */
-  private ensureLive() {
+  private ensureLive(probe = false) {
     if (!this.wanted) return;
-    const state = this.ws?.readyState;
-    if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
+    const ws = this.ws;
+    const state = ws?.readyState;
+    if (state === WebSocket.CONNECTING) return;
+    if (ws && state === WebSocket.OPEN) {
+      if (!probe || this.probeTimer) return;
+      const before = this.received;
+      try {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      } catch {
+        // A send that throws is as good as silence.
+      }
+      this.probeTimer = setTimeout(() => {
+        this.probeTimer = null;
+        if (this.ws !== ws || this.received !== before) return;
+        this.ws = null;
+        ws.close();
+        this.emit('disconnected', {});
+        this.reconnectDelay = 1000;
+        this.connect();
+      }, WS_PROBE_TIMEOUT_MS);
+      return;
+    }
     if (this.ws && !this.openedBefore) this.failedBeforeOpen = true;
     this.clearReconnectTimer();
     this.reconnectDelay = 1000;
@@ -178,14 +215,20 @@ class WsManager {
     // Network restored or page back in front: a socket that closed while the
     // page was frozen or offline need not wait out its backoff. Going
     // offline leaves the backoff running; nothing ever cancels it.
-    window.addEventListener('online', () => this.ensureLive());
+    window.addEventListener('online', () => this.ensureLive(true));
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this.ensureLive();
+      if (document.visibilityState === 'hidden') {
+        this.hiddenAt = Date.now();
+        return;
+      }
+      const away = this.hiddenAt === null ? 0 : Date.now() - this.hiddenAt;
+      this.hiddenAt = null;
+      this.ensureLive(away >= WS_PROBE_AFTER_HIDDEN_MS);
     });
     // A page restored from the back/forward cache resumes with whatever
     // became of its socket while frozen.
     window.addEventListener('pageshow', (event) => {
-      if (event.persisted) this.ensureLive();
+      if (event.persisted) this.ensureLive(true);
     });
   }
 }

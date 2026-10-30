@@ -2057,6 +2057,12 @@ function setupWebSocket(server: any): WebSocketServer {
           ws.send(JSON.stringify(msg));
         };
 
+        if (msg.type === 'ping') {
+          const pong: WsMessageOut = { type: 'pong' };
+          ws.send(JSON.stringify(pong));
+          return;
+        }
+
         if (msg.type === 'send_message') {
           const wsValidation = MessageCreateSchema.safeParse({
             chatJid: msg.chatJid,

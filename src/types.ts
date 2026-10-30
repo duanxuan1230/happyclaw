@@ -1006,6 +1006,7 @@ export type WsMessageOut =
       usage: BillingAccessResult;
     }
   | { type: 'ws_error'; error: string; chatJid?: string }
+  | { type: 'pong' }
   | {
       type: 'stream_snapshot';
       chatJid: string;
@@ -1098,7 +1099,9 @@ export type WsMessageIn =
   | { type: 'terminal_start'; chatJid: string; cols: number; rows: number }
   | { type: 'terminal_input'; chatJid: string; data: string }
   | { type: 'terminal_resize'; chatJid: string; cols: number; rows: number }
-  | { type: 'terminal_stop'; chatJid: string };
+  | { type: 'terminal_stop'; chatJid: string }
+  /** A page checking that its socket still reaches the server. */
+  | { type: 'ping' };
 
 // --- Streaming event types (canonical source: shared/stream-event.ts) ---
 export type { StreamEventType } from './stream-event.types.js';

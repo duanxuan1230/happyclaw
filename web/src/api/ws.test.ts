@@ -40,7 +40,10 @@ class FakeSocket {
     this.onclose?.({ code: 1006 });
   }
 
-  send() {}
+  sent: string[] = [];
+  send(data: string) {
+    this.sent.push(data);
+  }
 }
 
 type Manager = (typeof import('./ws'))['wsManager'];
@@ -136,18 +139,48 @@ describe('wsManager', () => {
     expect(connected).toHaveBeenLastCalledWith({ reconnect: true });
   });
 
-  test('an open socket is kept however long it has been quiet', () => {
+  test('back after a long absence, an open socket that answers the ping is kept', () => {
     manager.connect();
     latest().open();
     setVisibility('hidden');
     vi.advanceTimersByTime(10 * 60_000);
     setVisibility('visible');
-    window.dispatchEvent(new Event('online'));
-    const restored = new Event('pageshow') as PageTransitionEvent;
-    Object.defineProperty(restored, 'persisted', { value: true });
-    window.dispatchEvent(restored);
+    expect(latest().sent).toEqual([JSON.stringify({ type: 'ping' })]);
+    latest().receive({ type: 'pong' });
+    vi.advanceTimersByTime(ws.WS_PROBE_TIMEOUT_MS + 100);
     expect(sockets()).toHaveLength(1);
     expect(latest().closeCalls).toBe(0);
+  });
+
+  test('back after a long absence, an open socket that stays silent is replaced and resynced', () => {
+    const connected = vi.fn();
+    const disconnected = vi.fn();
+    manager.on('connected', connected);
+    manager.on('disconnected', disconnected);
+    manager.connect();
+    const stale = latest();
+    stale.open();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(5 * 60_000);
+    setVisibility('visible');
+    // Resume events arriving together send one ping.
+    window.dispatchEvent(new Event('online'));
+    expect(stale.sent).toHaveLength(1);
+    vi.advanceTimersByTime(ws.WS_PROBE_TIMEOUT_MS + 100);
+    expect(stale.closeCalls).toBe(1);
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    expect(sockets()).toHaveLength(2);
+    latest().open();
+    expect(connected).toHaveBeenLastCalledWith({ reconnect: true });
+  });
+
+  test('a short trip to the background does not probe', () => {
+    manager.connect();
+    latest().open();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(ws.WS_PROBE_AFTER_HIDDEN_MS - 1000);
+    setVisibility('visible');
+    expect(latest().sent).toEqual([]);
   });
 
   test('a pending handshake is left alone and keeps its first-open meaning', () => {
