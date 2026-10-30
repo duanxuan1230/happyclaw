@@ -4,7 +4,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import type { AgentProfile, ModelConfigOption } from '../../types';
+import type {
+  AgentProfile,
+  InheritedModel,
+  ModelConfigOption,
+} from '../../types';
 import { choose, combobox } from './test-helpers';
 
 const mocks = vi.hoisted(() => ({
@@ -62,32 +66,73 @@ const { MainAgentCapabilitiesSection } =
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
+const FULL = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
 const CONFIGS: ModelConfigOption[] = [
   {
     id: 'official',
     name: 'Claude 官方',
     type: 'official',
-    enabled: true,
-    anthropic_model: 'opus',
-    is_default: true,
+    model: 'opus',
+    usable: true,
     models: [
-      { id: 'opus', hidden: false },
-      { id: 'sonnet', hidden: false },
-      { id: 'haiku', hidden: true },
+      {
+        id: 'opus',
+        efforts: [...FULL],
+        defaultEffort: 'xhigh',
+        contextWindow: 200_000,
+        effortsSource: 'registry',
+      },
+      {
+        id: 'sonnet',
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'high',
+        contextWindow: 200_000,
+        effortsSource: 'registry',
+      },
+      {
+        id: 'haiku',
+        efforts: [],
+        defaultEffort: null,
+        contextWindow: 200_000,
+        effortsSource: 'none',
+      },
     ],
   },
   {
     id: 'glm',
     name: 'GLM',
     type: 'third_party',
-    enabled: true,
-    anthropic_model: 'glm-5.3[1m]',
+    model: 'glm-5.3',
+    usable: true,
     models: [
-      { id: 'glm-5.3[1m]', hidden: false },
-      { id: 'glm-4.6', hidden: false },
+      {
+        id: 'glm-5.3',
+        efforts: [],
+        defaultEffort: null,
+        contextWindow: 1_000_000,
+        effortsSource: 'none',
+      },
+      {
+        id: 'glm-4.6',
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+        contextWindow: 128_000,
+        effortsSource: 'family',
+      },
     ],
   },
 ];
+
+/** The caller is the system main HappyClaw's owner unless told otherwise. */
+function inherited(overrides: Partial<InheritedModel> = {}): InheritedModel {
+  return {
+    owner_main: null,
+    system_main: { model_config_id: 'official', model: 'opus', effort: null },
+    system_main_profile_id: 'main',
+    ...overrides,
+  };
+}
 
 function mainProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -125,10 +170,15 @@ function mainProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
   };
 }
 
-function setStore(profile: AgentProfile, configs = CONFIGS) {
+function setStore(
+  profile: AgentProfile,
+  configs = CONFIGS,
+  inheritedModel: InheritedModel | null = inherited(),
+) {
   mocks.state = {
     profiles: [profile],
     modelConfigs: configs,
+    inheritedModel,
     loading: false,
     loadProfiles: mocks.loadProfiles,
     // The store's update is what the section saves through.
@@ -163,8 +213,9 @@ async function render() {
   });
 }
 
-const configSelect = () => combobox('主 HappyClaw 模型配置');
+const configSelect = () => combobox('主 HappyClaw 模型连接');
 const modelSelect = () => combobox('主 HappyClaw 模型');
+const effortSelect = () => combobox('主 HappyClaw 推理等级');
 
 async function optionsOf(select: HTMLButtonElement): Promise<string[]> {
   await act(async () => select.click());
@@ -179,22 +230,92 @@ async function optionsOf(select: HTMLButtonElement): Promise<string[]> {
   return texts;
 }
 
-async function save() {
-  const button = [...container.querySelectorAll('button')].find(
+const saveButton = () =>
+  [...container.querySelectorAll('button')].find(
     (item) => item.textContent === '保存模型与能力',
   );
+
+async function save() {
+  const button = saveButton();
   if (!button) throw new Error('save button not rendered');
   await act(async () => button.click());
 }
 
-describe('主 HappyClaw model within its configuration', () => {
-  test('picking a configuration, then a model, saves both', async () => {
+describe('the system main HappyClaw', () => {
+  test('follows nothing: no 跟随 option, 未设置 while empty, with a hint', async () => {
+    setStore(mainProfile());
+    await render();
+    expect(configSelect().textContent).toBe('未设置');
+    expect(container.textContent).toContain('还没有选择模型连接');
+    expect(await optionsOf(configSelect())).toEqual([
+      'Claude 官方 · opus',
+      'GLM · glm-5.3',
+    ]);
+    expect(modelSelect().disabled).toBe(true);
+    // Nothing known to set an effort on: only the model default.
+    expect(await optionsOf(effortSelect())).toEqual(['模型默认']);
+  });
+
+  test('a bound connection lists every model and drops the hint', async () => {
+    setStore(mainProfile({ model_config_id: 'official', model: 'haiku' }));
+    await render();
+    expect(container.textContent).not.toContain('还没有选择模型连接');
+    expect(modelSelect().textContent).toBe('haiku');
+    expect(await optionsOf(modelSelect())).toEqual([
+      '连接默认（opus）',
+      'sonnet',
+      'haiku',
+    ]);
+    expect(saveButton()?.disabled).toBe(true);
+  });
+});
+
+describe('a user main Agent', () => {
+  test('follows the system main HappyClaw, named with what it runs', async () => {
+    setStore(
+      mainProfile({ id: 'mine' }),
+      CONFIGS,
+      inherited({ system_main_profile_id: null }),
+    );
+    await render();
+    expect(configSelect().textContent).toBe(
+      '跟随主 HappyClaw（Claude 官方 · opus）',
+    );
+    expect(container.textContent).not.toContain('还没有选择模型连接');
+    expect((await optionsOf(configSelect()))[0]).toBe(
+      '跟随主 HappyClaw（Claude 官方 · opus）',
+    );
+    expect(modelSelect().disabled).toBe(true);
+    // The followed model's efforts, after its default.
+    expect(await optionsOf(effortSelect())).toEqual([
+      '模型默认（超高）',
+      '低',
+      '中',
+      '高',
+      '超高',
+      '最高',
+    ]);
+  });
+
+  test('reads 未设置 inside the label while the system has no binding', async () => {
+    setStore(
+      mainProfile({ id: 'mine' }),
+      CONFIGS,
+      inherited({ system_main: null, system_main_profile_id: null }),
+    );
+    await render();
+    expect(configSelect().textContent).toBe('跟随主 HappyClaw（未设置）');
+  });
+});
+
+describe('主 HappyClaw model within its connection', () => {
+  test('picking a connection, then a model, saves both', async () => {
     setStore(mainProfile());
     await render();
     await choose(configSelect(), 'GLM');
     expect(modelSelect().disabled).toBe(false);
     expect(await optionsOf(modelSelect())).toEqual([
-      '连接默认（glm-5.3[1m]）',
+      '连接默认（glm-5.3）',
       'glm-4.6',
     ]);
     await choose(modelSelect(), 'glm-4.6');
@@ -206,59 +327,80 @@ describe('主 HappyClaw model within its configuration', () => {
     expect(mocks.toastSuccess).toHaveBeenCalled();
   });
 
-  test('switching the configuration resets the model to its default', async () => {
+  test('switching the connection resets the model to its own', async () => {
     setStore(mainProfile({ model_config_id: 'official', model: 'sonnet' }));
     await render();
     expect(modelSelect().textContent).toContain('sonnet');
     await choose(configSelect(), 'GLM');
-    expect(modelSelect().textContent).toContain('连接默认（glm-5.3[1m]）');
+    expect(modelSelect().textContent).toContain('连接默认（glm-5.3）');
     await save();
     const body = mocks.patch.mock.calls[0][1];
     expect(body).toMatchObject({ model_config_id: 'glm', model: null });
   });
 
-  test('an automatic configuration leaves nothing to pick', async () => {
-    setStore(mainProfile());
+  test('the effort select lists only what the model takes', async () => {
+    setStore(mainProfile({ model_config_id: 'official', model: 'sonnet' }));
     await render();
-    expect(modelSelect().disabled).toBe(true);
-    expect(modelSelect().textContent).toContain('由模型配置决定');
-
-    await choose(configSelect(), 'Claude 官方 · opus');
-    await choose(modelSelect(), 'sonnet');
-    await choose(configSelect(), '跟随默认模型');
-    expect(modelSelect().disabled).toBe(true);
-    // Back where it started: nothing to save.
-    const button = [...container.querySelectorAll('button')].find(
-      (item) => item.textContent === '保存模型与能力',
-    );
-    expect(button?.disabled).toBe(true);
+    expect(await optionsOf(effortSelect())).toEqual([
+      '模型默认（高）',
+      '低',
+      '中',
+      '高',
+    ]);
+    await choose(modelSelect(), 'haiku');
+    expect(await optionsOf(effortSelect())).toEqual(['模型默认']);
   });
 
-  test('a binding to a hidden model shows it selected and lists the hidden ones', async () => {
-    setStore(mainProfile({ model_config_id: 'official', model: 'haiku' }));
-    await render();
-    expect(modelSelect().textContent).toContain('haiku（已隐藏）');
-    expect(await optionsOf(modelSelect())).toEqual([
-      '连接默认（opus）',
-      'sonnet',
-      'haiku（已隐藏）',
-    ]);
-    // Unchanged, so nothing to save.
-    const button = [...container.querySelectorAll('button')].find(
-      (item) => item.textContent === '保存模型与能力',
+  test('a model without the picked effort returns it to the model default', async () => {
+    setStore(
+      mainProfile({
+        model_config_id: 'official',
+        model: 'opus',
+        runtime_policy: {
+          ...mainProfile().runtime_policy,
+          reasoning: { effort: 'max' },
+        },
+      }),
     );
-    expect(button?.disabled).toBe(true);
+    await render();
+    expect(effortSelect().textContent).toBe('最高');
+    await choose(modelSelect(), 'sonnet');
+    expect(effortSelect().textContent).toBe('模型默认（高）');
+    // A level the next model takes is kept.
+    await choose(effortSelect(), '中');
+    await choose(modelSelect(), '连接默认（opus）');
+    expect(effortSelect().textContent).toBe('中');
+    await save();
+    expect(mocks.patch.mock.calls[0][1]).toMatchObject({
+      runtime_policy: { reasoning: { effort: 'medium' } },
+    });
+  });
+
+  test('a saved level the model does not list stays visible as saved', async () => {
+    setStore(
+      mainProfile({
+        model_config_id: 'official',
+        model: 'haiku',
+        runtime_policy: {
+          ...mainProfile().runtime_policy,
+          reasoning: { effort: 'high' },
+        },
+      }),
+    );
+    await render();
+    expect(effortSelect().textContent).toBe('高（当前模型不支持）');
+    expect(saveButton()?.disabled).toBe(true);
   });
 
   test('an unchanged model is not sent with another change', async () => {
     setStore(mainProfile({ model_config_id: 'official', model: 'sonnet' }));
     await render();
-    await choose(combobox('主 HappyClaw 推理努力档位'), '高');
+    await choose(effortSelect(), '中');
     await save();
     expect(mocks.patch.mock.calls[0][1]).not.toHaveProperty('model');
   });
 
-  test('a model the configuration no longer offers reads as such', async () => {
+  test('a model the connection no longer offers reads as such', async () => {
     setStore(mainProfile({ model_config_id: 'official' }));
     mocks.patch.mockRejectedValue({
       status: 400,
@@ -273,26 +415,7 @@ describe('主 HappyClaw model within its configuration', () => {
     );
   });
 
-  test('an older server without model lists shows no model select and sends no model', async () => {
-    setStore(
-      mainProfile(),
-      CONFIGS.map(({ models: _models, ...config }) => config),
-    );
-    await render();
-    expect(
-      container.querySelector(
-        '[role="combobox"][aria-label="主 HappyClaw 模型"]',
-      ),
-    ).toBeNull();
-    await choose(configSelect(), 'GLM');
-    await save();
-    expect(mocks.patch.mock.calls[0][1]).not.toHaveProperty('model');
-    expect(mocks.patch.mock.calls[0][1]).toMatchObject({
-      model_config_id: 'glm',
-    });
-  });
-
-  test('saving only the model leaves the stored host Skills alone', async () => {
+  test('saving only the connection leaves the stored host Skills alone', async () => {
     // An admin's main HappyClaw under host_claude runs with every host Skill.
     setStore(
       mainProfile({
@@ -313,7 +436,7 @@ describe('主 HappyClaw model within its configuration', () => {
   });
 
   test('host Skills of an older server follow the effective context source', async () => {
-    const legacy = mainProfile();
+    const legacy = mainProfile({ model_config_id: 'official' });
     delete legacy.runtime_policy.skills.host;
     setStore({
       ...legacy,
@@ -323,11 +446,11 @@ describe('主 HappyClaw model within its configuration', () => {
       },
     });
     await render();
-    await choose(combobox('主 HappyClaw 推理努力档位'), '高');
+    await choose(effortSelect(), '中');
     await save();
     expect(mocks.patch.mock.calls[0][1]).toMatchObject({
       runtime_policy: {
-        reasoning: { effort: 'high' },
+        reasoning: { effort: 'medium' },
         skills: { host: { mode: 'inherit', ids: [] } },
       },
     });

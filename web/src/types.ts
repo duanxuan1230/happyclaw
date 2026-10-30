@@ -92,19 +92,45 @@ export interface AgentProfile {
   updated_at: string;
 }
 
+/** One model of a connection, with what the picker and forms need of it. */
+export interface ModelConfigModel {
+  id: string;
+  /** Reasoning efforts it takes, low to high; empty when none. */
+  efforts: Exclude<AgentEffortLevel, 'inherit'>[];
+  /** What it runs at when no effort is picked; null when it takes none. */
+  defaultEffort: Exclude<AgentEffortLevel, 'inherit'> | null;
+  contextWindow: number | null;
+  effortsSource?: 'declared' | 'registry' | 'family' | 'none';
+}
+
 export interface ModelConfigOption {
   id: string;
   name: string;
   type: 'official' | 'third_party';
-  enabled: boolean;
-  anthropic_model: string;
-  /** The global default: what an Agent without a binding follows. */
-  is_default?: boolean;
-  /**
-   * The models an Agent may pin within this configuration, its default
-   * included (ChatGPT: the catalog). Older servers do not send it.
-   */
-  models?: Array<{ id: string; hidden: boolean }>;
+  /** The connection's own model: what a binding without a model runs. */
+  model: string;
+  /** False when the connection holds no credential and would fail. */
+  usable?: boolean;
+  /** Every model an Agent may pin within this connection, its own included. */
+  models: ModelConfigModel[];
+}
+
+/** A binding an Agent can follow: who supplies the connection and model. */
+export interface InheritedModelBinding {
+  model_config_id: string;
+  model: string | null;
+  effort: Exclude<AgentEffortLevel, 'inherit'> | null;
+}
+
+/**
+ * What an Agent without its own binding follows, for the caller: their own
+ * main Agent, and the system's main HappyClaw.
+ */
+export interface InheritedModel {
+  owner_main: InheritedModelBinding | null;
+  system_main: InheritedModelBinding | null;
+  /** The system main HappyClaw profile when the caller owns it, else null. */
+  system_main_profile_id: string | null;
 }
 
 export type AgentProfilePromptMode = 'append' | 'replace';
@@ -254,10 +280,9 @@ export interface AgentModelResolution {
   source:
     | 'session'
     | 'agent'
-    | 'default'
-    | 'single'
+    | 'owner_main'
+    | 'system_main'
     | 'workspace_env'
-    | 'pool'
     | 'none';
   model_config_id: string | null;
   model_config_name: string | null;

@@ -214,6 +214,7 @@ export function AgentProfilesPage() {
   const {
     profiles,
     modelConfigs = [],
+    inheritedModel = null,
     loading,
     profilesError,
     loadProfiles,
@@ -1354,15 +1355,19 @@ export function AgentProfilesPage() {
                 id="agent-capabilities"
                 className="scroll-mt-20"
                 title="能力配置"
-                description="模型、推理档位和按来源配置的 Skills 与 MCP。HappyClaw、宿主机与工作区能力会在运行时叠加；同名项以“最终生效能力”中的结果为准。"
+                description="模型、推理等级和按来源配置的 Skills 与 MCP。HappyClaw、宿主机与工作区能力会在运行时叠加；同名项以“最终生效能力”中的结果为准。"
               >
                 <AgentCapabilityForm
                   value={capabilities}
                   onChange={setCapabilities}
                   modelConfigs={modelConfigs}
+                  inheritedModel={inheritedModel}
+                  // The page lists custom Agents only: they follow their
+                  // owner's main Agent.
+                  follow="owner_main"
                   hostAvailable={isAdmin}
                   labelPrefix="智能体"
-                  modelConfigDescription="该智能体所属的所有工作区、会话和自动化都会使用这里解析出的完整模型网关环境。未启用的配置不会参与系统自动选择，但仍可由智能体显式使用。"
+                  modelConfigDescription="该智能体所属的所有工作区、会话和自动化都会使用这里解析出的完整模型网关环境。"
                 />
                 <SettingsGroup>
                   {isAdmin && (

@@ -1,14 +1,17 @@
 import { Badge } from '@/components/ui/badge';
 import type { AgentModelResolution } from '@/types';
 
-const SOURCE_LABELS: Record<AgentModelResolution['source'], string> = {
+const SOURCE_LABELS: Record<string, string> = {
   session: '会话手选',
   agent: '智能体绑定',
+  owner_main: '跟随主智能体',
+  system_main: '跟随主 HappyClaw',
+  workspace_env: '工作区环境变量',
+  none: '未设置模型',
+  // Older servers: the global default and the automatic pool.
   default: '全局默认',
   single: '唯一启用',
-  workspace_env: '工作区环境变量',
   pool: '自动池',
-  none: '无可用配置',
 };
 
 /**
@@ -39,16 +42,13 @@ function describe(resolution: AgentModelResolution): string {
   if (resolution.source === 'workspace_env') {
     return '使用工作区自带的 Provider 环境变量';
   }
-  if (resolution.source === 'pool') {
-    return '每轮从已启用的模型配置中自动选择';
-  }
-  return '没有启用的模型配置，无法运行';
+  return '没有可用的模型连接，无法运行';
 }
 
 /**
  * The connection and model a run of this Agent uses and which step of the
- * order chose it: conversation pick, Agent binding, global default, the only
- * enabled configuration, or the automatic pool.
+ * order chose it: conversation pick, the Agent's own binding, the workspace
+ * env, the owner's main Agent or the system main HappyClaw.
  */
 export function ModelResolutionRow({
   resolution,

@@ -9,16 +9,11 @@ import type { ModelConfigOption } from '../../types';
 
 const DEFAULT_MODEL_VALUE = '__default__';
 
-/** Whether the server lists the models an Agent may pin; older ones do not. */
-export function hasModelLists(configs: ModelConfigOption[]): boolean {
-  return configs.some((config) => Array.isArray(config.models));
-}
-
 /**
- * The (configuration, model) fields a save of an Agent changes. A pinned
- * model always travels with its configuration, which the server checks it
- * against; an unchanged model is left out, so an older server never sees it.
- * Nothing is pinned while the configuration is automatic (`configId` null).
+ * The (connection, model) fields a save of an Agent changes. A pinned model
+ * always travels with its connection, which the server checks it against;
+ * an unchanged model is left out. Nothing is pinned while the Agent follows
+ * another one (`configId` null).
  */
 export function modelBindingChanges(
   saved: { model_config_id: string | null; model?: string | null },
@@ -37,10 +32,9 @@ export function modelBindingChanges(
 }
 
 /**
- * The model an Agent runs within its configuration: the configuration's
- * default (null) or one of its models. Hidden models stay listed, since a
- * binding may name them, and a bound model the list lacks stays so the select
- * shows what is saved. Nothing to pick while the configuration is automatic.
+ * The model an Agent runs within its connection: the connection's own (null)
+ * or any of its models. A bound model the list lacks stays so the select
+ * shows what is saved. Nothing to pick while the Agent follows another one.
  */
 export function AgentModelSelect({
   configs,
@@ -51,7 +45,7 @@ export function AgentModelSelect({
   className,
 }: {
   configs: ModelConfigOption[];
-  /** 'inherit' while the configuration is chosen automatically. */
+  /** 'inherit' while the Agent follows another one. */
   configId: string;
   value: string | null;
   onChange: (model: string | null) => void;
@@ -62,9 +56,9 @@ export function AgentModelSelect({
     configId === 'inherit'
       ? undefined
       : configs.find((item) => item.id === configId);
-  const defaultModel = config?.anthropic_model ?? '';
+  const defaultModel = config?.model ?? '';
   const models = config?.models ?? [];
-  // The first option already stands for the default model.
+  // The first option already stands for the connection's own model.
   const listed = models.filter(
     (model) => model.id !== defaultModel || model.id === value,
   );
@@ -84,7 +78,7 @@ export function AgentModelSelect({
         <SelectItem value={DEFAULT_MODEL_VALUE}>
           {config
             ? `连接默认（${defaultModel || '由中转站决定'}）`
-            : '由模型配置决定'}
+            : '随跟随的智能体'}
         </SelectItem>
         {missing && value && (
           <SelectItem value={value}>{value}（不在模型列表里）</SelectItem>
@@ -92,7 +86,6 @@ export function AgentModelSelect({
         {listed.map((model) => (
           <SelectItem key={model.id} value={model.id}>
             {model.id}
-            {model.hidden ? '（已隐藏）' : ''}
           </SelectItem>
         ))}
       </SelectContent>

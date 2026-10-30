@@ -9,20 +9,22 @@ import {
 import { SettingsGroup } from '@/components/settings/SettingsLayout';
 import {
   AgentModelSelect,
-  hasModelLists,
   modelBindingChanges,
 } from '@/components/settings/AgentModelSelect';
+import { effortLabel } from '@/components/settings/model-connections';
 import { useMcpServersStore } from '@/stores/mcp-servers';
 import { useSkillsStore } from '@/stores/skills';
 import type {
   AgentEffortLevel,
   AgentProfile,
   AgentProfileRuntimePolicy,
+  InheritedModel,
+  InheritedModelBinding,
+  ModelConfigModel,
   ModelConfigOption,
 } from '@/types';
 import { normalizeMcpPolicyReferences } from '@/utils/mcp-servers';
 import {
-  AGENT_EFFORT_OPTIONS,
   buildHostSkillOptions,
   buildManagedSkillOptions,
   buildMcpSelectionOptions,
@@ -42,9 +44,9 @@ import { PolicyResourcePicker } from './PolicyResourcePicker';
  * same way, only when the user presses save.
  */
 export interface AgentCapabilityFormValue {
-  /** 'inherit' while the configuration is chosen automatically. */
+  /** 'inherit' while the Agent follows another one (see ModelFollow). */
   modelConfigId: string;
-  /** The model within that configuration; null runs its default. */
+  /** The model within that connection; null runs its own model. */
   model: string | null;
   effort: AgentEffortLevel;
   skills: SkillSourcePolicy;
@@ -141,10 +143,98 @@ export function sameCapabilityForm(
   );
 }
 
+/**
+ * What an Agent without its own binding follows: an ordinary Agent its
+ * owner's main Agent, a user's main Agent the system's main HappyClaw. The
+ * system main HappyClaw itself follows nothing (null).
+ */
+export type ModelFollow = 'owner_main' | 'system_main' | null;
+
+export function modelFollowFor(
+  profile: Pick<AgentProfile, 'id' | 'is_default'>,
+  inherited: InheritedModel | null,
+): ModelFollow {
+  if (!profile.is_default) return 'owner_main';
+  return profile.id === inherited?.system_main_profile_id
+    ? null
+    : 'system_main';
+}
+
+/** The binding a following Agent runs on; a main Agent without one follows the system's. */
+function followedBinding(
+  follow: ModelFollow,
+  inherited: InheritedModel | null,
+): InheritedModelBinding | null {
+  if (!follow || !inherited) return null;
+  return follow === 'owner_main'
+    ? (inherited.owner_main ?? inherited.system_main)
+    : inherited.system_main;
+}
+
+/** 「连接 · 模型」 for a binding, or null when its connection is gone. */
+function bindingLabel(
+  configs: ModelConfigOption[],
+  configId: string,
+  model: string | null,
+): string | null {
+  const config = configs.find((item) => item.id === configId);
+  if (!config) return null;
+  const runs = model || config.model;
+  return runs ? `${config.name} · ${runs}` : config.name;
+}
+
+/** The option that follows another Agent, with what it currently runs. */
+function followOptionLabel(
+  follow: Exclude<ModelFollow, null>,
+  configs: ModelConfigOption[],
+  inherited: InheritedModel | null,
+): string {
+  const binding = followedBinding(follow, inherited);
+  const runs = binding
+    ? bindingLabel(configs, binding.model_config_id, binding.model)
+    : null;
+  const name = follow === 'owner_main' ? '跟随主智能体' : '跟随主 HappyClaw';
+  return `${name}（${runs ?? '未设置'}）`;
+}
+
+/**
+ * The model a run of the form's binding uses, with what it is known to take:
+ * its own binding, else the one it follows. Null when nothing is known.
+ */
+function boundModelEntry(
+  value: Pick<AgentCapabilityFormValue, 'modelConfigId' | 'model'>,
+  configs: ModelConfigOption[],
+  follow: ModelFollow,
+  inherited: InheritedModel | null,
+): ModelConfigModel | null {
+  const own = value.modelConfigId !== 'inherit';
+  const binding = own ? null : followedBinding(follow, inherited);
+  const configId = own ? value.modelConfigId : binding?.model_config_id;
+  const config = configs.find((item) => item.id === configId);
+  if (!config) return null;
+  const model = (own ? value.model : binding?.model) || config.model;
+  return config.models.find((item) => item.id === model) ?? null;
+}
+
+/**
+ * A binding change keeps the picked effort only if the new model takes it;
+ * otherwise the Agent returns to the model's default. A model nothing is
+ * known about keeps it, and the server decides.
+ */
+function keepSupportedEffort(
+  effort: AgentEffortLevel,
+  entry: ModelConfigModel | null,
+): AgentEffortLevel {
+  if (effort === 'inherit' || !entry) return effort;
+  return entry.efforts.includes(effort) ? effort : 'inherit';
+}
+
 export function AgentCapabilityForm({
   value,
   onChange,
   modelConfigs,
+  inheritedModel,
+  follow,
   hostAvailable,
   labelPrefix,
   modelConfigDescription,
@@ -152,6 +242,10 @@ export function AgentCapabilityForm({
   value: AgentCapabilityFormValue;
   onChange: (next: AgentCapabilityFormValue) => void;
   modelConfigs: ModelConfigOption[];
+  /** What this Agent would follow without a binding of its own. */
+  inheritedModel: InheritedModel | null;
+  /** What it follows; null for the system main HappyClaw (see modelFollowFor). */
+  follow: ModelFollow;
   /** Host Skills can only be granted by an admin. */
   hostAvailable: boolean;
   /** Names the controls, e.g. "智能体" or "主 HappyClaw ". */
@@ -180,67 +274,93 @@ export function AgentCapabilityForm({
   const errors = capabilityFormErrors(value);
   const update = (patch: Partial<AgentCapabilityFormValue>) =>
     onChange({ ...value, ...patch });
-  const defaultModel = modelConfigs.find((item) => item.is_default);
-  const enabledCount = modelConfigs.filter((item) => item.enabled).length;
+  // A new connection or model keeps only an effort that model takes.
+  const rebind = (
+    binding: Pick<AgentCapabilityFormValue, 'modelConfigId' | 'model'>,
+  ) =>
+    update({
+      ...binding,
+      effort: keepSupportedEffort(
+        value.effort,
+        boundModelEntry(binding, modelConfigs, follow, inheritedModel),
+      ),
+    });
+  const entry = boundModelEntry(value, modelConfigs, follow, inheritedModel);
+  const efforts = entry?.efforts ?? [];
+  // A saved level the model does not list stays visible as what is saved.
+  const unsupportedEffort =
+    value.effort !== 'inherit' && !efforts.includes(value.effort)
+      ? value.effort
+      : null;
+  const unset = !follow && value.modelConfigId === 'inherit';
 
   return (
     <div className="space-y-6">
       <SettingsGroup>
         <AgentControlRow
-          label="模型配置"
-          description={modelConfigDescription}
+          label="模型连接"
+          description={
+            <>
+              {modelConfigDescription}
+              {unset && (
+                <span className="mt-1 block text-warning">
+                  还没有选择模型连接；选择一个连接，或先在 设置 → 模型
+                  添加模型。
+                </span>
+              )}
+            </>
+          }
           control={
             <Select
-              value={value.modelConfigId}
-              // A model belongs to its configuration.
+              // '' shows 未设置 when there is nothing to follow.
+              value={unset ? '' : value.modelConfigId}
+              // A model belongs to its connection.
               onValueChange={(next) =>
-                update({ modelConfigId: next, model: null })
+                rebind({ modelConfigId: next, model: null })
               }
             >
               <SelectTrigger
-                aria-label={`${labelPrefix}模型配置`}
+                aria-label={`${labelPrefix}模型连接`}
                 className="w-full"
               >
-                <SelectValue placeholder="选择模型配置" />
+                <SelectValue placeholder={follow ? '选择模型连接' : '未设置'} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="inherit">
-                  {defaultModel
-                    ? `跟随默认模型（${defaultModel.name}）`
-                    : `自动选择已启用模型（当前 ${enabledCount} 个）`}
-                </SelectItem>
+                {follow && (
+                  <SelectItem value="inherit">
+                    {followOptionLabel(follow, modelConfigs, inheritedModel)}
+                  </SelectItem>
+                )}
                 {modelConfigs.map((config) => (
                   <SelectItem key={config.id} value={config.id}>
                     {config.name}
-                    {config.anthropic_model
-                      ? ` · ${config.anthropic_model}`
-                      : ''}
-                    {!config.enabled ? '（仅显式使用）' : ''}
+                    {config.model ? ` · ${config.model}` : ''}
+                    {config.usable === false ? '（缺少凭据）' : ''}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           }
         />
-        {hasModelLists(modelConfigs) && (
-          <AgentControlRow
-            label="模型"
-            description="在所选模型配置里选择模型；连接默认跟随该配置设为默认的模型。自动选择模型配置时无法指定。"
-            control={
-              <AgentModelSelect
-                configs={modelConfigs}
-                configId={value.modelConfigId}
-                value={value.model}
-                onChange={(model) => update({ model })}
-                ariaLabel={`${labelPrefix}模型`}
-                className="w-full"
-              />
-            }
-          />
-        )}
         <AgentControlRow
-          label="推理努力档位"
-          description="“跟随模型配置”保留 Provider 高级设置中的 CLAUDE_CODE_EFFORT_LEVEL 或 SDK 默认值；显式档位会覆盖它。模型不支持所选档位时由 Claude 静默降级。"
+          label="模型"
+          description="在所选连接里选择模型；连接默认是添加连接时的首个模型。跟随其他智能体时随它的选择。"
+          control={
+            <AgentModelSelect
+              configs={modelConfigs}
+              configId={value.modelConfigId}
+              value={value.model}
+              onChange={(model) =>
+                rebind({ modelConfigId: value.modelConfigId, model })
+              }
+              ariaLabel={`${labelPrefix}模型`}
+              className="w-full"
+            />
+          }
+        />
+        <AgentControlRow
+          label="推理等级"
+          description="模型默认使用该模型自己的默认等级；只列出所选模型支持的等级。"
           control={
             <Select
               value={value.effort}
@@ -249,15 +369,26 @@ export function AgentCapabilityForm({
               }
             >
               <SelectTrigger
-                aria-label={`${labelPrefix}推理努力档位`}
+                aria-label={`${labelPrefix}推理等级`}
                 className="w-full"
               >
-                <SelectValue placeholder="选择推理努力档位" />
+                <SelectValue placeholder="选择推理等级" />
               </SelectTrigger>
               <SelectContent>
-                {AGENT_EFFORT_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
+                <SelectItem value="inherit">
+                  {entry?.defaultEffort
+                    ? `模型默认（${effortLabel(entry.defaultEffort)}）`
+                    : '模型默认'}
+                </SelectItem>
+                {unsupportedEffort && (
+                  <SelectItem value={unsupportedEffort}>
+                    {effortLabel(unsupportedEffort)}
+                    {entry ? '（当前模型不支持）' : ''}
+                  </SelectItem>
+                )}
+                {efforts.map((effort) => (
+                  <SelectItem key={effort} value={effort}>
+                    {effortLabel(effort)}
                   </SelectItem>
                 ))}
               </SelectContent>
