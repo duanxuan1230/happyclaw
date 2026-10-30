@@ -27,7 +27,8 @@ import {
   ConversationStarters,
   EmptyConversationHeading,
 } from './composer/EmptyConversation';
-import { MessageInput, type MessageInputHandle } from './MessageInput';
+import { MessageInput } from './LazyMessageInput';
+import type { MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
 import { SharedWorkdirNotice, useWorkdirPeers } from './SharedWorkdirNotice';
 import { WorktreeBranchTag } from './WorktreeBranchTag';

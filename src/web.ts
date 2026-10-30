@@ -9,6 +9,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'crypto';
 import { TerminalManager } from './terminal-manager.js';
 import { resolveFeishuCliBoundAccountId } from './feishu-cli-runtime.js';
+import {
+  getWebMessageDedup,
+  recordWebMessageDedup,
+} from './runtime-state-store.js';
 
 // Web context and shared utilities
 import {
@@ -503,38 +507,146 @@ app.post('/api/messages', authMiddleware, async (c) => {
     }
   }
 
-  if (agentId) {
-    const result = await handleAgentConversationMessage(
-      chatJid,
-      agentId,
-      content.trim(),
-      authUser.id,
-      authUser.display_name || authUser.username,
-      attachments,
-      followUpBehavior,
-    );
-    if (!result.ok) return c.json({ error: result.error }, result.status);
-    return c.json({ success: true, ...result });
+  const trimmedContent = content.trim();
+  const send = async (): Promise<WebSendOutcome> => {
+    const displayName = authUser.display_name || authUser.username;
+    const result = agentId
+      ? await handleAgentConversationMessage(
+          chatJid,
+          agentId,
+          trimmedContent,
+          authUser.id,
+          displayName,
+          attachments,
+          followUpBehavior,
+        )
+      : await handleWebUserMessage(
+          chatJid,
+          trimmedContent,
+          attachments,
+          authUser.id,
+          displayName,
+          followUpBehavior,
+        );
+    if (!result.ok) {
+      return { status: result.status, body: { error: result.error } };
+    }
+    const { ok: _ok, ...accepted } = result;
+    return { status: 200, body: { success: true, ...accepted } };
+  };
+
+  const { clientMessageId } = validation.data;
+  const outcome = clientMessageId
+    ? await sendOnce(
+        {
+          userId: authUser.id,
+          chatJid,
+          clientMessageId,
+          fingerprint: webSendFingerprint(agentId, trimmedContent, attachments),
+        },
+        send,
+      )
+    : await send();
+  return c.json(outcome.body, outcome.status);
+});
+
+type WebSendOutcome = {
+  status: 200 | 404 | 409 | 500;
+  body: Record<string, unknown>;
+};
+
+/** Sends being processed, by idempotency key; a concurrent resend joins it. */
+const inFlightWebSends = new Map<
+  string,
+  { fingerprint: string; done: Promise<unknown> }
+>();
+
+/** What a resend must repeat to count as the same send. */
+function webSendFingerprint(
+  agentId: string | undefined,
+  content: string,
+  attachments: Array<{ data: string; mimeType?: string }> | undefined,
+): string {
+  // Field by field with length prefixes: unambiguous, and the (possibly
+  // tens of MB of) attachment data is hashed without being copied.
+  const hash = crypto.createHash('sha256');
+  const field = (value: string) =>
+    hash.update(`${value.length}:`).update(value);
+  field(agentId ?? '');
+  field(content);
+  for (const att of attachments ?? []) {
+    field(att.mimeType ?? '');
+    field(att.data);
+  }
+  return hash.digest('hex');
+}
+
+const DEDUP_CONFLICT: WebSendOutcome = {
+  status: 409,
+  body: { error: 'clientMessageId was already used for a different message' },
+};
+
+/**
+ * Run `send` at most once per (user, chat, clientMessageId). A resend of an
+ * accepted send gets the first answer back without storing or queueing
+ * anything; one that arrives while the first is still running waits for it.
+ * Only an accepted send is remembered, so a resend after a failure is
+ * processed normally. Callers check access before this: the key alone never
+ * reveals another user's answer, because the user is part of it.
+ */
+async function sendOnce(
+  key: {
+    userId: string;
+    chatJid: string;
+    clientMessageId: string;
+    fingerprint: string;
+  },
+  send: () => Promise<WebSendOutcome>,
+): Promise<WebSendOutcome> {
+  const { userId, chatJid, clientMessageId, fingerprint } = key;
+  const mapKey = JSON.stringify([userId, chatJid, clientMessageId]);
+  for (;;) {
+    const inFlight = inFlightWebSends.get(mapKey);
+    if (!inFlight) break;
+    if (inFlight.fingerprint !== fingerprint) return DEDUP_CONFLICT;
+    // Whatever the first attempt did, look again: it either left a record
+    // to answer from or failed, and then this resend is processed.
+    await inFlight.done.catch(() => undefined);
+  }
+  const stored = getWebMessageDedup(userId, chatJid, clientMessageId);
+  if (stored) {
+    if (stored.fingerprint !== fingerprint) return DEDUP_CONFLICT;
+    return { status: 200, body: { ...stored.response, deduplicated: true } };
   }
 
-  const result = await handleWebUserMessage(
-    chatJid,
-    content.trim(),
-    attachments,
-    authUser.id,
-    authUser.display_name || authUser.username,
-    followUpBehavior,
-  );
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({
-    success: true,
-    messageId: result.messageId,
-    timestamp: result.timestamp,
-    ingestSequence: result.ingestSequence,
-    disposition: result.disposition,
-    runId: result.runId,
-  });
-});
+  // Registered before the first await, so no concurrent resend can slip in.
+  const done = send();
+  inFlightWebSends.set(mapKey, { fingerprint, done });
+  try {
+    const outcome = await done;
+    if (outcome.status === 200) {
+      try {
+        recordWebMessageDedup({
+          userId,
+          chatJid,
+          clientMessageId,
+          fingerprint,
+          response: outcome.body,
+        });
+      } catch (err) {
+        // The message is stored; failing the request now would only make
+        // the client resend it.
+        logger.warn(
+          { chatJid, clientMessageId, err },
+          'Failed to record Web send idempotency key',
+        );
+      }
+    }
+    return outcome;
+  } finally {
+    inFlightWebSends.delete(mapKey);
+  }
+}
 
 app.get('/api/follow-ups', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);

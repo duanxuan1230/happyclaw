@@ -43,7 +43,7 @@ const buttonVariants = cva(
       // one, so neither steals taps from the other's face. `hitSlop={false}`
       // is for dense rows where the area would cover neighbours.
       hitSlop: {
-        true: 'phone:after:absolute phone:after:inset-x-[min(0px,calc(50%-22px))] phone:after:inset-y-[min(0px,calc(50%-22px))] phone:[[data-size][data-variant]+&]:after:left-0',
+        true: 'phone:after:absolute phone:after:inset-x-[min(0px,calc(50%-22px))] phone:after:inset-y-[min(0px,calc(50%-22px))] phone:[[data-size][data-variant]:not([class~="phone:hidden"],.hidden)+&]:after:left-0',
         false: '',
       },
     },

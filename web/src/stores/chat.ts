@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { api, computeUploadTimeoutMs } from '../api/client';
+import { randomUuid } from '../utils/random-uuid';
+import { sessionJidOf } from '../lib/session-jid';
 import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import {
@@ -359,6 +361,51 @@ type MessageCreateResponse =
   | { success: false };
 const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
   d.success === true && d.cleared === true;
+
+type SendAttachment = { data: string; mimeType: string };
+
+/**
+ * Each conversation's last unconfirmed send. Resending the same message
+ * reuses its idempotency key, so the server answers from the first attempt.
+ */
+const unconfirmedSends = new Map<
+  string,
+  { content: string; attachments: SendAttachment[]; id: string }
+>();
+
+function clientMessageIdFor(
+  target: string,
+  content: string,
+  attachments: SendAttachment[] = [],
+): string {
+  const previous = unconfirmedSends.get(target);
+  if (
+    previous &&
+    previous.content === content &&
+    previous.attachments.length === attachments.length &&
+    previous.attachments.every(
+      (att, i) =>
+        att.data === attachments[i].data &&
+        att.mimeType === attachments[i].mimeType,
+    )
+  ) {
+    return previous.id;
+  }
+  const id = randomUuid();
+  unconfirmedSends.set(target, { content, attachments, id });
+  return id;
+}
+
+/** No answer, or a proxy's: the send may have been stored anyway. */
+function sendMayHaveLanded(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  return (
+    status === 0 ||
+    (typeof status === 'number' && [408, 502, 503, 504].includes(status))
+  );
+}
+
+const UNCONFIRMED_SEND_HINT = '网络较慢，消息可能已发送；重发不会重复';
 
 export interface StreamingState {
   turnId?: string;
@@ -3656,7 +3703,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         content: string;
         attachments?: Array<{ type: 'image'; data: string; mimeType: string }>;
         followUpBehavior: FollowUpMode;
-      } = { chatJid: jid, content, followUpBehavior };
+        clientMessageId: string;
+      } = {
+        chatJid: jid,
+        content,
+        followUpBehavior,
+        clientMessageId: clientMessageIdFor(jid, content, attachments),
+      };
       if (attachments && attachments.length > 0) {
         body.attachments = attachments.map((att) => ({
           type: 'image',
@@ -3669,6 +3722,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body,
         attachmentTimeoutMs(body.attachments),
       );
+      unconfirmedSends.delete(jid);
       if (!data.success) {
         // Server returned non-success payload — surface as a send failure so caller can retain input.
         const msg = '服务器返回失败，请重试';
@@ -3749,7 +3803,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 返回 false 让调用方（MessageInput）保留输入不清空。
       const message = extractErrorMessage(err);
       set({ error: message });
-      showToast('发送失败', '消息未发送，输入已保留，请检查网络后重试');
+      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(jid);
+      showToast(
+        '发送失败',
+        sendMayHaveLanded(err)
+          ? `${UNCONFIRMED_SEND_HINT}，输入已保留`
+          : '消息未发送，输入已保留，请检查网络后重试',
+      );
       return false;
     }
   },
@@ -5074,7 +5134,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         event.taskSummary,
       );
 
-      // Toast + 浏览器通知（仅限后台任务）
+      set((s) => {
+        const current = s.streaming[chatJid];
+        if (!current || current.interrupted) return s;
+        const prev = resolveStreamingPrev(current, event);
+        const next = { ...prev };
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
+        return {
+          streaming: { ...s.streaming, [chatJid]: next },
+        };
+      });
+
+      // Toast + 浏览器通知（仅限后台任务）。放在 set() 之后，状态更新不依赖
+      // 通知能否发出（notifyIfHidden 自己也会吞掉 Android 的构造异常）。
       // stream-processor 为前台 Task 合成的 task_notification 不带 isBackground 标记，
       // 仅 SDK 原生的后台完成事件携带 isBackground: true。
       if (
@@ -5093,23 +5171,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         notifyIfHidden(`HappyClaw: ${desc} ${status}`, event.taskSummary);
       }
-
-      set((s) => {
-        const current = s.streaming[chatJid];
-        if (!current || current.interrupted) return s;
-        const prev = resolveStreamingPrev(current, event);
-        const next = { ...prev };
-        applyStreamEvent(
-          event,
-          prev,
-          next,
-          MAX_STREAMING_TEXT,
-          runStartedAtMs(s.activeRuns, runtimeJid),
-        );
-        return {
-          streaming: { ...s.streaming, [chatJid]: next },
-        };
-      });
 
       // 不落入主对话 streaming
       return;
@@ -6118,6 +6179,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments && attachments.length > 0
         ? attachments.map((att) => ({ type: 'image' as const, ...att }))
         : undefined;
+    const runtimeJid = sessionJidOf(jid, agentId);
     try {
       // Conversation sends use the acknowledged HTTP path, just like the
       // main chat. WebSocket remains the push channel for the stored message
@@ -6131,18 +6193,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
           content,
           attachments: normalizedAttachments,
           followUpBehavior,
+          clientMessageId: clientMessageIdFor(runtimeJid, content, attachments),
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
+      unconfirmedSends.delete(runtimeJid);
       // /clear and /fresh were handled by the server: no message was stored
       // and no reply is coming, so the session must not wait for one.
       if (isClearedResponse(data)) return true;
       if (!data.success) throw new Error('服务器返回失败');
       if (data.disposition === 'started' && data.runId) {
-        get().handleRunStarted(`${jid}#agent:${agentId}`, data.runId);
+        get().handleRunStarted(runtimeJid, data.runId);
       }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : '服务器未确认消息';
+      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(runtimeJid);
+      const detail = sendMayHaveLanded(err)
+        ? UNCONFIRMED_SEND_HINT
+        : err instanceof Error
+          ? err.message
+          : '服务器未确认消息';
       showToast('发送失败', `${detail}，输入已保留，请稍后重试`);
       return false;
     }

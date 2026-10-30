@@ -91,6 +91,20 @@ function Harness() {
           data-testid="right"
         />
       </div>
+      <div className="flex gap-1 pl-12">
+        <IconButton
+          label="隐藏"
+          icon={<Plus />}
+          hideTooltip
+          className="phone:hidden"
+        />
+        <IconButton
+          label="后"
+          icon={<Plus />}
+          hideTooltip
+          data-testid="after-hidden"
+        />
+      </div>
       <div className="relative h-16 w-40 border border-surface-border">
         <Button
           size="icon-sm"
