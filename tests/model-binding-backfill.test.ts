@@ -49,6 +49,7 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => ({
 const db = await import('../src/db.js');
 const {
   MODEL_BINDING_BACKFILL_KEY,
+  bindSystemMainIfUnbound,
   backfillSystemMainModelBinding,
   installSystemMainModelConfigResolver,
 } = await import('../src/model-binding-backfill.js');
@@ -111,6 +112,9 @@ describe('backfillSystemMainModelBinding', () => {
     mocks.providers = [provider('A')];
     expect(backfillSystemMainModelBinding()).toEqual({ status: 'no_admin' });
     expect(mocks.cleared).toBe(0);
+    // Not done: a fresh install runs it again once there is someone to bind.
+    expect(db.getRouterState(MODEL_BINDING_BACKFILL_KEY)).toBeFalsy();
+    expect(bindSystemMainIfUnbound('A')).toBe(false);
   });
 
   test('binds the legacy default and its model, once', () => {
@@ -174,6 +178,28 @@ describe('backfillSystemMainModelBinding', () => {
     });
     expect(mainOf('user-1').model_config_id).toBeNull();
     expect(mocks.cleared).toBe(0);
+    expect(db.getRouterState(MODEL_BINDING_BACKFILL_KEY)).toBeFalsy();
+  });
+
+  test('the first connection of an install binds an unbound system main', () => {
+    mocks.providers = [
+      provider('A', { anthropicAuthToken: '' }),
+      provider('B'),
+    ];
+    // Without a credential it cannot run: not bound.
+    expect(bindSystemMainIfUnbound('A')).toBe(false);
+    expect(bindSystemMainIfUnbound('B')).toBe(true);
+    expect(mainOf('user-1')).toMatchObject({
+      model_config_id: 'B',
+      model: 'B-model',
+    });
+    // A bound system main is left alone.
+    mocks.providers.push(provider('C'));
+    expect(bindSystemMainIfUnbound('C')).toBe(false);
+    expect(mainOf('user-1').model_config_id).toBe('B');
+    db.updateAgentProfile(mainOf('user-1').id, 'user-1', {
+      modelConfigId: null,
+    });
   });
 
   test('runs once per release, and again only while a legacy pointer remains', () => {

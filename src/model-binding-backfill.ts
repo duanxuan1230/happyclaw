@@ -71,8 +71,49 @@ export function backfillSystemMainModelBinding(): ModelBindingBackfillResult {
     return { status: 'skipped' };
   }
   const result = bindSystemMain(legacy);
-  setRouterState(MODEL_BINDING_BACKFILL_KEY, '1');
+  // Done only once the system main is bound: on a fresh install there is no
+  // admin or connection yet, and the first connection binds it instead
+  // (bindSystemMainIfUnbound).
+  if (result.status === 'bound' || result.status === 'already_bound') {
+    setRouterState(MODEL_BINDING_BACKFILL_KEY, '1');
+  }
   return result;
+}
+
+/**
+ * The model of `provider` a binding names: its own when it lists it, else
+ * none (the connection's own runs).
+ */
+function listedOwnModel(provider: UnifiedProvider): string | null {
+  return listConnectionModels(provider).some(
+    (entry) => entry.id === provider.anthropicModel,
+  )
+    ? provider.anthropicModel
+    : null;
+}
+
+/**
+ * Bind the system main HappyClaw to a connection just created, when it binds
+ * none yet, so the first connection of an install is what runs. Returns
+ * whether it bound.
+ */
+export function bindSystemMainIfUnbound(connectionId: string): boolean {
+  const adminId = getSystemMainAdminUserId();
+  if (!adminId) return false;
+  const profile = getOrCreateDefaultAgentProfile(adminId);
+  if (profile.model_config_id) return false;
+  const provider = getProviders().find((item) => item.id === connectionId);
+  if (!provider || !providerHasCredentials(provider)) return false;
+  const model = listedOwnModel(provider);
+  updateAgentProfile(profile.id, adminId, {
+    modelConfigId: provider.id,
+    model,
+  });
+  logger.info(
+    { profileId: profile.id, modelConfigId: provider.id, model },
+    'Bound the system main HappyClaw to the first model connection',
+  );
+  return true;
 }
 
 function bindSystemMain(
@@ -88,12 +129,7 @@ function bindSystemMain(
   }
   const provider = pickLegacyConnection(legacy);
   if (!provider) return { status: 'no_connection' };
-  // Only a model the connection offers; otherwise its own model runs.
-  const model = listConnectionModels(provider).some(
-    (entry) => entry.id === provider.anthropicModel,
-  )
-    ? provider.anthropicModel
-    : null;
+  const model = listedOwnModel(provider);
   updateAgentProfile(profile.id, adminId, {
     modelConfigId: provider.id,
     model,

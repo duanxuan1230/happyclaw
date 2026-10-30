@@ -1664,7 +1664,7 @@ describe('/api/agent-profiles model within a configuration', () => {
         runtime_policy: { reasoning: { effort: 'high' } },
       }),
     ).toMatchObject({ status: 200 });
-    // Creating checks the same, so does duplicating what cannot run.
+    // Creating checks the same; a copy of what cannot run inherits instead.
     expect(
       await send('POST', '/', {
         name: `Effortless ${Math.random()}`,
@@ -1683,9 +1683,12 @@ describe('/api/agent-profiles model within a configuration', () => {
     db.updateAgentProfile(custom.id, 'routes-agent-user', {
       model: 'eff-none',
     });
-    expect(await send('POST', `/${custom.id}/duplicate`, {})).toMatchObject({
-      status: 400,
-      body: { code: 'EFFORT_NOT_SUPPORTED' },
+    const copied = await send('POST', `/${custom.id}/duplicate`, {});
+    expect(copied.status).toBe(201);
+    expect(copied.body.profile).toMatchObject({
+      model_config_id: effortful.id,
+      model: 'eff-none',
+      runtime_policy: { reasoning: { effort: 'inherit' } },
     });
     db.updateAgentProfile(main.id, 'routes-agent-user', {
       model: 'eff-none',

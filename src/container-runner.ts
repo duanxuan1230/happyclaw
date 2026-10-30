@@ -1467,7 +1467,8 @@ export interface ModelLaunch {
  * names none), else the model the supplying profile names, else the
  * connection's own. Effort: the conversation's pick, the Agent's explicit
  * effort, the inherited main Agent's, each only if the model takes it, else
- * the model's default; nothing for a model without efforts.
+ * the model's default; nothing for a model without efforts. With no model
+ * at all (a pass-through relay) the Agent's explicit effort.
  */
 export function resolveModelLaunch(
   binding: ModelBinding & { provider: UnifiedProvider },
@@ -1483,7 +1484,8 @@ export function resolveModelLaunch(
   const profileModel = resolveAgentLaunchModel(provider, binding.model, {
     groupFolder,
     agentId,
-    warn: options.warn,
+    // Only when the Agent's own binding decides is a dropped model news.
+    warn: binding.source === 'agent' && options.warn !== false,
   });
   const overrides: SessionLaunchOverrides =
     binding.source === 'session'
@@ -1502,13 +1504,18 @@ export function resolveModelLaunch(
       ...(gatewayAgentEffort ? { gatewayAgentEffort } : {}),
     };
   }
+  const runs = model ?? provider.anthropicModel;
   return {
     ...(model ? { model } : {}),
-    effort: resolveLaunchEffort(provider, model ?? provider.anthropicModel, [
-      overrides.effort,
-      agentEffort,
-      binding.inheritedEffort,
-    ]),
+    // A pass-through relay names no model: nothing is known to rule the
+    // Agent's explicit effort out, so it goes as set.
+    effort: runs
+      ? resolveLaunchEffort(provider, runs, [
+          overrides.effort,
+          agentEffort,
+          binding.inheritedEffort,
+        ])
+      : (agentEffort ?? null),
   };
 }
 

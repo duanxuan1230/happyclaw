@@ -281,6 +281,27 @@ describe('an Agent runs the model it is bound to', () => {
     expect(select({ modelConfigId: glm.id }).profileId).toBe(glm.id);
   });
 
+  test("a pass-through relay with no model runs the Agent's explicit effort", () => {
+    expect(
+      select({ modelConfigId: relay.id, effort: 'high' }).launchEffort,
+    ).toBe('high');
+    expect(select({ modelConfigId: relay.id }).launchEffort).toBeNull();
+    // A named model nothing is known about still takes none.
+    pick(relay.id, 'relay-a');
+    expect(
+      select({ modelConfigId: relay.id, effort: 'high' }).launchEffort,
+    ).toBeNull();
+  });
+
+  test("only the Agent's own binding reports a dropped Agent model", () => {
+    pick(glm.id);
+    select({ modelConfigId: glm.id, model: 'glm-4' });
+    expect(mocks.logger.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'Agent model is no longer offered by its configuration; following the configuration default',
+    );
+  });
+
   test('the runner is told the launch effort, null for none', () => {
     const tellsNone = select({ modelConfigId: glm.id, effort: 'high' });
     expect(tellsNone.launchEffort).toBeNull();

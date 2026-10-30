@@ -398,6 +398,9 @@ describe('processAgentConversation deterministic failure settlement', () => {
       lastProcessed: { id: inputTurnId, timestamp: '2026-09-25T00:00:00.000Z' },
       cursorCommittedInputTurns: new Set<string>(),
       agentDeterministicTerminalError: null,
+      agentConfigFailureSettled: false,
+      retryUnfinishedTurn: true,
+      chatJid: virtualChatJid,
       agentPhysicalDeliveryAckByInput: new Map<string, boolean>(),
       healthyAgentCompletedInputTurns: new Set<string>(),
       clearAgentProcessingIndicatorForInput: vi.fn(async () => {}),
@@ -406,6 +409,7 @@ describe('processAgentConversation deterministic failure settlement', () => {
       'isCursorCommitted',
       'commitCursor',
       'settleAgentDeterministicFailure',
+      'settleAgentConfigFailure',
     ]) {
       runtime.harness.install(name, 'processAgentConversation');
     }
@@ -438,6 +442,33 @@ describe('processAgentConversation deterministic failure settlement', () => {
     expect(webSystemMessages(lane.virtualChatJid)).toEqual([
       'context_reset:会话已自动重置：bad image',
     ]);
+  });
+
+  test('an unavailable model connection is a configuration error: told, committed, not replayed', async () => {
+    const lane = agentLane({
+      imSend: async () => {},
+      interactionMode: 'proactive',
+    });
+
+    expect(
+      await lane.globals.settleAgentConfigFailure('upstream 529 overloaded'),
+    ).toBe(false);
+    expect(lane.advanceCursors).not.toHaveBeenCalled();
+
+    expect(
+      await lane.globals.settleAgentConfigFailure(
+        'agent_profile_unavailable: 智能体绑定的模型连接已删除或缺少凭据，请在智能体页重新选择',
+      ),
+    ).toBe(true);
+    expect(lane.globals.retryUnfinishedTurn).toBe(false);
+    expect(lane.advanceCursors).toHaveBeenCalledTimes(1);
+    expect(lane.globals.agentDeterministicTerminalError).toBe(
+      '智能体绑定的模型连接已删除或缺少凭据，请在智能体页重新选择',
+    );
+    expect(webSystemMessages(lane.virtualChatJid)).toEqual([
+      'system_error:智能体绑定的模型连接已删除或缺少凭据，请在智能体页重新选择',
+    ]);
+    expect(lane.imManager.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   test('the proactive tail notice owns the channel after a delivered utterance', async () => {

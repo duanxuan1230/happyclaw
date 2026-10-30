@@ -8,6 +8,7 @@ import { ProxyAgent } from 'proxy-agent';
 import QRCode from 'qrcode';
 import { Hono } from 'hono';
 import { DATA_DIR } from '../config.js';
+import { bindSystemMainIfUnbound } from '../model-binding-backfill.js';
 import {
   avatarUploadBodyLimit,
   AVATAR_MAX_FILE_BYTES,
@@ -1534,6 +1535,7 @@ configRoutes.post(
         `type:${provider.type}`,
         `name:${provider.name}`,
       ]);
+      bindSystemMainIfUnbound(provider.id);
       return c.json(toPublicProvider(provider), 201);
     } catch (err) {
       const message =
@@ -2804,6 +2806,7 @@ configRoutes.post(
           `providerId:${provider.id}`,
           credentialField,
         ]);
+        bindSystemMainIfUnbound(provider.id);
         return c.json(toPublicProvider(provider));
       });
     } catch (err) {
@@ -2995,6 +2998,7 @@ configRoutes.post(
             `providerId:${provider.id}`,
             'codexOAuthCredentials:set',
           ]);
+          bindSystemMainIfUnbound(provider.id);
           return c.json(toPublicProvider(provider));
         }
 
