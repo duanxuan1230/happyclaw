@@ -844,6 +844,16 @@ export const MessageInput = memo(function MessageInput({
     if (open) overlays.add(id);
     else overlays.delete(id);
     setOverlayOpenState(overlays.size > 0);
+    // While an overlay was up, focus leaving the dock was not counted (see
+    // noteFocusOut). With the last one closing, count it now: focus that is
+    // not back in the dock leaves the card free to fold into the pill.
+    if (
+      !open &&
+      overlays.size === 0 &&
+      !rootRef.current?.contains(document.activeElement)
+    ) {
+      setTextFocused(false);
+    }
   }, []);
   const noteFocusIn = (event: React.FocusEvent<HTMLDivElement>) => {
     // As below: a field inside an overlay the dock opened is not its text.

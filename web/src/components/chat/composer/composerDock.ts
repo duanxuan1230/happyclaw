@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useRef,
   useState,
 } from 'react';
@@ -32,11 +33,14 @@ export function useComposerDock(): ComposerDockApi | null {
 /**
  * The open state of one overlay a dock control owns, reported to the
  * composer around it as it changes. An overlay unmounted while open counts
- * as closed.
+ * as closed. Each instance reports under its own id, so one closing or
+ * unmounting (a remount overlapping its successor) never clears another's.
  */
-export function useDockOverlay(
-  id: string,
-): [open: boolean, setOpen: (open: boolean) => void] {
+export function useDockOverlay(): [
+  open: boolean,
+  setOpen: (open: boolean) => void,
+] {
+  const id = useId();
   const [open, setOpenState] = useState(false);
   const dock = useComposerDock();
   const dockRef = useRef(dock);

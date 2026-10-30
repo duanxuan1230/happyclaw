@@ -508,11 +508,14 @@ describe('phone dock', () => {
 
   /** A dock control that reports its sheet, and shows the compact flag. */
   let reportSheet: (open: boolean) => void = () => {};
-  function SheetControl() {
-    reportSheet = useDockOverlay('model')[1];
+  function SheetControl({ name }: { name?: string }) {
+    const report = useDockOverlay()[1];
+    if (name) reports[name] = report;
+    else reportSheet = report;
     const compact = useComposerDock()?.compact;
     return <button type="button" data-compact={String(compact)} />;
   }
+  const reports: Record<string, (open: boolean) => void> = {};
 
   test('a sheet a dock control opened keeps the card open; leaving for the page folds it', async () => {
     env.phone = true;
@@ -539,7 +542,8 @@ describe('phone dock', () => {
     await act(async () => reportSheet(false));
     expect(dock()).toBe('pill');
 
-    // Opened from the card: focus leaving for the sheet does not fold it.
+    // Opened from the card: focus leaving for the sheet does not fold it,
+    // and closing it with focus still outside does.
     await act(async () => {
       editor().commands.focus();
     });
@@ -547,12 +551,52 @@ describe('phone dock', () => {
     await act(async () => outside.focus());
     expect(dock()).toBe('card');
     await act(async () => reportSheet(false));
+    expect(dock()).toBe('pill');
+
+    // Focus back in the dock when it closes keeps the card.
     await act(async () => {
       editor().commands.focus();
     });
+    await act(async () => reportSheet(true));
+    await act(async () => {
+      editor().commands.focus();
+    });
+    await act(async () => reportSheet(false));
+    expect(dock()).toBe('card');
     await act(async () => outside.focus());
     expect(dock()).toBe('pill');
     outside.remove();
+  });
+
+  test("two controls report apart: one leaving keeps the other's sheet counted", async () => {
+    env.phone = true;
+    const view = (both: boolean) => (
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        modelSelector={
+          <>
+            <SheetControl name="a" />
+            {both && <SheetControl name="b" />}
+          </>
+        }
+      />
+    );
+    await render(view(true));
+    await act(async () => reports.a(true));
+    await act(async () => reports.b(true));
+    await render(view(false));
+    expect(
+      container!
+        .querySelector('[data-hc-composer]')!
+        .getAttribute('data-composer-dock'),
+    ).toBe('card');
+    await act(async () => reports.a(false));
+    expect(
+      container!
+        .querySelector('[data-hc-composer]')!
+        .getAttribute('data-composer-dock'),
+    ).toBe('pill');
   });
 
   test('a control unmounted with its sheet open no longer holds the card', async () => {

@@ -145,7 +145,7 @@ export function ComposerToolbar({
   const plusGroups = [attachActions, sessionActions].filter(
     (group) => group.length > 0,
   );
-  const [plusSheetOpen, setPlusSheetOpen] = useDockOverlay('plus');
+  const [plusSheetOpen, setPlusSheetOpen] = useDockOverlay();
   // The model (and effort): right before send on a desktop, right after +
   // on a phone. The padding keeps the triggers' focus rings inside the
   // clip. In the resting pill the picker shows its compact chip (its own

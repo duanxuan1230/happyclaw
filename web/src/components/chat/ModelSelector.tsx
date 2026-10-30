@@ -460,7 +460,7 @@ export function ModelSelector({
     null,
   );
   const [loadFailed, setLoadFailed] = useState(false);
-  const [open, setOpen] = useDockOverlay('model');
+  const [open, setOpen] = useDockOverlay();
   // The sheet's detent: half on open, full while searching (cindy's picker
   // makes room for the keyboard when its field gets focus).
   const [snap, setSnap] = useState<'half' | 'full'>('half');
