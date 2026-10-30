@@ -729,6 +729,40 @@ describe('admin user management cannot mint or convert guests', () => {
     expect(db.getUserByUsername(after.username)!.password_hash).toBe(
       db.getUserByUsername(before.username)!.password_hash,
     );
+
+    // Owning the guest does not let a user manager undo an admin's disable
+    // here, nor relabel it as the owner's own.
+    const now = new Date().toISOString();
+    const ownGuest = 'flow-manager-guest';
+    db.createUser({
+      id: ownGuest,
+      username: 'manager_guest',
+      password_hash: 'x',
+      display_name: ownGuest,
+      role: 'guest',
+      status: 'disabled',
+      disable_reason: 'disabled_by_admin',
+      guest_owner_id: manager,
+      created_at: now,
+      updated_at: now,
+    } as any);
+    for (const body of [
+      { status: 'active' },
+      { password: 'Takeover-123!' },
+      { disable_reason: 'disabled_by_owner' },
+    ]) {
+      const res = await call(
+        cookie,
+        'PATCH',
+        `/api/admin/users/${ownGuest}`,
+        body,
+      );
+      expect(res.status, JSON.stringify(body)).toBe(403);
+    }
+    expect(db.getUserById(ownGuest)).toMatchObject({
+      status: 'disabled',
+      disable_reason: 'disabled_by_admin',
+    });
   });
 
   test('billing admin tools refuse guests', async () => {

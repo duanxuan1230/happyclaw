@@ -239,10 +239,12 @@ function denyEscalationToTarget(
   if (actor.role === 'admin') return null;
   if (target.role === 'admin') return null;
   // A guest holds no permissions but reads its owner's granted workspaces:
-  // resetting its password or re-enabling it would hand those over.
-  if (target.role === 'guest' && target.guest_owner_id !== actor.id) {
+  // resetting its password or re-enabling it would hand those over. Owners
+  // manage their own guests through /api/guests, which keeps an admin's
+  // disable in force; here only an admin may.
+  if (target.role === 'guest') {
     return c.json(
-      { error: `Forbidden: cannot ${action} another user's guest account` },
+      { error: `Forbidden: only admin can ${action} a guest account` },
       403,
     );
   }
@@ -446,6 +448,7 @@ adminRoutes.patch(
         const triggersPrivCheck =
           validation.data.password !== undefined ||
           validation.data.status !== undefined ||
+          validation.data.disable_reason !== undefined ||
           validation.data.permissions !== undefined;
         if (triggersPrivCheck) {
           const denial = denyEscalationToTarget(c, actor, target, 'modify');
