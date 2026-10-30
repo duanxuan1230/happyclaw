@@ -1129,7 +1129,10 @@ export const MessageList = memo(function MessageList({
       };
       followBottom(grew);
     });
-    observer.observe(content);
+    // Border box: the content's bottom padding is the composer's height
+    // (--composer-dock-height), which changes on its own, e.g. when the
+    // lazily loaded composer replaces its placeholder.
+    observer.observe(content, { box: 'border-box' });
     observer.observe(parent);
     return () => observer.disconnect();
   }, [followBottom, keepReadingAbove, scheduleSmoothCatchUp, syncEdges]);

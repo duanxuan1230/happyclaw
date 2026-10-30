@@ -142,6 +142,25 @@ test('a late-loading image keeps a reader pinned to the bottom', async ({
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
 });
 
+test('a pinned reader stays at the bottom when the composer grows later', async ({
+  page,
+}) => {
+  await openHarness(page, { n: '40' });
+  await settledAtBottom(page);
+  // As when the lazily loaded composer replaces its smaller placeholder:
+  // only the content's bottom padding changes.
+  await page.evaluate(() => {
+    const host = document.querySelector<HTMLElement>(
+      '[data-composer-dock-host]',
+    )!;
+    const now = parseFloat(
+      getComputedStyle(host).getPropertyValue('--composer-dock-height') || '0',
+    );
+    host.style.setProperty('--composer-dock-height', `${now + 120}px`);
+  });
+  await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
+});
+
 async function settledAtBottom(page: Page) {
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
   // Let the first page finish its bottom-pinning window before acting.
