@@ -10,6 +10,7 @@ import {
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
+  contextUsageKey,
   isLiveStream,
   useChatStore,
   type FollowUpMode,
@@ -32,7 +33,10 @@ import { SharedWorkdirNotice, useWorkdirPeers } from './SharedWorkdirNotice';
 import { WorktreeBranchTag } from './WorktreeBranchTag';
 import { useFileStore } from '../../stores/files';
 import { RunStatusBar } from './RunStatusBar';
-import { ConversationContextUsage } from './composer/ContextUsageRing';
+import {
+  ConversationContextUsage,
+  contextUsageFigures,
+} from './composer/ContextUsageRing';
 import { ActionSheet, type SheetAction } from './composer/ActionSheet';
 import {
   Sheet,
@@ -48,6 +52,7 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  Gauge,
   GitCompare,
   Link,
   MoreHorizontal,
@@ -72,12 +77,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Spinner } from '@/components/ui/spinner';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
 import { IconButton } from '../common/IconButton';
+import { InfoTip } from '../common/InfoTip';
 import { wsManager } from '../../api/ws';
 import { api } from '../../api/client';
 // xterm.js is ~488KB and most sessions never open the terminal; keep it out
@@ -198,6 +199,9 @@ interface ChatViewProps {
   onBack?: () => void;
   headerLeft?: React.ReactNode;
 }
+
+const IM_BANNER_TEXT =
+  '未配置消息渠道（飞书 / Telegram / Discord / QQ / 微信 / 钉钉 / WhatsApp），消息无法与 HappyClaw 的直接对话互通';
 
 export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const { mode: displayMode, toggle: toggleDisplayMode } = useDisplayMode();
@@ -638,6 +642,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     () => <ConversationContextUsage jid={groupJid} agentId={composerAgentId} />,
     [groupJid, composerAgentId],
   );
+  // A phone's composer has no room for the ring: its ⋯ sheet says how full
+  // the context is, from the same store entry the ring and the model
+  // sheet read (loaded when the sheet opens, kept current by turn pushes).
+  const usageKey = contextUsageKey(groupJid, composerAgentId);
+  const phoneContextUsage = useChatStore((s) =>
+    isPhone ? s.contextUsage[usageKey] : undefined,
+  );
+  const loadContextUsage = useChatStore((s) => s.loadContextUsage);
+  useEffect(() => {
+    if (!headerSheetOpen) return;
+    if (useChatStore.getState().contextUsage[usageKey] !== undefined) return;
+    void loadContextUsage(groupJid, composerAgentId);
+  }, [headerSheetOpen, usageKey, loadContextUsage, groupJid, composerAgentId]);
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     group?.conversation_source === 'native_thread' ||
@@ -1313,12 +1330,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         : []),
     ],
   ];
+  const contextFigures = contextUsageFigures(phoneContextUsage);
+  if (contextFigures) {
+    // Information, not an action: the row only closes the sheet.
+    headerActions.push([
+      { label: contextFigures.label, icon: Gauge, onSelect: () => {} },
+    ]);
+  }
   const hasHeaderActions = headerActions.some((group) => group.length > 0);
   // A phone's header controls sit on a translucent round capsule.
   const phoneCapsule =
     'phone:rounded-full phone:border phone:border-surface-border phone:bg-surface-raised/85';
   const phoneHeaderButton =
-    'phone:size-10 phone:rounded-full phone:text-foreground';
+    'phone:size-11 phone:rounded-full phone:text-foreground';
 
   return (
     <div
@@ -1358,7 +1382,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <nav
               aria-label="当前对话"
-              className="flex min-w-0 items-center gap-1 text-body phone:absolute phone:inset-x-[5.75rem] phone:justify-center phone:text-base phone:leading-[22px] phone:font-semibold"
+              className="flex min-w-0 items-center gap-1 text-body phone:absolute phone:inset-x-[6.5rem] phone:justify-center phone:text-base phone:leading-[22px] phone:font-semibold"
             >
               {activeAgentTab && isConversationTab ? (
                 <button
@@ -1402,28 +1426,25 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   {group.execution_mode === 'host' ? '宿主机' : 'Docker'}
                 </Badge>
               )}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Badge
-                    variant="outline"
-                    dot={
-                      interactionMode === 'proactive' ? 'primary' : undefined
-                    }
-                    aria-label={
-                      interactionMode === 'proactive'
-                        ? '当前为主动模式'
-                        : '当前为 Assistant 模式'
-                    }
-                  >
-                    {interactionMode === 'proactive' ? '主动' : 'Assistant'}
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {interactionMode === 'proactive'
+              <InfoTip
+                content={
+                  interactionMode === 'proactive'
                     ? '主动模式：由智能体决定何时发送 0～多条独立消息'
-                    : 'Assistant 模式：框架在任务完成后交付一条主回复'}
-                </TooltipContent>
-              </Tooltip>
+                    : 'Assistant 模式：框架在任务完成后交付一条主回复'
+                }
+              >
+                <Badge
+                  variant="outline"
+                  dot={interactionMode === 'proactive' ? 'primary' : undefined}
+                  aria-label={
+                    interactionMode === 'proactive'
+                      ? '当前为主动模式'
+                      : '当前为 Assistant 模式'
+                  }
+                >
+                  {interactionMode === 'proactive' ? '主动' : 'Assistant'}
+                </Badge>
+              </InfoTip>
               {isOwnHome &&
                 imStatus &&
                 Object.entries(imStatus).some(([, v]) => v) && (
@@ -1517,10 +1538,19 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           // Under a phone's floating header, not behind it.
           <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-surface-border bg-muted/40 px-4 py-1.5 text-caption text-muted-foreground lg:px-5 phone:mt-(--chat-header-height)">
             <Link className="size-3.5 shrink-0 text-primary-text" />
-            <span className="min-w-0 flex-1">
-              未配置消息渠道（飞书 / Telegram / Discord / QQ / 微信 / 钉钉 /
-              WhatsApp），消息无法与 HappyClaw 的直接对话互通
-            </span>
+            {isPhone ? (
+              // One line on a phone; the channels are a tap away.
+              <InfoTip content={IM_BANNER_TEXT}>
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 cursor-pointer truncate text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                >
+                  未配置消息渠道，消息无法与直接对话互通
+                </button>
+              </InfoTip>
+            ) : (
+              <span className="min-w-0 flex-1">{IM_BANNER_TEXT}</span>
+            )}
             <Button
               variant="outline"
               size="xs"

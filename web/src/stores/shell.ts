@@ -85,6 +85,12 @@ interface ShellState {
   composerFocusNonce: number;
   /** Text the active composer should insert (starter prompts), not send. */
   composerDraftRequest: { text: string; nonce: number } | null;
+  /**
+   * A workspace the phone home list should expand and scroll to (the
+   * `?sessions=1` link, a new workspace). Kept here rather than in the
+   * history entry, so going back to the list never scrolls it.
+   */
+  phoneHomeReveal: { folder: string; nonce: number } | null;
 
   setSidebarWidth: (width: number) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -105,6 +111,8 @@ interface ShellState {
   clearWorkspaceSettingsRequest: () => void;
   requestComposerFocus: () => void;
   requestComposerDraft: (text: string) => void;
+  revealOnPhoneHome: (folder: string) => void;
+  clearPhoneHomeReveal: () => void;
 }
 
 export const useShellStore = create<ShellState>((set, get) => ({
@@ -125,6 +133,7 @@ export const useShellStore = create<ShellState>((set, get) => ({
   workspaceSettingsRequest: null,
   composerFocusNonce: 0,
   composerDraftRequest: null,
+  phoneHomeReveal: null,
 
   setSidebarWidth: (width) => {
     const next = clampSidebarWidth(width);
@@ -178,4 +187,12 @@ export const useShellStore = create<ShellState>((set, get) => ({
         nonce: (state.composerDraftRequest?.nonce ?? 0) + 1,
       },
     })),
+  revealOnPhoneHome: (folder) =>
+    set((state) => ({
+      phoneHomeReveal: {
+        folder,
+        nonce: (state.phoneHomeReveal?.nonce ?? 0) + 1,
+      },
+    })),
+  clearPhoneHomeReveal: () => set({ phoneHomeReveal: null }),
 }));

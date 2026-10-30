@@ -378,3 +378,34 @@ for (const visibility of [
     else await expect(terminal).toHaveCount(0);
   });
 }
+
+test('the phone header’s ⋯ sheet says how full the context is; its buttons take 44px taps', async ({
+  page,
+}) => {
+  await page.route('**/api/groups/**/context-usage*', (route) =>
+    route.fulfill({
+      json: { usedTokens: 12_000, contextWindow: 200_000, percentage: 6 },
+    }),
+  );
+  await prepareHarness(page);
+  const header = page.locator('[data-hc-chat-view] header').first();
+  for (const name of ['展开上下文面板', '更多选项']) {
+    const button = header.getByRole('button', { name, exact: true });
+    const target = await button.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const hit = getComputedStyle(element, '::after');
+      return {
+        width: box.width - parseFloat(hit.left) - parseFloat(hit.right),
+        height: box.height - parseFloat(hit.top) - parseFloat(hit.bottom),
+      };
+    });
+    expect(target.width).toBeGreaterThanOrEqual(44);
+    expect(target.height).toBeGreaterThanOrEqual(44);
+  }
+
+  await header.getByRole('button', { name: '更多选项' }).click();
+  const sheet = page.getByRole('dialog', { name: '更多选项' });
+  await expect(
+    sheet.getByRole('button', { name: '上下文 已用 12K / 200K（6%）' }),
+  ).toBeVisible();
+});

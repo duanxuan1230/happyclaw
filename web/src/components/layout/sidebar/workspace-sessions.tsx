@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Link2, Pencil, Timer, Trash2 } from 'lucide-react';
-import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { PromptDialog } from '@/components/common/PromptDialog';
 import { isLiveStream, useChatStore } from '../../../stores/chat';
 import { buildConversationSessions } from '../../../lib/session-presentation';
 import type { AgentInfo } from '../../../types';
+import type { MenuAction } from '../../common/ResponsiveMenu';
+import { MenuActionItems } from './WorkspaceTree';
 
 // Session lists shared by the desktop sidebar tree and the phone home list.
 
@@ -60,44 +61,46 @@ export function useWorkspaceSessions<T extends Element>(groupJid: string) {
   return { containerRef, sessions };
 }
 
-/** A conversation row's ⋯ items; the main conversation only binds. */
-export function SessionMenuItems({
-  onBind,
-  onCreateAutomation,
-  onRename,
-  onDelete,
-}: {
+interface SessionMenuHandlers {
   onBind: () => void;
   onCreateAutomation?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
-}) {
-  return (
-    <>
-      <DropdownMenuItem onClick={onBind}>
-        <Link2 />
-        会话绑定
-      </DropdownMenuItem>
-      {onCreateAutomation && (
-        <DropdownMenuItem onClick={onCreateAutomation}>
-          <Timer />
-          从此会话创建自动化…
-        </DropdownMenuItem>
-      )}
-      {onRename && (
-        <DropdownMenuItem onClick={onRename}>
-          <Pencil />
-          重命名
-        </DropdownMenuItem>
-      )}
-      {onDelete && (
-        <DropdownMenuItem variant="destructive" onClick={onDelete}>
-          <Trash2 />
-          删除
-        </DropdownMenuItem>
-      )}
-    </>
-  );
+}
+
+/** A conversation row's ⋯ actions; the main conversation only binds. */
+export function sessionMenuGroups({
+  onBind,
+  onCreateAutomation,
+  onRename,
+  onDelete,
+}: SessionMenuHandlers): MenuAction[][] {
+  const actions: MenuAction[] = [
+    { label: '会话绑定', icon: Link2, onSelect: onBind },
+  ];
+  if (onCreateAutomation) {
+    actions.push({
+      label: '从此会话创建自动化…',
+      icon: Timer,
+      onSelect: onCreateAutomation,
+    });
+  }
+  if (onRename)
+    actions.push({ label: '重命名', icon: Pencil, onSelect: onRename });
+  if (onDelete) {
+    actions.push({
+      label: '删除',
+      icon: Trash2,
+      destructive: true,
+      onSelect: onDelete,
+    });
+  }
+  return [actions];
+}
+
+/** The same actions as dropdown items, for the desktop session tree. */
+export function SessionMenuItems(handlers: SessionMenuHandlers) {
+  return <MenuActionItems groups={sessionMenuGroups(handlers)} />;
 }
 
 /** Renames `session` (open while it is set). */

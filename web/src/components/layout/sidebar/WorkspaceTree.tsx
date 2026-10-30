@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useEffect,
   useId,
@@ -49,6 +50,9 @@ import {
 import { sidebarRowClass } from './SidebarItem';
 import { NewSessionDialog } from '../../chat/NewSessionDialog';
 import { useOpenedOnce } from '../../../lib/preloaded-component';
+import { ActionSheet } from '../../common/ActionSheet';
+import type { MenuAction } from '../../common/ResponsiveMenu';
+import { useIsPhone } from '../phone';
 
 const COLLAPSED_AGENTS_KEY = 'happyclaw:collapsed-agent-sections';
 
@@ -756,82 +760,98 @@ export function WorkspaceRowMenu({
   // The row stands for its agent, so name the workspace in its actions.
   const noun = agentId ? '工作区' : '';
   if (!hasWorkspaceItems && !hasAgentItems) return null;
+  const groups: MenuAction[][] = [
+    [
+      ...(canCreateSession
+        ? [
+            {
+              label: createSessionLabel(group),
+              icon: Plus,
+              onSelect: () => void actions.onCreateSession!(group),
+            },
+          ]
+        : []),
+      ...(canCreateWorktreeSession
+        ? [
+            {
+              label: '新建独立 worktree 会话…',
+              icon: GitBranch,
+              onSelect: () => setNewSessionOpen(true),
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(canPin
+        ? [
+            {
+              label: group.pinned_at ? '取消固定' : '固定',
+              icon: Pin,
+              onSelect: () => actions.onTogglePin!(group.jid),
+            },
+          ]
+        : []),
+      ...(canModify && actions.onRename
+        ? [
+            {
+              label: `重命名${noun}`,
+              icon: Pencil,
+              onSelect: () => actions.onRename!(group.jid, group.name),
+            },
+          ]
+        : []),
+    ],
+    [
+      ...(canModify
+        ? [
+            {
+              label: '重建工作区',
+              icon: RotateCcw,
+              onSelect: () => actions.onClearHistory(group.jid, displayName),
+            },
+          ]
+        : []),
+      ...(!isHome && canModify && actions.onDelete
+        ? [
+            {
+              label: `删除${noun}`,
+              icon: Trash2,
+              destructive: true,
+              onSelect: () => actions.onDelete!(group.jid, group.name),
+            },
+          ]
+        : []),
+    ],
+    hasAgentItems
+      ? [
+          ...(actions.onCreateWorkspace
+            ? [
+                {
+                  label: '新建工作区',
+                  icon: FolderPlus,
+                  onSelect: () => actions.onCreateWorkspace!(agentId!),
+                },
+              ]
+            : []),
+          ...(actions.onOpenAgent
+            ? [
+                {
+                  label: '智能体设置',
+                  icon: Bot,
+                  onSelect: () => actions.onOpenAgent!(agentId!),
+                },
+              ]
+            : []),
+        ]
+      : [],
+  ];
   return (
     <>
-      <RowMenu label={`${displayName}的更多操作`} touch={touch}>
-        {(canCreateSession || canCreateWorktreeSession) && (
-          <>
-            {canCreateSession && (
-              <DropdownMenuItem
-                onClick={() => void actions.onCreateSession!(group)}
-              >
-                <Plus />
-                {createSessionLabel(group)}
-              </DropdownMenuItem>
-            )}
-            {canCreateWorktreeSession && (
-              <DropdownMenuItem onClick={() => setNewSessionOpen(true)}>
-                <GitBranch />
-                新建独立 worktree 会话…
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuSeparator />
-          </>
-        )}
-        {canPin && (
-          <DropdownMenuItem onClick={() => actions.onTogglePin!(group.jid)}>
-            <Pin />
-            {group.pinned_at ? '取消固定' : '固定'}
-          </DropdownMenuItem>
-        )}
-        {canModify && actions.onRename && (
-          <DropdownMenuItem
-            onClick={() => actions.onRename!(group.jid, group.name)}
-          >
-            <Pencil />
-            重命名{noun}
-          </DropdownMenuItem>
-        )}
-        {canModify && (
-          <>
-            {(canPin || actions.onRename) && <DropdownMenuSeparator />}
-            <DropdownMenuItem
-              onClick={() => actions.onClearHistory(group.jid, displayName)}
-            >
-              <RotateCcw />
-              重建工作区
-            </DropdownMenuItem>
-          </>
-        )}
-        {!isHome && canModify && actions.onDelete && (
-          <DropdownMenuItem
-            variant="destructive"
-            onClick={() => actions.onDelete!(group.jid, group.name)}
-          >
-            <Trash2 />
-            删除{noun}
-          </DropdownMenuItem>
-        )}
-        {hasAgentItems && (
-          <>
-            {hasWorkspaceItems && <DropdownMenuSeparator />}
-            {actions.onCreateWorkspace && (
-              <DropdownMenuItem
-                onClick={() => actions.onCreateWorkspace!(agentId!)}
-              >
-                <FolderPlus />
-                新建工作区
-              </DropdownMenuItem>
-            )}
-            {actions.onOpenAgent && (
-              <DropdownMenuItem onClick={() => actions.onOpenAgent!(agentId!)}>
-                <Bot />
-                智能体设置
-              </DropdownMenuItem>
-            )}
-          </>
-        )}
-      </RowMenu>
+      <RowMenu
+        label={`${displayName}的更多操作`}
+        touch={touch}
+        groups={groups}
+      />
       {newSessionMounted && (
         <NewSessionDialog
           open={newSessionOpen}
@@ -881,6 +901,28 @@ function CreateSessionButton({
   );
 }
 
+/** Menu actions as dropdown items, groups split by a separator. */
+export function MenuActionItems({ groups }: { groups: MenuAction[][] }) {
+  return groups
+    .filter((items) => items.length > 0)
+    .map((items, index) => (
+      <Fragment key={items[0].label}>
+        {index > 0 && <DropdownMenuSeparator />}
+        {items.map(({ label, icon: Icon, onSelect, disabled, destructive }) => (
+          <DropdownMenuItem
+            key={label}
+            disabled={disabled}
+            variant={destructive ? 'destructive' : 'default'}
+            onSelect={onSelect}
+          >
+            {Icon && <Icon />}
+            {label}
+          </DropdownMenuItem>
+        ))}
+      </Fragment>
+    ));
+}
+
 /**
  * Hover-revealed "more" menu; always visible on touch screens.
  *
@@ -888,24 +930,43 @@ function CreateSessionButton({
  * listeners that run on each keystroke anywhere in the app, and a long tree
  * holds one per row: with ~4,000 rows each key press in the composer cost
  * ~200ms at 4x CPU throttle. Until then a plain button stands in, opening the
- * menu from the pointer or keyboard the way the Radix trigger does.
+ * menu from the mouse or keyboard the way the Radix trigger does, and from a
+ * finger on click, so a scroll that starts on it never opens it.
+ *
+ * Its items are `groups` (or dropdown items as `children`). On a phone,
+ * `groups` open as a bottom action sheet instead of an anchored menu. `open`
+ * and `onOpenChange` let the row open it too (a long press).
  */
 export function RowMenu({
   label,
   touch = false,
+  groups,
+  open: openProp,
+  onOpenChange,
   children,
 }: {
   label: string;
   touch?: boolean;
-  children: ReactNode;
+  groups?: MenuAction[][];
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: ReactNode;
 }) {
-  const [mounted, setMounted] = useState(false);
-  const [open, setOpen] = useState(false);
+  const isPhone = useIsPhone();
+  const [mountedState, setMounted] = useState(false);
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const mounted = mountedState || open;
+  const setOpen = (next: boolean) => {
+    setOpenState(next);
+    onOpenChange?.(next);
+  };
   // Radix notices keyboard use through a document listener that only exists
   // once the menu is mounted, so on the first keyboard open it focused the
   // menu itself instead of its first item. Move focus on once the content has
   // mounted and Radix has focused it.
   const openedByKeyboardRef = useRef(false);
+  const pointerTypeRef = useRef('');
   const [content, setContent] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!content || !openedByKeyboardRef.current) return;
@@ -914,7 +975,13 @@ export function RowMenu({
       .querySelector<HTMLElement>('[role="menuitem"]:not([data-disabled])')
       ?.focus({ preventScroll: true });
   }, [content]);
-  const className = cn(rowIconButtonClass, touch ? 'size-9' : revealOnRowHover);
+  // Touch rows get a 44px target around the 36px button.
+  const className = cn(
+    rowIconButtonClass,
+    touch
+      ? "relative size-9 before:absolute before:-inset-1 before:content-['']"
+      : revealOnRowHover,
+  );
   const icon = <MoreHorizontal className="size-4" />;
 
   if (!mounted) {
@@ -927,10 +994,16 @@ export function RowMenu({
       <button
         type="button"
         aria-label={label}
-        aria-haspopup="menu"
+        aria-haspopup={groups && isPhone ? 'dialog' : 'menu'}
         aria-expanded={false}
-        onClick={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          // A mouse opened it on pointerdown already.
+          if (pointerTypeRef.current !== 'mouse') openMenu(false);
+        }}
         onPointerDown={(event) => {
+          pointerTypeRef.current = event.pointerType;
+          if (event.pointerType !== 'mouse') return;
           if (event.button !== 0 || event.ctrlKey) return;
           event.preventDefault();
           openMenu(false);
@@ -948,20 +1021,32 @@ export function RowMenu({
     );
   }
 
+  const trigger = (
+    <button
+      type="button"
+      onClick={(event) => event.stopPropagation()}
+      aria-label={label}
+      className={className}
+    >
+      {icon}
+    </button>
+  );
+  if (groups && isPhone) {
+    return (
+      <ActionSheet
+        open={open}
+        onOpenChange={setOpen}
+        title={label}
+        groups={groups}
+        trigger={trigger}
+      />
+    );
+  }
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          onClick={(event) => event.stopPropagation()}
-          aria-label={label}
-          className={className}
-        >
-          {icon}
-        </button>
-      </DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent ref={setContent} align="end" className="w-40">
-        {children}
+        {groups ? <MenuActionItems groups={groups} /> : children}
       </DropdownMenuContent>
     </DropdownMenu>
   );

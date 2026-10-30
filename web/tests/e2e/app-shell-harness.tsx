@@ -3,8 +3,13 @@
 // with one workspace and one with two. `?route=` picks the first entry;
 // other pages are stubs naming their path, except /settings which is real.
 // A hidden probe shows the current route. Nothing here talks to a backend.
+// `?router=hash` runs on the real browser history (a hash router; the route
+// is the URL's hash) for specs that count history entries. The WebSocket
+// counts as connected; `window.__shellWs.emit('disconnected')` and
+// `('connected')` drive the connection notices.
 import { createRoot } from 'react-dom/client';
 import {
+  HashRouter,
   MemoryRouter,
   Route,
   Routes,
@@ -29,8 +34,20 @@ import '../../src/styles/globals.css';
 const params = new URLSearchParams(window.location.search);
 const initialRoute = params.get('route') || '/chat';
 const billing = params.get('billing') === '1';
+const hashRouter = params.get('router') === 'hash';
 
+let wsConnected = true;
 wsManager.connect = () => undefined;
+wsManager.isConnected = () => wsConnected;
+(window as unknown as { __shellWs: unknown }).__shellWs = {
+  emit(type: 'connected' | 'disconnected') {
+    wsConnected = type === 'connected';
+    (wsManager as unknown as { emit: (t: string, d: unknown) => void }).emit(
+      type,
+      {},
+    );
+  },
+};
 
 const user: UserPublic = {
   id: 'shell-user',
@@ -268,8 +285,8 @@ function StubPage() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(
-  <MemoryRouter initialEntries={[initialRoute]}>
+const routes = (
+  <>
     <Routes>
       <Route element={<AppLayout />}>
         <Route path="/chat/:groupFolder?" element={<ChatPage />} />
@@ -280,5 +297,13 @@ createRoot(document.getElementById('root')!).render(
     <RouteProbe />
     <Toaster />
     <ConfirmHost />
-  </MemoryRouter>,
+  </>
+);
+
+createRoot(document.getElementById('root')!).render(
+  hashRouter ? (
+    <HashRouter>{routes}</HashRouter>
+  ) : (
+    <MemoryRouter initialEntries={[initialRoute]}>{routes}</MemoryRouter>
+  ),
 );
