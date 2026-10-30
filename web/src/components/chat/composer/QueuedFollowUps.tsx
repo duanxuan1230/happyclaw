@@ -12,13 +12,7 @@ import {
   X,
 } from 'lucide-react';
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { ResponsiveMenu } from '../../common/ResponsiveMenu';
 import {
   Tooltip,
   TooltipContent,
@@ -151,6 +145,14 @@ export const QueuedFollowUpsPanel = memo(function QueuedFollowUpsPanel({
               onCancelEdit={onCancelEdit}
             />
           ))}
+          {touch && !steering && (
+            <p
+              data-testid="queued-follow-ups-hint"
+              className="px-2 pt-1 pb-1.5 text-micro text-faint-foreground"
+            >
+              「立即发送」{STEER_NOW_DESCRIPTION}
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -203,25 +205,29 @@ function QueuedFollowUpRow({
   );
   const label = queuedFollowUpLabel(item.content, images.length);
 
-  const sendNow = (
+  const sendNowButton = (
+    <button
+      type="button"
+      disabled={busy || locked}
+      onClick={() => void handleFollowUpAction(item, 'steer')}
+      className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-caption font-medium text-primary-text transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:h-10"
+      aria-label={`立即发送：${label}`}
+      aria-description={STEER_NOW_DESCRIPTION}
+    >
+      {busy || locked ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <CornerUpLeft className="h-3.5 w-3.5" />
+      )}
+      {locked ? '发送中' : '立即发送'}
+    </button>
+  );
+  // Touch has no hover: the panel says what it does under the list instead.
+  const sendNow = touch ? (
+    sendNowButton
+  ) : (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          disabled={busy || locked}
-          onClick={() => void handleFollowUpAction(item, 'steer')}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-caption font-medium text-primary-text transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:h-10"
-          aria-label={`立即发送：${label}`}
-          aria-description={STEER_NOW_DESCRIPTION}
-        >
-          {busy || locked ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <CornerUpLeft className="h-3.5 w-3.5" />
-          )}
-          {locked ? '发送中' : '立即发送'}
-        </button>
-      </TooltipTrigger>
+      <TooltipTrigger asChild>{sendNowButton}</TooltipTrigger>
       <TooltipContent side="top">{STEER_NOW_DESCRIPTION}</TooltipContent>
     </Tooltip>
   );
@@ -307,8 +313,9 @@ function QueuedFollowUpRow({
             // rest behind a menu instead of a second row of buttons.
             <div className="flex shrink-0 items-center gap-0.5 -mr-1.5">
               {sendNow}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              <ResponsiveMenu
+                title="排队消息操作"
+                trigger={
                   <button
                     type="button"
                     disabled={busy || locked}
@@ -317,38 +324,41 @@ function QueuedFollowUpRow({
                   >
                     <MoreHorizontal className="h-4 w-4" />
                   </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" side="top" className="w-36">
-                  <DropdownMenuItem
-                    disabled={index === 0}
-                    onSelect={() => void handleFollowUpAction(item, 'move_up')}
-                  >
-                    <ChevronUp />
-                    上移
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={isLast}
-                    onSelect={() =>
-                      void handleFollowUpAction(item, 'move_down')
-                    }
-                  >
-                    <ChevronDown />
-                    下移
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => beginEditingFollowUp(item)}>
-                    <Pencil />
-                    编辑
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    variant="destructive"
-                    onSelect={() => void handleFollowUpAction(item, 'cancel')}
-                  >
-                    <Trash2 />
-                    删除
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                }
+                // Reordering is what a drag would do on a desktop list; on
+                // touch it is these two rows.
+                groups={[
+                  [
+                    {
+                      label: '上移',
+                      icon: ChevronUp,
+                      disabled: index === 0,
+                      onSelect: () =>
+                        void handleFollowUpAction(item, 'move_up'),
+                    },
+                    {
+                      label: '下移',
+                      icon: ChevronDown,
+                      disabled: isLast,
+                      onSelect: () =>
+                        void handleFollowUpAction(item, 'move_down'),
+                    },
+                    {
+                      label: '编辑',
+                      icon: Pencil,
+                      onSelect: () => beginEditingFollowUp(item),
+                    },
+                  ],
+                  [
+                    {
+                      label: '删除',
+                      icon: Trash2,
+                      destructive: true,
+                      onSelect: () => void handleFollowUpAction(item, 'cancel'),
+                    },
+                  ],
+                ]}
+              />
             </div>
           ) : (
             <div className="flex shrink-0 items-center gap-0.5 transition-opacity pointer-fine:opacity-0 pointer-fine:group-hover/queued:opacity-100 pointer-fine:group-focus-within/queued:opacity-100">
@@ -411,6 +421,9 @@ function QueuedFollowUpContent({
   touch: boolean;
 }) {
   const text = content.trim();
+  // Touch clamps a message to two lines and has no tooltip for the rest: a
+  // tap on it shows it whole.
+  const [whole, setWhole] = useState(false);
   return (
     <div className="flex min-w-0 flex-1 items-start gap-1.5 pt-1 pointer-coarse:pt-2.5">
       {images.length > 0 && (
@@ -434,9 +447,15 @@ function QueuedFollowUpContent({
         className={cn(
           'block min-w-0 flex-1 text-caption leading-5 break-words whitespace-pre-wrap',
           text ? 'text-foreground/85' : 'text-muted-foreground',
-          touch && 'line-clamp-2',
+          touch && !whole && 'line-clamp-2',
         )}
-        title={text || undefined}
+        title={touch ? undefined : text || undefined}
+        {...(touch && {
+          role: 'button',
+          tabIndex: 0,
+          'aria-expanded': whole,
+          onClick: () => setWhole((value) => !value),
+        })}
       >
         {queuedFollowUpLabel(content, images.length)}
       </span>
