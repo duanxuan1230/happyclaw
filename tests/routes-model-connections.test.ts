@@ -303,10 +303,11 @@ describe('creating a connection', () => {
         ...extra,
       });
     expect((await create()).status).toBe(201);
-    expect((await create({ enabled: true, weight: 9 })).body).toMatchObject({
-      enabled: false,
-      weight: 1,
-    });
+    const created = await create({ enabled: true, weight: 9 });
+    expect(created.status).toBe(201);
+    expect(created.body).not.toHaveProperty('enabled');
+    expect(created.body).not.toHaveProperty('weight');
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).toEqual([]);
     const list = await request('GET', '/providers');
     expect(Object.keys(list.body)).toEqual(['providers']);
     expect(list.body.providers[0]).not.toHaveProperty('health');
@@ -362,16 +363,6 @@ describe('creating a connection', () => {
     });
     expect(patched.status).toBe(400);
     expect(patched.body.code).toBe('RESERVED_ENV_KEY');
-  });
-
-  test('a connection that says it is off stays off', async () => {
-    const created = await request('POST', '/providers', {
-      name: 'Claude',
-      type: 'official',
-      anthropicApiKey: 'sk-ant-api03-abcdefghijklmnop',
-      enabled: false,
-    });
-    expect(created.body.enabled).toBe(false);
   });
 
   test('stores its model list and preset and reports them', async () => {
@@ -504,7 +495,6 @@ describe('editing a model list', () => {
     // A weight is accepted from older clients and means nothing.
     expect(runtimeConfig.getProviderById(provider.id)).toMatchObject({
       name: 'Renamed',
-      weight: 1,
       presetId: 'deepseek',
     });
   });

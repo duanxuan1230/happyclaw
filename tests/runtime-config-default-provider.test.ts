@@ -75,7 +75,9 @@ describe('independent model configurations', () => {
       anthropicModel: 'gateway-model',
       customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'x-tenant: model-b' },
     });
-    expect([bare, first, second].every((p) => !p.enabled)).toBe(true);
+    for (const provider of [bare, first, second]) {
+      expect(provider).not.toHaveProperty('enabled');
+    }
 
     expect(runtimeConfig.getClaudeProviderConfig()).toMatchObject({
       anthropicApiKey: 'official-key',
@@ -116,7 +118,6 @@ describe('independent model configurations', () => {
       anthropicAuthToken: 'agent-only-token',
       anthropicModel: 'agent-only-model',
       customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'x-tenant: agent-only' },
-      enabled: false,
     });
     runtimeConfig.saveContainerEnvConfig('model-workspace', {
       anthropicBaseUrl: 'https://workspace-override.example.test',
@@ -159,21 +160,21 @@ describe('independent model configurations', () => {
   });
 
   test('normalizes an existing V5 default pointer without changing switches', () => {
-    const before = runtimeConfig
-      .getProviders()
-      .map((provider) => ({ id: provider.id, enabled: provider.enabled }));
+    const before = runtimeConfig.getProviders().map((provider) => provider.id);
+    const enabledBefore = runtimeConfig.readLegacyModelDefaults().enabledIds;
     const stored = JSON.parse(fs.readFileSync(configFile, 'utf8')) as Record<
       string,
       unknown
     >;
-    stored.defaultProviderId = before[0]?.id ?? 'legacy-default';
+    stored.defaultProviderId = before[0] ?? 'legacy-default';
     fs.writeFileSync(configFile, `${JSON.stringify(stored, null, 2)}\n`);
 
-    expect(
-      runtimeConfig
-        .getProviders()
-        .map((provider) => ({ id: provider.id, enabled: provider.enabled })),
-    ).toEqual(before);
+    expect(runtimeConfig.getProviders().map((provider) => provider.id)).toEqual(
+      before,
+    );
+    expect(runtimeConfig.readLegacyModelDefaults().enabledIds).toEqual(
+      enabledBefore,
+    );
     expect(JSON.parse(fs.readFileSync(configFile, 'utf8'))).not.toHaveProperty(
       'defaultProviderId',
     );
@@ -204,7 +205,6 @@ describe('independent model configurations', () => {
       name: 'OAuth CAS provider',
       type: 'official',
       claudeOAuthCredentials: original,
-      enabled: true,
     });
 
     expect(
@@ -247,14 +247,19 @@ describe('legacy default model and pool, read for the binding backfill', () => {
     fs.writeFileSync(configFile, `${JSON.stringify(stored, null, 2)}\n`);
   }
 
+  /** A connection an older release had in its pool when `enabled`. */
   function official(name: string, enabled = true) {
-    return runtimeConfig.createProvider({
+    const provider = runtimeConfig.createProvider({
       name,
       type: 'official',
       anthropicApiKey: `${name}-key`,
       anthropicModel: `${name}-model`,
-      enabled,
     });
+    writeStored((stored) => {
+      stored.providers.find((item: any) => item.id === provider.id).enabled =
+        enabled;
+    });
+    return provider;
   }
 
   beforeEach(() => {

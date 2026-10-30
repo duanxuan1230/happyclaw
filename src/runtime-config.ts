@@ -586,14 +586,14 @@ interface ClaudeStoredStateV3Resolved {
 
 // ─── V5 模型配置（每项都是一套完整 Provider 运行环境）──────────
 
-/** @deprecated removed in the model-connections rework (no automatic pool). */
-export interface BalancingConfig {
-  strategy: 'round-robin' | 'weighted-round-robin' | 'failover';
-  unhealthyThreshold: number;
-  recoveryIntervalMs: number;
-}
+/**
+ * The automatic pool's settings as older releases store them. This release
+ * reads nothing from them; they are kept as found (or written as the old
+ * defaults) so a rollback reads a complete file.
+ */
+type StoredBalancing = Record<string, unknown>;
 
-const DEFAULT_BALANCING_CONFIG: BalancingConfig = {
+const LEGACY_BALANCING: StoredBalancing = {
   strategy: 'round-robin',
   unhealthyThreshold: 3,
   recoveryIntervalMs: 300_000,
@@ -605,9 +605,9 @@ interface StoredProviderV4 {
   name: string;
   type: 'official' | 'third_party';
   /**
-   * Legacy pool membership and weight. Kept as stored so the one-time binding
-   * backfill (readLegacyModelDefaults) and older releases can read them; this
-   * release decides nothing by them.
+   * Legacy pool membership and weight, for older releases and the one-time
+   * binding backfill (readLegacyModelDefaults). This release decides nothing
+   * by them: membership is carried through as read, new connections are out.
    */
   enabled: boolean;
   weight: number;
@@ -649,7 +649,7 @@ interface StoredProviderV4 {
 interface StoredClaudeProviderConfigV4 {
   version: 4;
   providers: StoredProviderV4[];
-  balancing: BalancingConfig;
+  balancing?: StoredBalancing;
   updatedAt: string;
 }
 
@@ -659,13 +659,12 @@ interface StoredClaudeProviderConfigV5 {
   /** Legacy V5 field. Read only so older files can be normalized in place. */
   defaultProviderId?: string | null;
   /**
-   * The configuration conversations run on when nothing more specific chose
-   * one. Absent means the automatic pool of enabled configurations. A
-   * separate key from the legacy pointer, which every installation once had
-   * and which therefore must never be read as a deliberate choice.
+   * The retired global default model, read once by the binding backfill and
+   * then cleared. A separate key from the legacy pointer above, which every
+   * installation once had and which must never be read as a choice.
    */
   defaultModelConfigId?: string | null;
-  balancing: BalancingConfig;
+  balancing?: StoredBalancing;
   updatedAt: string;
 }
 
@@ -674,10 +673,6 @@ export interface UnifiedProvider {
   id: string;
   name: string;
   type: 'official' | 'third_party';
-  /** @deprecated removed in the model-connections rework; see StoredProviderV4. */
-  enabled: boolean;
-  /** @deprecated removed in the model-connections rework; see StoredProviderV4. */
-  weight: number;
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
   anthropicAuthMode?: ProviderAuthMode;
@@ -709,9 +704,6 @@ export interface UnifiedProviderPublic {
   id: string;
   name: string;
   type: 'official' | 'third_party';
-  /** Legacy fields; they mean nothing and the Web ignores them. */
-  enabled: boolean;
-  weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
   /** null for providers saved before the explicit choice existed. */
@@ -1497,7 +1489,10 @@ function readStoredState(): ClaudeStoredStateV3Resolved | null {
 
 // ─── V5 模型配置 Read / Write / CRUD ───────────────────────────
 
-function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
+function toStoredProviderV4(
+  provider: UnifiedProvider,
+  enabled: boolean,
+): StoredProviderV4 {
   const secrets: SecretPayload = {
     anthropicAuthToken: provider.anthropicAuthToken || '',
     anthropicApiKey: provider.anthropicApiKey || '',
@@ -1516,8 +1511,8 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
     id: provider.id,
     name: provider.name,
     type: provider.type,
-    enabled: provider.enabled,
-    weight: Math.max(1, Math.min(100, provider.weight || 1)),
+    enabled,
+    weight: 1,
     anthropicBaseUrl: provider.anthropicBaseUrl || '',
     anthropicModel: provider.anthropicModel || '',
     ...(provider.anthropicAuthMode
@@ -1666,8 +1661,6 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     id: stored.id,
     name: stored.name,
     type: stored.type,
-    enabled: stored.enabled,
-    weight: Math.max(1, Math.min(100, stored.weight || 1)),
     anthropicBaseUrl: stored.anthropicBaseUrl || '',
     anthropicAuthToken: secrets.anthropicAuthToken || '',
     ...(normalizeProviderAuthMode(stored.anthropicAuthMode)
@@ -1827,11 +1820,9 @@ function migrateConnectionsInPlace(
 }
 
 /** Migrate V3 stored state to V4 unified provider list */
-function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
-  providers: UnifiedProvider[];
-  balancing: BalancingConfig;
-} {
+function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): StoredStateV5 {
   const providers: UnifiedProvider[] = [];
+  const enabled = new Set<string>();
   const now = new Date().toISOString();
 
   // 1. Official credentials → official provider (if any secret present)
@@ -1844,8 +1835,6 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       id: OFFICIAL_CLAUDE_PROFILE_ID,
       name: '官方 Claude',
       type: 'official',
-      enabled: isOfficialClaudeMode(v3.activeProfileId),
-      weight: 1,
       anthropicBaseUrl: '',
       anthropicAuthToken: '',
       anthropicModel: '',
@@ -1856,6 +1845,9 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       customEnv: v3.officialCustomEnv || {},
       updatedAt: v3.officialUpdatedAt || now,
     });
+    if (isOfficialClaudeMode(v3.activeProfileId)) {
+      enabled.add(OFFICIAL_CLAUDE_PROFILE_ID);
+    }
   }
 
   // 2. Each third-party profile → third_party provider
@@ -1865,8 +1857,6 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       id: profile.id,
       name: profile.name,
       type: 'third_party',
-      enabled: profile.id === v3.activeProfileId,
-      weight: 1,
       anthropicBaseUrl: profile.anthropicBaseUrl,
       anthropicAuthToken: profile.anthropicAuthToken,
       anthropicModel: profile.anthropicModel,
@@ -1877,10 +1867,11 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       customEnv: profile.customEnv || {},
       updatedAt: profile.updatedAt || now,
     });
+    if (profile.id === v3.activeProfileId) enabled.add(profile.id);
   }
 
-  // 3. If provider-pool.json exists with mode=pool, use its members' enabled/weight
-  let balancing: BalancingConfig = { ...DEFAULT_BALANCING_CONFIG };
+  // 3. A provider-pool.json in pool mode says which members were enabled.
+  let balancing: StoredBalancing = { ...LEGACY_BALANCING };
   try {
     if (fs.existsSync(POOL_CONFIG_FILE)) {
       const poolContent = fs.readFileSync(POOL_CONFIG_FILE, 'utf-8');
@@ -1888,52 +1879,84 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       if (pool.version === 1 && pool.mode === 'pool') {
         const members = pool.members as Array<{
           profileId: string;
-          weight: number;
           enabled: boolean;
         }>;
         if (Array.isArray(members)) {
           for (const member of members) {
-            const p = providers.find((pv) => pv.id === member.profileId);
-            if (p) {
-              p.enabled = member.enabled;
-              p.weight = Math.max(1, Math.min(100, member.weight || 1));
-            }
+            if (!providers.some((p) => p.id === member.profileId)) continue;
+            if (member.enabled) enabled.add(member.profileId);
+            else enabled.delete(member.profileId);
           }
         }
-        // Migrate strategy and thresholds
-        if (
-          typeof pool.strategy === 'string' &&
-          ['round-robin', 'weighted-round-robin', 'failover'].includes(
-            pool.strategy,
-          )
-        ) {
-          balancing.strategy = pool.strategy as BalancingConfig['strategy'];
-        }
-        if (typeof pool.unhealthyThreshold === 'number') {
-          balancing.unhealthyThreshold = pool.unhealthyThreshold;
-        }
-        if (typeof pool.recoveryIntervalMs === 'number') {
-          balancing.recoveryIntervalMs = pool.recoveryIntervalMs;
-        }
+        balancing = {
+          ...balancing,
+          ...(typeof pool.strategy === 'string'
+            ? { strategy: pool.strategy }
+            : {}),
+          ...(typeof pool.unhealthyThreshold === 'number'
+            ? { unhealthyThreshold: pool.unhealthyThreshold }
+            : {}),
+          ...(typeof pool.recoveryIntervalMs === 'number'
+            ? { recoveryIntervalMs: pool.recoveryIntervalMs }
+            : {}),
+        };
       }
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to read provider-pool.json during migration');
   }
 
-  // 4. Ensure at least one provider is enabled
-  if (providers.length > 0 && !providers.some((p) => p.enabled)) {
-    providers[0].enabled = true;
-  }
+  // 4. Older releases need at least one enabled provider.
+  if (providers.length > 0 && enabled.size === 0) enabled.add(providers[0].id);
 
-  return { providers, balancing };
+  return {
+    providers,
+    legacy: {
+      balancing,
+      defaultModelConfigId: null,
+      enabledIds: providers.map((p) => p.id).filter((id) => enabled.has(id)),
+    },
+  };
+}
+
+/**
+ * What the file keeps from the retired default model and automatic pool:
+ * nothing reads it but readLegacyModelDefaults, and saves carry it through
+ * so the one-time binding backfill and older releases still find it.
+ */
+interface LegacyPoolFields {
+  balancing: StoredBalancing;
+  /** Always the id of an existing provider with a credential, or null. */
+  defaultModelConfigId: string | null;
+  /** The providers that were enabled, in file order. */
+  enabledIds: string[];
 }
 
 interface StoredStateV5 {
   providers: UnifiedProvider[];
-  balancing: BalancingConfig;
-  /** Always the id of an existing provider, or null for the automatic pool. */
-  defaultModelConfigId: string | null;
+  legacy: LegacyPoolFields;
+}
+
+/** The legacy fields as a V4/V5 file stores them. */
+function readLegacyPoolFields(
+  file: Pick<StoredClaudeProviderConfigV5, 'providers' | 'balancing'> & {
+    defaultModelConfigId?: unknown;
+  },
+  providers: ReadonlyArray<UnifiedProvider>,
+): LegacyPoolFields {
+  return {
+    balancing:
+      file.balancing && typeof file.balancing === 'object'
+        ? file.balancing
+        : { ...LEGACY_BALANCING },
+    defaultModelConfigId: normalizeDefaultModelConfigId(
+      providers,
+      file.defaultModelConfigId,
+    ),
+    enabledIds: file.providers
+      .filter((stored) => stored.enabled === true)
+      .map((stored) => stored.id),
+  };
 }
 
 /**
@@ -2066,19 +2089,7 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
       );
       const state: StoredStateV5 = {
         providers,
-        defaultModelConfigId: normalizeDefaultModelConfigId(
-          providers,
-          v5.defaultModelConfigId,
-        ),
-        balancing: {
-          strategy: v5.balancing?.strategy || DEFAULT_BALANCING_CONFIG.strategy,
-          unhealthyThreshold:
-            v5.balancing?.unhealthyThreshold ??
-            DEFAULT_BALANCING_CONFIG.unhealthyThreshold,
-          recoveryIntervalMs:
-            v5.balancing?.recoveryIntervalMs ??
-            DEFAULT_BALANCING_CONFIG.recoveryIntervalMs,
-        },
+        legacy: readLegacyPoolFields(v5, providers),
       };
       const repairedGatewayIdentifiers =
         ensureCodexGatewayIdentifiers(providers);
@@ -2091,11 +2102,7 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
         // unreadable: if the disk refuses the write, serve what was read and
         // retry on the next read.
         try {
-          writeStoredStateV4(
-            state.providers,
-            state.balancing,
-            state.defaultModelConfigId,
-          );
+          writeStoredStateV4(state);
         } catch (err) {
           // Reads are frequent: say so once per distinct failure, not once
           // per read, until a save goes through.
@@ -2129,18 +2136,12 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
       migrateConnectionsInPlace(providers, v4.providers);
       const migrated: StoredStateV5 = {
         providers,
-        defaultModelConfigId: null,
-        balancing: {
-          strategy: v4.balancing?.strategy || DEFAULT_BALANCING_CONFIG.strategy,
-          unhealthyThreshold:
-            v4.balancing?.unhealthyThreshold ??
-            DEFAULT_BALANCING_CONFIG.unhealthyThreshold,
-          recoveryIntervalMs:
-            v4.balancing?.recoveryIntervalMs ??
-            DEFAULT_BALANCING_CONFIG.recoveryIntervalMs,
+        legacy: {
+          ...readLegacyPoolFields(v4, providers),
+          defaultModelConfigId: null,
         },
       };
-      writeStoredStateV4(migrated.providers, migrated.balancing, null);
+      writeStoredStateV4(migrated);
       logger.info('Migrated Claude model configuration from V4 to V5');
       return migrated;
     }
@@ -2149,14 +2150,11 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
     const v3 = readStoredState();
     if (!v3) return null;
 
-    const migrated: StoredStateV5 = {
-      ...migrateV3toV4(v3),
-      defaultModelConfigId: null,
-    };
+    const migrated = migrateV3toV4(v3);
     migrateConnectionsInPlace(migrated.providers);
 
     // Auto-save as V5 on first read (lazy migration)
-    writeStoredStateV4(migrated.providers, migrated.balancing, null);
+    writeStoredStateV4(migrated);
     logger.info(
       { providerCount: migrated.providers.length },
       'Migrated Claude provider config from V3 to V5',
@@ -2172,11 +2170,7 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
   }
 }
 
-function writeStoredStateV4(
-  providers: UnifiedProvider[],
-  balancing: BalancingConfig,
-  defaultModelConfigId: string | null,
-): void {
+function writeStoredStateV4({ providers, legacy }: StoredStateV5): void {
   // Fills in place: a subscription created without an identifier, or one whose
   // identifier the secrets route cleared, is saved with a fresh one.
   ensureCodexGatewayIdentifiers(providers);
@@ -2186,13 +2180,16 @@ function writeStoredStateV4(
   storedStateWriteGeneration++;
   const defaultId = normalizeDefaultModelConfigId(
     providers,
-    defaultModelConfigId,
+    legacy.defaultModelConfigId,
   );
+  const enabled = new Set(legacy.enabledIds);
   const payload: StoredClaudeProviderConfigV5 = {
     version: 5,
-    providers: providers.map(toStoredProviderV4),
+    providers: providers.map((provider) =>
+      toStoredProviderV4(provider, enabled.has(provider.id)),
+    ),
     ...(defaultId ? { defaultModelConfigId: defaultId } : {}),
-    balancing,
+    balancing: legacy.balancing,
     updatedAt: new Date().toISOString(),
   };
 
@@ -2210,37 +2207,6 @@ export function getProviders(): UnifiedProvider[] {
 }
 
 /**
- * @deprecated removed in the model-connections rework: `enabled` decides
- * nothing any more. Kept for callers not yet moved off the automatic pool.
- */
-export function getEnabledProviders(): UnifiedProvider[] {
-  return getProviders().filter((p) => p.enabled);
-}
-
-/**
- * @deprecated removed in the model-connections rework: there is no global
- * default model. The one-time backfill reads readLegacyModelDefaults().
- */
-export function getDefaultModelConfigId(): string | null {
-  return readStoredStateV4()?.defaultModelConfigId ?? null;
-}
-
-/**
- * @deprecated removed in the model-connections rework: there is no global
- * default model. The one-time backfill reads readLegacyModelDefaults().
- */
-export function getUsableDefaultProvider(): UnifiedProvider | null {
-  const state = readStoredStateV4();
-  if (!state?.defaultModelConfigId) return null;
-  const provider = state.providers.find(
-    (item) => item.id === state.defaultModelConfigId,
-  );
-  return provider?.enabled && providerHasCredentials(provider)
-    ? provider
-    : null;
-}
-
-/**
  * What the file still says about the retired global default and pool, for
  * the one-time binding backfill: the legacy default (only while it names a
  * connection with a credential) and the connections that were enabled, in
@@ -2250,91 +2216,21 @@ export function readLegacyModelDefaults(): {
   defaultModelConfigId: string | null;
   enabledIds: string[];
 } {
-  const state = readStoredStateV4();
+  const legacy = readStoredStateV4()?.legacy;
   return {
-    defaultModelConfigId: state?.defaultModelConfigId ?? null,
-    enabledIds: (state?.providers ?? [])
-      .filter((provider) => provider.enabled)
-      .map((provider) => provider.id),
+    defaultModelConfigId: legacy?.defaultModelConfigId ?? null,
+    enabledIds: legacy?.enabledIds ?? [],
   };
-}
-
-/**
- * @deprecated removed in the model-connections rework: there is no global
- * default model and no route writes one. Kept for callers of the retired
- * pool. A configuration chosen while switched off is switched on with it.
- */
-export function setDefaultModelConfig(
-  id: string | null,
-): UnifiedProvider | null {
-  const state = readStoredStateV4();
-  if (!state) throw new Error('Claude 配置不存在');
-  if (id === null) {
-    if (state.defaultModelConfigId !== null) {
-      writeStoredStateV4(state.providers, state.balancing, null);
-    }
-    return null;
-  }
-  const idx = state.providers.findIndex((p) => p.id === id);
-  if (idx < 0) throw new Error('未找到指定供应商');
-  if (!providerHasCredentials(state.providers[idx])) {
-    throw new Error('该模型配置还没有可用的凭据，请先填写密钥或完成授权');
-  }
-  state.providers[idx] = { ...state.providers[idx], enabled: true };
-  writeStoredStateV4(state.providers, state.balancing, id);
-  return state.providers[idx];
 }
 
 /** Drops the legacy default pointer from the file once it has been backfilled. */
 export function clearLegacyDefaultModelConfigId(): void {
   const state = readStoredStateV4();
-  if (!state || state.defaultModelConfigId === null) return;
-  writeStoredStateV4(state.providers, state.balancing, null);
-}
-
-/** @deprecated removed in the model-connections rework (no automatic pool). */
-export function getBalancingConfig(): BalancingConfig {
-  const state = readStoredStateV4();
-  return state?.balancing ?? { ...DEFAULT_BALANCING_CONFIG };
-}
-
-/**
- * @deprecated removed in the model-connections rework (no automatic pool);
- * no route writes it. Kept for callers of the retired pool.
- */
-export function saveBalancingConfig(
-  config: Partial<BalancingConfig>,
-): BalancingConfig {
-  const state: StoredStateV5 = readStoredStateV4() || {
-    providers: [],
-    defaultModelConfigId: null,
-    balancing: { ...DEFAULT_BALANCING_CONFIG },
-  };
-  const merged: BalancingConfig = { ...state.balancing, ...config };
-  writeStoredStateV4(state.providers, merged, state.defaultModelConfigId);
-  return merged;
-}
-
-/**
- * @deprecated removed in the model-connections rework: `enabled` decides
- * nothing and no route writes it. Kept for callers of the retired pool.
- */
-export function setProviderEnabled(
-  id: string,
-  enabled: boolean,
-): UnifiedProvider {
-  const state = readStoredStateV4();
-  if (!state) throw new Error('Claude 配置不存在');
-  const idx = state.providers.findIndex((p) => p.id === id);
-  if (idx < 0) throw new Error('未找到指定供应商');
-  if (state.providers[idx].enabled === enabled) return state.providers[idx];
-  state.providers[idx] = { ...state.providers[idx], enabled };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
-  return state.providers[idx];
+  if (!state || state.legacy.defaultModelConfigId === null) return;
+  writeStoredStateV4({
+    ...state,
+    legacy: { ...state.legacy, defaultModelConfigId: null },
+  });
 }
 
 type ClaudeAuthKind = 'oauth' | 'setup_token' | 'api_key';
@@ -2511,11 +2407,7 @@ export function recordProviderTest(
       ? { anthropicAuthMode: authMode }
       : {}),
   };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return state.providers[idx];
 }
 
@@ -2536,19 +2428,17 @@ export function createProvider(input: {
   /** Raw roles; those not naming one of the connection's models are dropped. */
   roles?: unknown;
   presetId?: string;
-  /**
-   * @deprecated removed in the model-connections rework. Legacy pool
-   * membership for callers of the retired pool; the HTTP routes never pass it.
-   */
-  enabled?: boolean;
 }): UnifiedProvider {
   const authKind = selectedClaudeAuthKind(input.type, input);
   const requestedModel = normalizeDefaultModel(input.anthropicModel ?? '');
   const anthropicModel = splitOneMillionSuffix(requestedModel).model;
   const state: StoredStateV5 = readStoredStateV4() || {
     providers: [],
-    defaultModelConfigId: null,
-    balancing: { ...DEFAULT_BALANCING_CONFIG },
+    legacy: {
+      balancing: { ...LEGACY_BALANCING },
+      defaultModelConfigId: null,
+      enabledIds: [],
+    },
   };
 
   if (state.providers.length >= MAX_PROVIDERS) {
@@ -2560,10 +2450,6 @@ export function createProvider(input: {
     id: crypto.randomBytes(8).toString('hex'),
     name: normalizeProfileName(input.name),
     type: input.type,
-    // Legacy fields: off unless a retired-pool caller says, so a rollback
-    // does not add a connection made here to its automatic pool.
-    enabled: input.enabled ?? false,
-    weight: 1,
     anthropicBaseUrl: input.anthropicBaseUrl
       ? normalizeBaseUrl(input.anthropicBaseUrl)
       : '',
@@ -2612,11 +2498,7 @@ export function createProvider(input: {
   }
 
   state.providers.push(provider);
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return provider;
 }
 
@@ -2694,11 +2576,7 @@ export function updateProvider(
       : undefined;
 
   state.providers[idx] = updated;
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return updated;
 }
 
@@ -2802,11 +2680,7 @@ export function updateProviderSecrets(
   }
 
   state.providers[idx] = updated;
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   clearProviderQuotaObservation(id);
   return updated;
 }
@@ -2885,11 +2759,7 @@ export function updateProviderOAuthCredentialsIfCurrent(
     claudeOAuthLastRefreshError: null,
     updatedAt: new Date().toISOString(),
   };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return true;
 }
 
@@ -2911,11 +2781,7 @@ export function markProviderOAuthRefreshFailureIfCurrent(
     ...state.providers[idx],
     claudeOAuthLastRefreshError: error,
   };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return true;
 }
 
@@ -2962,11 +2828,7 @@ export function updateProviderCodexOAuthCredentialsIfCurrent(
     codexOAuthLastRefreshError: null,
     updatedAt: new Date().toISOString(),
   };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return true;
 }
 
@@ -3005,11 +2867,7 @@ export function setProviderCodexOAuthRefreshErrorIfCurrent(
     ...current,
     codexOAuthLastRefreshError: normalized,
   };
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return true;
 }
 
@@ -3078,15 +2936,10 @@ export function duplicateProvider(id: string): UnifiedProvider {
     ...structuredClone(source),
     id: crypto.randomBytes(8).toString('hex'),
     name: `${source.name.slice(0, 64 - suffix.length)}${suffix}`,
-    enabled: false,
     updatedAt: new Date().toISOString(),
   };
   state.providers.splice(idx + 1, 0, copy);
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   return copy;
 }
 
@@ -3098,11 +2951,7 @@ export function deleteProvider(id: string): void {
   if (idx < 0) throw new Error('未找到指定供应商');
 
   state.providers.splice(idx, 1);
-  writeStoredStateV4(
-    state.providers,
-    state.balancing,
-    state.defaultModelConfigId,
-  );
+  writeStoredStateV4(state);
   clearProviderQuotaObservation(id);
 }
 
@@ -3134,8 +2983,6 @@ export function toPublicProvider(
     id: provider.id,
     name: provider.name,
     type: provider.type,
-    enabled: provider.enabled,
-    weight: provider.weight,
     anthropicBaseUrl: provider.anthropicBaseUrl,
     anthropicModel: provider.anthropicModel,
     anthropicAuthMode: provider.anthropicAuthMode ?? null,

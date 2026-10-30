@@ -143,7 +143,8 @@ describe('legacy ChatGPT gateway identifiers', () => {
     expect(providers[0].anthropicAuthToken).not.toBe(
       providers[1].anthropicAuthToken,
     );
-    expect(providers[1].enabled).toBe(false);
+    // Legacy pool membership is carried through for the binding backfill.
+    expect(runtime.readLegacyModelDefaults().enabledIds).toEqual(['one']);
   });
 
   test.each(['host', 'container'] as const)(

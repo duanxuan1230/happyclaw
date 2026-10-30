@@ -4,19 +4,20 @@
  * Health is in-memory only. It records upstream verdicts (usage limits with
  * their reset times, model walls) so a launch can tell whether a connection
  * can serve a turn and when it can again (usage-limit waits, the ChatGPT rate
- * limit snapshot). There is no rotation or weighting: a binding picks the
- * connection, and `selectProvider` only remains, in member order, for callers
- * not yet moved off the retired automatic pool.
+ * limit snapshot). A binding picks the connection; nothing here selects one.
  */
 import { logger } from './logger.js';
-import type { BalancingConfig } from './runtime-config.js';
 
 // ─── 类型定义 ──────────────────────────────────────────────
 
 export interface ProviderPoolMember {
   profileId: string;
-  /** @deprecated removed in the model-connections rework. */
-  enabled: boolean;
+}
+
+/** When failures make a member unhealthy, and how long until it recovers. */
+export interface ProviderHealthThresholds {
+  unhealthyThreshold: number;
+  recoveryIntervalMs: number;
 }
 
 /**
@@ -148,33 +149,16 @@ export class ProviderPool {
   private healthMap: Map<string, ProviderHealthStatus> = new Map();
   private modelQuarantine: Map<string, ModelQuarantine> = new Map();
 
-  /**
-   * @deprecated removed in the model-connections rework: nothing rotates, a
-   * selection stays where it is until the connection can no longer serve.
-   */
-  get rotatesPerRequest(): boolean {
-    return false;
-  }
-
-  /**
-   * Refresh the members health is tracked for. A legacy balancing config
-   * only contributes its health thresholds; its strategy is ignored.
-   */
+  /** Refresh the members health is tracked for, and the thresholds. */
   refreshFromConfig(
-    providers: ReadonlyArray<{ id: string; enabled?: boolean }>,
-    balancing?: Pick<
-      BalancingConfig,
-      'unhealthyThreshold' | 'recoveryIntervalMs'
-    >,
+    providers: ReadonlyArray<{ id: string }>,
+    thresholds?: Partial<ProviderHealthThresholds>,
   ): void {
-    this.members = providers.map((p) => ({
-      profileId: p.id,
-      enabled: p.enabled ?? true,
-    }));
+    this.members = providers.map((p) => ({ profileId: p.id }));
     this.unhealthyThreshold =
-      balancing?.unhealthyThreshold ?? DEFAULT_UNHEALTHY_THRESHOLD;
+      thresholds?.unhealthyThreshold ?? DEFAULT_UNHEALTHY_THRESHOLD;
     this.recoveryIntervalMs =
-      balancing?.recoveryIntervalMs ?? DEFAULT_RECOVERY_INTERVAL_MS;
+      thresholds?.recoveryIntervalMs ?? DEFAULT_RECOVERY_INTERVAL_MS;
 
     // Clean up health entries for removed members
     const memberIds = new Set(this.members.map((m) => m.profileId));
@@ -239,7 +223,7 @@ export class ProviderPool {
   }
 
   /**
-   * Enabled members that are account-healthy and not quarantined for the tier.
+   * Members that are account-healthy and not quarantined for the tier.
    *
    * A tier is either one shared model name (the system fallback tier) or a
    * per-account map (the primary tier, where each account carries its own
@@ -250,7 +234,6 @@ export class ProviderPool {
     now: number,
   ): ProviderPoolMember[] {
     return this.members.filter((m) => {
-      if (!m.enabled) return false;
       const health = this.healthMap.get(m.profileId);
       if (health && !health.healthy) return false;
       const model =
@@ -259,7 +242,7 @@ export class ProviderPool {
     });
   }
 
-  /** Whether any enabled, account-healthy member can still serve the tier. */
+  /** Whether any account-healthy member can still serve the tier. */
   hasCandidateForTier(tier: ProviderTier): boolean {
     this.refreshRecoveryState();
     return this.candidatesForTier(tier, Date.now()).length > 0;
@@ -283,7 +266,6 @@ export class ProviderPool {
     this.refreshRecoveryState(now);
     const accountWalls = this.members
       .filter((member) => {
-        if (!member.enabled) return false;
         const health = this.healthMap.get(member.profileId);
         return !!health && !health.healthy;
       })
@@ -295,9 +277,7 @@ export class ProviderPool {
       if (now >= recoverAt) {
         this.modelQuarantine.delete(key);
       } else if (
-        this.members.some(
-          (member) => member.profileId === modelKeyOwner(key) && member.enabled,
-        )
+        this.members.some((member) => member.profileId === modelKeyOwner(key))
       ) {
         modelWalls.push(key);
       }
@@ -321,7 +301,7 @@ export class ProviderPool {
     this.refreshRecoveryState(now);
     let earliest: number | null = null;
     for (const member of this.members) {
-      if (!member.enabled || member.profileId === excludeProfileId) continue;
+      if (member.profileId === excludeProfileId) continue;
       const health = this.healthMap.get(member.profileId);
       let accountAt = now;
       if (health && !health.healthy) {
@@ -343,28 +323,6 @@ export class ProviderPool {
       if (earliest === null || memberAt < earliest) earliest = memberAt;
     }
     return earliest;
-  }
-
-  // ─── 选择 ────────────────────────────────────────────────
-
-  /**
-   * The first member, in configuration order, that can still serve `tier`;
-   * when none can, the first enabled member, so the failure surfaces there.
-   *
-   * @deprecated removed in the model-connections rework: a binding picks the
-   * connection. Kept for callers not yet moved off the automatic pool.
-   */
-  selectProvider(tier: ProviderTier = ''): string {
-    this.refreshRecoveryState();
-    const selected = this.candidatesForTier(tier, Date.now())[0];
-    if (selected) return selected.profileId;
-    const fallback = this.members.find((m) => m.enabled) || this.members[0];
-    if (!fallback) throw new Error('Provider pool has no members configured');
-    logger.warn(
-      { profileId: fallback.profileId },
-      'All providers unhealthy, falling back to first available',
-    );
-    return fallback.profileId;
   }
 
   // ─── 健康上报 ────────────────────────────────────────────
@@ -451,7 +409,6 @@ export class ProviderPool {
    */
   refreshRecoveryState(now = Date.now()): void {
     for (const member of this.members) {
-      if (!member.enabled) continue;
       const health = this.healthMap.get(member.profileId);
       if (!health || health.healthy || health.unhealthySince === null) continue;
       // An upstream-reported reset is authoritative over the local interval:
