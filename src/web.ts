@@ -93,6 +93,8 @@ import {
   getChannelMount,
   getJidsByFolder,
   getMessageCursor,
+  getMessagesSince,
+  getQueuedFollowUp,
   storeMessageDirect,
   deleteUserSession,
   updateSessionLastActive,
@@ -471,31 +473,58 @@ app.post('/api/messages', authMiddleware, async (c) => {
           ),
         },
         send,
-        () => requeueStoredWebInput(chatJid, agentId),
+        (messageId) => requeueStoredWebInput(chatJid, agentId, messageId),
       )
     : await send();
   return c.json(outcome.body, outcome.status);
 });
 
 /**
- * Hand a stored Web input whose request failed before queueing it to the
- * queue again. The main chat's message loop polls stored inputs and picks it
- * up by itself; a session (`#agent:`) input is only read when that session
- * is next processed, so it is kicked here. Processing a session with nothing
- * pending is a no-op, and a running session drains its queue when it ends.
+ * Hand a stored Web input whose request failed before it was queued to the
+ * queue again, if its conversation still exists and the input still waits.
+ *
+ * - A durable follow-up (sent while a run was active) waits for its lane's
+ *   dispatcher, which the failed step may never have reached; dispatching is
+ *   a no-op while the lane runs, and the run drains the queue when it ends.
+ * - Any other input waits behind its lane's pull cursor: the main chat is
+ *   checked again, a session (`#agent:`) processed again. Both only read
+ *   what is still pending, and a running lane is left to finish first.
  */
 function requeueStoredWebInput(
   chatJid: string,
   agentId: string | undefined,
+  messageId: string,
 ): void {
-  if (!agentId || !deps?.processAgentConversation) return;
-  const virtualChatJid = `${chatJid}#agent:${agentId}`;
-  if (deps.queue.getActiveQueryId(virtualChatJid)) return;
+  if (!deps) return;
+  const laneJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
+  if (agentId) {
+    const agent = getAgent(agentId);
+    if (!agent || agent.kind !== 'conversation' || agent.chat_jid !== chatJid) {
+      return;
+    }
+  } else if (!getRegisteredGroup(chatJid)) {
+    return;
+  }
+  if (getQueuedFollowUp(laneJid, messageId)) {
+    deps.dispatchQueuedFollowUps?.(laneJid);
+    return;
+  }
+  const pullCursor = deps.getLastAgentTimestamp()[laneJid] ?? {
+    timestamp: '',
+    id: '',
+  };
+  const pending = getMessagesSince(laneJid, pullCursor).some(
+    (message) => message.id === messageId,
+  );
+  if (!pending || deps.queue.getActiveQueryId(laneJid)) return;
+  if (!agentId) {
+    deps.queue.enqueueMessageCheck(chatJid);
+    return;
+  }
   const processAgentConversation = deps.processAgentConversation;
-  deps.queue.enqueueTask(
-    virtualChatJid,
-    `agent-conv:${agentId}:${Date.now()}`,
-    () => processAgentConversation(chatJid, agentId),
+  if (!processAgentConversation) return;
+  deps.queue.enqueueTask(laneJid, `agent-conv:${agentId}:${Date.now()}`, () =>
+    processAgentConversation(chatJid, agentId),
   );
 }
 
@@ -648,7 +677,7 @@ async function sendOnce(
     fingerprint: string;
   },
   send: (idempotency: WebSendIdempotency) => Promise<WebSendOutcome>,
-  requeue: () => void,
+  requeue: (messageId: string) => void,
 ): Promise<WebSendOutcome> {
   const { userId, chatJid, clientMessageId, fingerprint } = key;
   const mapKey = JSON.stringify([userId, chatJid, clientMessageId]);
@@ -665,7 +694,9 @@ async function sendOnce(
     if (stored.fingerprint !== fingerprint) return DEDUP_CONFLICT;
     const { partial, ...response } = stored.response;
     // Stored, but the first attempt failed before finishing: queue it again.
-    if (partial) requeueSafely(requeue, chatJid);
+    if (partial && typeof response.messageId === 'string') {
+      requeueSafely(() => requeue(response.messageId as string), chatJid);
+    }
     return { status: 200, body: { ...response, deduplicated: true } };
   }
 
@@ -708,7 +739,8 @@ async function sendOnce(
       { chatJid, clientMessageId, messageId: storedMessageId, err },
       'Web send failed after its message was stored',
     );
-    requeueSafely(requeue, chatJid);
+    const messageId = storedMessageId;
+    requeueSafely(() => requeue(messageId), chatJid);
     return {
       status: 500,
       body: {

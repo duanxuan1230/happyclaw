@@ -128,7 +128,9 @@ const calls = {
   enqueue: [] as string[],
   promote: [] as string[],
   tasks: [] as string[],
+  dispatched: [] as string[],
 };
+const pullCursors: Record<string, { timestamp: string; id: string }> = {};
 let failFormat = false;
 let activeRunId: string | null = null;
 let promoteGate: Promise<void> | null = null;
@@ -148,6 +150,8 @@ const app = web.createAppForTest({
     closeStdin: () => {},
   },
   processAgentConversation: async () => {},
+  getLastAgentTimestamp: () => pullCursors,
+  dispatchQueuedFollowUps: (jid: string) => calls.dispatched.push(jid),
   getSessions: () => ({}),
   setLastAgentTimestamp: () => {},
   getRegisteredGroups: () => ({}),
@@ -232,6 +236,8 @@ beforeEach(() => {
   resets.fresh = 0;
   failFormat = false;
   calls.tasks.length = 0;
+  calls.dispatched.length = 0;
+  for (const jid of Object.keys(pullCursors)) delete pullCursors[jid];
   announced.length = 0;
   calls.enqueue.length = 0;
   calls.promote.length = 0;
@@ -379,6 +385,8 @@ describe('Web send idempotency', () => {
       storedWith(OWNER_JID, 'stored then failed')[0].id,
     );
     expect(calls.promote).toHaveLength(1);
+    // The steer is a durable follow-up whose dispatch the failure skipped.
+    expect(calls.dispatched).toEqual([OWNER_JID, OWNER_JID]);
   });
 
   test('a session input stored before a failure is queued again, and again on resend', async () => {
@@ -407,6 +415,50 @@ describe('Web send idempotency', () => {
     await post({ ...body, content: 'session ok', clientMessageId: doneId });
     calls.tasks.length = 0;
     await post({ ...body, content: 'session ok', clientMessageId: doneId });
+    expect(calls.tasks).toEqual([]);
+  });
+
+  test('a replay queues nothing once the session is gone or the input was read', async () => {
+    const extraId = '22222222-3333-4444-8555-666666666666';
+    db.createAgent({
+      id: extraId,
+      group_folder: 'idempotency-owner',
+      chat_jid: OWNER_JID,
+      name: 'Extra',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: 'owner',
+      created_at: new Date().toISOString(),
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    failFormat = true;
+    const goneBody = {
+      agentId: extraId,
+      content: 'session then deleted',
+      clientMessageId: uuid(),
+    };
+    await post(goneBody);
+    const readBody = {
+      agentId: SESSION_ID,
+      content: 'read meanwhile',
+      clientMessageId: uuid(),
+    };
+    const read = await post(readBody);
+    failFormat = false;
+    calls.tasks.length = 0;
+
+    db.deleteAgent(extraId);
+    // The session has since pulled past the input.
+    pullCursors[SESSION_JID] = {
+      timestamp: '9999-01-01T00:00:00.000Z',
+      id: read.body.messageId,
+    };
+    expect((await post(goneBody)).status).toBe(404);
+    expect((await post(readBody)).body.deduplicated).toBe(true);
     expect(calls.tasks).toEqual([]);
   });
 
@@ -524,6 +576,29 @@ describe('Web send idempotency', () => {
       now: longAgo,
     });
     expect(store.pruneWebMessageDedup()).toBe(1);
+  });
+
+  test('writes prune expired rows at most once a minute', () => {
+    const now = Date.now();
+    const longAgo = now - store.WEB_MESSAGE_DEDUP_TTL_MS - 1000;
+    const record = (at: number) =>
+      store.recordWebMessageDedup({
+        userId: 'owner',
+        chatJid: OWNER_JID,
+        clientMessageId: uuid(),
+        fingerprint: 'f',
+        response: {},
+        now: at,
+      });
+    store.pruneWebMessageDedup(now);
+    record(longAgo);
+    record(now + 1000);
+    // The write a second after a prune left the expired row alone.
+    expect(store.pruneWebMessageDedup(now + 2000)).toBe(1);
+
+    record(longAgo);
+    record(now + 2000 + 60_000);
+    expect(store.pruneWebMessageDedup(now + 2000 + 60_000)).toBe(0);
   });
 
   test('ids are per user: nobody reads another user’s answer or collides with it', async () => {

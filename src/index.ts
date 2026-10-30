@@ -23152,6 +23152,7 @@ async function main(): Promise<void> {
       applyAutoIsolateContext(userId, enable),
     resolveEffectiveGroup,
     promoteFollowUp,
+    dispatchQueuedFollowUps: dispatchQueuedFollowUpFamily,
     cancelFollowUp,
     editFollowUp,
     reorderFollowUp,
