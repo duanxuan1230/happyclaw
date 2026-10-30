@@ -51,9 +51,8 @@ export function SearchInput({
         onChange={(e) => handleChange(e.target.value)}
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder}
+        variant="code"
         enterKeyHint="search"
-        autoCapitalize="none"
-        autoCorrect="off"
         className="pr-8 pl-8 phone:pr-11"
         autoFocus={autoFocus}
       />

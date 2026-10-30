@@ -25,6 +25,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { ListGroup, ListRow } from '@/components/common/ListRow';
 import { SearchInput } from '@/components/common/SearchInput';
 import { sidebarRowClass } from '@/components/layout/sidebar/SidebarItem';
 import { cn } from '@/lib/utils';
@@ -296,6 +297,56 @@ export function SettingsNav({
     />
   );
 
+  if (variant === 'page') {
+    // A phone's settings home (cindy's settings screen): grouped rows that
+    // each open their section as a page of its own.
+    const renderPageItem = (item: NavItem) => (
+      <ListRow
+        key={item.key}
+        media={
+          <item.icon
+            aria-hidden="true"
+            className="size-5 text-muted-foreground"
+          />
+        }
+        title={item.label}
+        meta={
+          <ChevronRight
+            aria-hidden="true"
+            className="size-4 text-faint-foreground"
+          />
+        }
+        disabled={disabled(item)}
+        onClick={() => onTabChange(item.key)}
+        className="active:bg-surface-hover"
+      />
+    );
+    const pageGroups = [
+      ...visibleSections,
+      ...(showAbout ? [{ label: '', items: [aboutItem] }] : []),
+    ];
+    return (
+      <nav aria-label="设置导航" className="space-y-5 px-4 pt-2 pb-6">
+        {search}
+        {pageGroups.map((section) => (
+          <section key={section.label || 'about'} className="space-y-1.5">
+            {section.label && (
+              <h2 className="px-4 text-caption font-medium text-muted-foreground">
+                {section.label}
+              </h2>
+            )}
+            <ListGroup>{section.items.map(renderPageItem)}</ListGroup>
+          </section>
+        ))}
+        {pageGroups.length === 0 && (
+          <p className="py-6 text-center text-caption text-muted-foreground">
+            没有匹配的设置
+          </p>
+        )}
+      </nav>
+    );
+  }
+
   const navigation = (
     <>
       {visibleSections.map((section, index) => (
@@ -324,58 +375,6 @@ export function SettingsNav({
       )}
     </>
   );
-
-  if (variant === 'page') {
-    // A phone's settings home (cindy's settings screen): grouped rows that
-    // each open their section as a page of its own.
-    const renderPageItem = (item: NavItem) => (
-      <button
-        key={item.key}
-        type="button"
-        disabled={disabled(item)}
-        onClick={() => {
-          if (!disabled(item)) onTabChange(item.key);
-        }}
-        className="flex min-h-13 w-full items-center gap-3 px-4 text-left text-body text-foreground outline-none transition-colors duration-100 focus-visible:bg-surface-hover active:bg-surface-hover disabled:opacity-50"
-      >
-        <item.icon
-          aria-hidden="true"
-          className="size-5 shrink-0 text-muted-foreground"
-        />
-        <span className="min-w-0 flex-1 truncate">{item.label}</span>
-        <ChevronRight
-          aria-hidden="true"
-          className="size-4 shrink-0 text-faint-foreground"
-        />
-      </button>
-    );
-    const pageGroups = [
-      ...visibleSections,
-      ...(showAbout ? [{ label: '', items: [aboutItem] }] : []),
-    ];
-    return (
-      <nav aria-label="设置导航" className="space-y-5 px-4 pt-2 pb-6">
-        {search}
-        {pageGroups.map((section) => (
-          <section key={section.label || 'about'} className="space-y-1.5">
-            {section.label && (
-              <h2 className="px-4 text-caption font-medium text-muted-foreground">
-                {section.label}
-              </h2>
-            )}
-            <div className="divide-y divide-surface-border overflow-hidden rounded-xl bg-surface-raised ring-1 ring-surface-border">
-              {section.items.map(renderPageItem)}
-            </div>
-          </section>
-        ))}
-        {pageGroups.length === 0 && (
-          <p className="py-6 text-center text-caption text-muted-foreground">
-            没有匹配的设置
-          </p>
-        )}
-      </nav>
-    );
-  }
 
   return (
     <>

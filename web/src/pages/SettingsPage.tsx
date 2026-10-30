@@ -3,11 +3,15 @@ import {
   Suspense,
   useCallback,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  Navigate,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from 'react-router-dom';
 import { ChevronLeft, Menu } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -93,6 +97,7 @@ export function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [navOpen, setNavOpen] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
   const isPhone = useIsPhone();
 
   const hasSystemConfigPermission =
@@ -147,15 +152,14 @@ export function SettingsPage() {
   // A phone shows the section list until a section is picked (the URL names
   // it), so the system back gesture returns from a section to the list.
   const showPhoneList = isPhone && !rawTabValue && !mustChangePassword;
-  const openedFromListRef = useRef(false);
 
   const handleTabChange = useCallback(
     (tab: SettingsTab) => {
       setNavOpen(false);
       if (isPhone) {
-        // Pushed, so back pops to the list instead of leaving settings.
-        openedFromListRef.current = true;
-        setSearchParams({ tab });
+        // Pushed, so back pops to the list instead of leaving settings. The
+        // entry remembers that the list is behind it, across reloads too.
+        setSearchParams({ tab }, { state: { fromSectionList: true } });
       } else {
         setSearchParams({ tab }, { replace: true });
       }
@@ -164,8 +168,9 @@ export function SettingsPage() {
   );
 
   const backToSectionList = () => {
-    if (openedFromListRef.current) {
-      openedFromListRef.current = false;
+    if (
+      (location.state as { fromSectionList?: boolean } | null)?.fromSectionList
+    ) {
       navigate(-1);
     } else {
       // Opened by a link: there is no list entry behind it to pop.

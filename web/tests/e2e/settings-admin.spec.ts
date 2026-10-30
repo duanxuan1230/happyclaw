@@ -117,7 +117,7 @@ test.describe('settings on a phone', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('设置');
     await expect(page.getByRole('button', { name: '打开菜单' })).toBeVisible();
     await expect(page.getByRole('button', { name: '设置分区' })).toHaveCount(0);
-    await expectTapTarget(page, 'nav[aria-label="设置导航"] button');
+    await expectTapTarget(page, 'nav[aria-label="设置导航"] [role="button"]');
     await expectNoHorizontalOverflow(page);
 
     await page.getByRole('button', { name: '个人资料' }).click();
