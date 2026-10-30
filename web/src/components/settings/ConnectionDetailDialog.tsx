@@ -268,7 +268,7 @@ function ConnectionDetail({
         >
           <ConnectionModelList
             provider={provider}
-            showRoles={thirdParty}
+            thirdParty={thirdParty}
             onSaved={onChanged}
             setNotice={setNotice}
             setError={setError}

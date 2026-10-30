@@ -25,14 +25,18 @@ import {
 import {
   ModelCapabilityFields,
   ModelRolesFields,
+  withAddDefaults,
 } from './ModelCapabilityFields';
 import { ManualModelInput } from './ModelPicker';
 import { getErrorMessage, type UnifiedProviderPublic } from './types';
 
 interface ConnectionModelListProps {
   provider: UnifiedProviderPublic;
-  /** Third-party connections pick models for sub-agents and background calls. */
-  showRoles: boolean;
+  /**
+   * Third-party: roles for sub-agents and background calls, and added models
+   * declare the registry's window.
+   */
+  thirdParty: boolean;
   onSaved: (provider: UnifiedProviderPublic) => void;
   setNotice: (message: string | null) => void;
   setError: (message: string | null) => void;
@@ -46,7 +50,7 @@ interface ConnectionModelListProps {
  */
 export function ConnectionModelList({
   provider,
-  showRoles,
+  thirdParty,
   onSaved,
   setNotice,
   setError,
@@ -121,8 +125,9 @@ export function ConnectionModelList({
   };
 
   const addManual = async (raw: string) => {
-    const entry = normalizeProviderModels([raw])?.[0];
-    if (!entry) return false;
+    const typed = normalizeProviderModels([raw])?.[0];
+    if (!typed) return false;
+    const { entry } = withAddDefaults(typed, thirdParty);
     if (models.some((other) => other.id === entry.id)) {
       setError(`列表里已经有 ${entry.id}`);
       return false;
@@ -145,6 +150,11 @@ export function ConnectionModelList({
       const merged = mergeDiscoveredModels(
         models,
         discoveredModelsFor(connectionKind(provider), result.models),
+      );
+      // New models start the way the add flow starts them.
+      const added = new Set(merged.added);
+      merged.models = merged.models.map((entry) =>
+        added.has(entry.id) ? withAddDefaults(entry, thirdParty).entry : entry,
       );
       if (merged.added.length === 0) {
         setNotice('没有发现新模型');
@@ -240,7 +250,7 @@ export function ConnectionModelList({
         </Button>
       </div>
 
-      {showRoles && (
+      {thirdParty && (
         <ModelRolesFields
           models={models.map((entry) => entry.id)}
           roles={roles}

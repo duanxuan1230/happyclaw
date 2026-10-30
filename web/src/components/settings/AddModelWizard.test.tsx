@@ -465,7 +465,12 @@ describe('vendor preset', () => {
       'select[aria-label="relay-unknown 的上下文长度"]',
     ) as HTMLSelectElement;
     expect(window.value).toBe('');
-    expect(window.selectedOptions[0].textContent).toContain('未知');
+    // Left empty, Claude Code runs it at 200K; nothing to suggest.
+    expect(window.selectedOptions[0].textContent).toContain('未填（按 200K）');
+    expect(
+      document.querySelector('select[aria-label="glm-5.3 的上下文长度"]')
+        ?.parentElement?.parentElement?.textContent,
+    ).not.toContain('建议');
     await act(async () => {
       window.value = '256000';
       window.dispatchEvent(new Event('change', { bubbles: true }));
@@ -489,7 +494,9 @@ describe('vendor preset', () => {
       expect.objectContaining({
         anthropicModel: 'glm-5.3',
         models: [
-          { id: 'glm-5.3' },
+          // A third-party connection declares the registry's window, so
+          // launches use it; a family guess lends no window.
+          { id: 'glm-5.3', contextWindow: 1_000_000 },
           { id: 'gpt-6.1-terra' },
           {
             id: 'vendor-x',
@@ -540,7 +547,10 @@ describe('vendor preset', () => {
     await flush();
     expect(mocks.post).toHaveBeenCalledWith(
       PROVIDERS,
-      expect.objectContaining({ models: [{ id: 'glm-5.3' }], roles: {} }),
+      expect.objectContaining({
+        models: [{ id: 'glm-5.3', contextWindow: 1_000_000 }],
+        roles: {},
+      }),
     );
   });
 });
@@ -894,6 +904,18 @@ describe('official kinds', () => {
       'false',
     );
     expect(text()).not.toContain('不指定');
+    // The registry window is only offered: picking it is the 1M opt-in.
+    expect(
+      (
+        document.querySelector(
+          'select[aria-label="claude-opus-5-5 的上下文长度"]',
+        ) as HTMLSelectElement
+      ).value,
+    ).toBe('');
+    expect(text()).toContain('建议：1M');
+    // A model typed by hand is no different.
+    await type('input[aria-label="手动添加模型"]', 'claude-sonnet-5-5');
+    await click(button('添加'));
     // Official connections have no tiers to assign.
     expect(text()).not.toContain('后台与子代理');
     await next();
@@ -915,7 +937,7 @@ describe('official kinds', () => {
       type: 'official',
       anthropicApiKey: 'sk-ant-1',
       anthropicModel: 'claude-opus-5-5',
-      models: [{ id: 'claude-opus-5-5' }],
+      models: [{ id: 'claude-opus-5-5' }, { id: 'claude-sonnet-5-5' }],
     });
   });
 

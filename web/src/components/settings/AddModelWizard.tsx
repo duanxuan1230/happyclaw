@@ -234,7 +234,7 @@ export function AddModelWizard({
         next.kind === 'preset' ? getModelPreset(next.presetId) : null;
       setCandidates(
         nextPreset
-          ? addCandidates(manual, nextPreset.models, 'preset', true)
+          ? addCandidates(manual, nextPreset.models, 'preset', true, true)
           : manual,
       );
       setDiscovery({ status: 'idle' });
@@ -326,6 +326,7 @@ export function AddModelWizard({
               discoveredModelsFor(kind, result.models),
               'discovered',
               result.source === 'builtin' ? true : 'known',
+              thirdParty,
             ),
           );
           setDiscoveredAuthMode(result.authMode ?? null);
@@ -344,6 +345,7 @@ export function AddModelWizard({
                 CLAUDE_MODEL_ALIASES.map((id) => ({ id })),
                 'discovered',
                 kind === 'claude_subscription' ? true : 'known',
+                false,
               ),
             );
         }
@@ -809,6 +811,7 @@ export function AddModelWizard({
           onCandidatesChange={setCandidates}
           roles={thirdParty ? roles : null}
           onRolesChange={setRoles}
+          declareSuggestedWindow={thirdParty}
           discovery={discovery}
           onRetryDiscovery={runDiscovery}
         />

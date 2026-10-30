@@ -455,6 +455,29 @@ describe('model list', () => {
     expect(text()).not.toContain('1M 上下文');
   });
 
+  test('the suggestion fills the registry window in one tap', async () => {
+    await render(legacyProvider);
+    await click(
+      [...document.querySelectorAll('button')].find(
+        (node) =>
+          node.textContent === '建议：1M' &&
+          node.parentElement?.textContent?.includes('上下文') &&
+          node.closest('li')?.textContent?.startsWith('glm-5.2'),
+      ),
+    );
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      {
+        models: [
+          { id: 'glm-5.3' },
+          { id: 'glm-5.2', defaultEffort: 'max', contextWindow: 1_000_000 },
+        ],
+      },
+      120_000,
+    );
+  });
+
   test('a context window is saved per model, without asking', async () => {
     await render(legacyProvider);
     await choose('select[aria-label="glm-5.2 的上下文长度"]', '128000');
@@ -559,6 +582,7 @@ describe('model list', () => {
       models: [
         { id: 'glm-5.3', contextWindow: 128_000 },
         { id: 'glm-5.4', contextWindow: 400_000, efforts: ['high'] },
+        { id: 'vendor-new' },
       ],
     });
     await render(legacyProvider);
@@ -576,11 +600,16 @@ describe('model list', () => {
           { id: 'glm-5.3' },
           { id: 'glm-5.2', defaultEffort: 'max' },
           { id: 'glm-5.4', contextWindow: 400_000, efforts: ['high'] },
+          // Unknown: every effort declared, like the add flow.
+          {
+            id: 'vendor-new',
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          },
         ],
       },
       120_000,
     );
-    expect(setNotice).toHaveBeenCalledWith('新增 1 个模型');
+    expect(setNotice).toHaveBeenCalledWith('新增 2 个模型');
   });
 
   test('a model already listed is not added twice, [1m] or not', async () => {
@@ -603,7 +632,11 @@ describe('model list', () => {
         models: [
           { id: 'glm-5.3' },
           { id: 'glm-5.2', defaultEffort: 'max' },
-          { id: 'glm-6', contextWindow: 1_000_000 },
+          {
+            id: 'glm-6',
+            contextWindow: 1_000_000,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          },
         ],
       },
       120_000,

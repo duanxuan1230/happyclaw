@@ -5,11 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import {
-  MODEL_EFFORTS,
   isValidModelId,
   modelCapabilities,
   normalizeProviderModels,
-  resolveModelCapabilities,
   splitOneMillionSuffix,
   type ConnectionModelRoles,
   type DiscoveredModel,
@@ -21,6 +19,7 @@ import { errorCopy } from './model-connections';
 import {
   ModelCapabilityFields,
   ModelRolesFields,
+  withAddDefaults,
 } from './ModelCapabilityFields';
 
 /** One model the wizard may save with the connection. */
@@ -43,35 +42,38 @@ export function candidateEntry(candidate: ModelCandidate): ProviderModelEntry {
 
 /**
  * A model as a candidate: its window from the vendor or the preset (`[1m]`
- * spelled the old way counts as 1M), its vendor efforts, and for a model
- * nothing is known about every effort, marked unverified for the user to
- * trim.
+ * spelled the old way counts as 1M), its vendor efforts, and what an added
+ * model starts with (see withAddDefaults).
  */
 function toCandidate(
   model: DiscoveredModel | ModelPresetModel,
   origin: ModelCandidate['origin'],
   picked: boolean,
+  declareSuggestedWindow: boolean,
 ): ModelCandidate {
-  const [entry] = normalizeProviderModels([model]) ?? [];
+  const [normalized] = normalizeProviderModels([model]) ?? [];
+  const { entry, effortsUnverified } = withAddDefaults(
+    normalized,
+    declareSuggestedWindow,
+  );
   const candidate: ModelCandidate = { ...entry, picked, origin };
   if (model.name) candidate.name = model.name;
-  if (resolveModelCapabilities(entry).effortsSource === 'none') {
-    candidate.efforts = [...MODEL_EFFORTS];
-    candidate.effortsUnverified = true;
-  }
+  if (effortsUnverified) candidate.effortsUnverified = true;
   return candidate;
 }
 
 /**
  * Adds models the list does not have yet, leaving the ones it has (and the
  * user's choices on them) alone. `picked: 'known'` checks the models the
- * registry knows and leaves the rest unchecked.
+ * registry knows and leaves the rest unchecked. A third-party connection
+ * declares the registry's window (`declareSuggestedWindow`).
  */
 export function addCandidates(
   existing: readonly ModelCandidate[],
   models: ReadonlyArray<DiscoveredModel | ModelPresetModel>,
   origin: ModelCandidate['origin'],
   picked: boolean | 'known',
+  declareSuggestedWindow: boolean,
 ): ModelCandidate[] {
   const known = new Set(existing.map((candidate) => candidate.id));
   const next = [...existing];
@@ -84,6 +86,7 @@ export function addCandidates(
         model,
         origin,
         picked === 'known' ? modelCapabilities(id) !== null : picked,
+        declareSuggestedWindow,
       ),
     );
   }
@@ -105,6 +108,8 @@ interface ModelPickerProps {
   onCandidatesChange: (next: ModelCandidate[]) => void;
   /** Third-party connections pick models for sub-agents and background calls. */
   roles: ConnectionModelRoles | null;
+  /** Added models declare the registry's window (third-party connections). */
+  declareSuggestedWindow: boolean;
   onRolesChange: (next: ConnectionModelRoles) => void;
   discovery: DiscoveryState;
   onRetryDiscovery: () => void;
@@ -116,6 +121,7 @@ export function ModelPicker({
   onCandidatesChange,
   roles,
   onRolesChange,
+  declareSuggestedWindow,
   discovery,
   onRetryDiscovery,
 }: ModelPickerProps) {
@@ -154,7 +160,13 @@ export function ModelPicker({
         ? candidates.map((candidate) =>
             candidate === existing ? { ...candidate, picked: true } : candidate,
           )
-        : addCandidates(candidates, [{ id: raw }], 'manual', true),
+        : addCandidates(
+            candidates,
+            [{ id: raw }],
+            'manual',
+            true,
+            declareSuggestedWindow,
+          ),
     );
     setFilter('');
     return true;
