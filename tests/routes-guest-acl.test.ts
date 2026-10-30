@@ -709,6 +709,28 @@ describe('admin user management cannot mint or convert guests', () => {
     expect(list.body.users[0].guest_owner_username).toBe(`user_${OWNER}`);
   });
 
+  test("a member user manager cannot take over an admin's guest", async () => {
+    const manager = 'flow-user-manager';
+    user(manager, 'member');
+    db.updateUserFields(manager, { permissions: ['manage_users'] });
+    const cookie = mintCookie(manager);
+    const before = db.getUserById(guestId)!;
+    for (const [method, url, body] of [
+      ['PATCH', `/api/admin/users/${guestId}`, { password: 'Takeover-123!' }],
+      ['PATCH', `/api/admin/users/${guestId}`, { status: 'active' }],
+      ['DELETE', `/api/admin/users/${guestId}/sessions`, undefined],
+      ['DELETE', `/api/admin/users/${guestId}`, undefined],
+    ] as const) {
+      const res = await call(cookie, method, url, body);
+      expect(res.status, `${method} ${url}`).toBe(403);
+    }
+    const after = db.getUserById(guestId)!;
+    expect(after.status).toBe(before.status);
+    expect(db.getUserByUsername(after.username)!.password_hash).toBe(
+      db.getUserByUsername(before.username)!.password_hash,
+    );
+  });
+
   test('billing admin tools refuse guests', async () => {
     const billing = await import('../src/billing.js');
     expect(() => billing.assignPlan(guestId, 'any-plan', OWNER)).toThrow(

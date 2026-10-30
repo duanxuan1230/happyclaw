@@ -229,11 +229,23 @@ const ISO_DATE_RE =
 function denyEscalationToTarget(
   c: any,
   actor: AuthUser,
-  target: { role: string; permissions?: readonly Permission[] },
+  target: {
+    role: string;
+    permissions?: readonly Permission[];
+    guest_owner_id?: string | null;
+  },
   action: string,
 ): Response | null {
   if (actor.role === 'admin') return null;
   if (target.role === 'admin') return null;
+  // A guest holds no permissions but reads its owner's granted workspaces:
+  // resetting its password or re-enabling it would hand those over.
+  if (target.role === 'guest' && target.guest_owner_id !== actor.id) {
+    return c.json(
+      { error: `Forbidden: cannot ${action} another user's guest account` },
+      403,
+    );
+  }
   const actorPerms = new Set<Permission>(actor.permissions);
   const extra = (target.permissions ?? []).filter((p) => !actorPerms.has(p));
   if (extra.length === 0) return null;
