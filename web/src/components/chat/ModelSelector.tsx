@@ -130,6 +130,11 @@ export interface SessionModelSelection {
     model?: string | null;
     /** The effort a launch with no pick runs at, when its model takes one. */
     effort?: string | null;
+    /**
+     * The bound connection is deleted or has no credential: a run on the
+     * default fails rather than falling back to another connection.
+     */
+    connectionMissing?: boolean;
   };
   options: SessionModelOption[];
 }
@@ -139,7 +144,7 @@ const DEFAULT_SOURCE_LABELS: Record<DefaultModelSource, string> = {
   owner_main: '跟随主智能体',
   system_main: '跟随主 HappyClaw',
   workspace_env: '工作区环境变量',
-  none: '未设置模型',
+  none: '未选择模型',
 };
 
 /** Where the conversation's default comes from, as the default row reads. */
@@ -150,12 +155,30 @@ export function defaultSourceLabel(selection: SessionModelSelection): string {
   );
 }
 
-/** What the default resolves to in this conversation: connection and model. */
-export function describeDefaultModel(selection: SessionModelSelection): string {
-  const { source, modelConfigId, model } = selection.default;
+/** The default cannot run: nothing is chosen, or its connection is unusable. */
+export function defaultUnusable(selection: SessionModelSelection): boolean {
+  return (
+    selection.default.source === 'none' || !!selection.default.connectionMissing
+  );
+}
+
+/**
+ * What the default resolves to in this conversation: connection and model,
+ * or why it cannot run and what to do about it.
+ */
+export function describeDefaultModel(
+  selection: SessionModelSelection,
+  canAddModel = false,
+): string {
+  const { source, modelConfigId, model, connectionMissing } = selection.default;
+  if (connectionMissing) return '连接不可用，绑定的连接已删除或缺少凭据';
   if (source === 'workspace_env') return '使用工作区自带的 Provider 环境变量';
   const named = selection.options.find((option) => option.id === modelConfigId);
-  if (!named) return '没有可用的模型连接';
+  if (source === 'none' || !named) {
+    return canAddModel
+      ? '选择一个模型，或在下方添加模型'
+      : '请联系管理员添加模型';
+  }
   // A ChatGPT connection is named by the model it runs; the others by name
   // and, when known, the model.
   if (named.codex) return model || named.codex.defaultModel;
@@ -320,7 +343,11 @@ function optionRows(
 function rowDetail(row: ModelRow): string {
   return [
     row.option.name,
-    row.contextWindow ? `${formatTokenCount(row.contextWindow)} 上下文` : null,
+    row.contextWindow
+      ? `${formatTokenCount(row.contextWindow)} 上下文`
+      : row.option.models && row.id
+        ? '上下文未知'
+        : null,
     row.note,
     optionStatus(row.option),
   ]
@@ -433,6 +460,8 @@ export function resolveEffortContext(
   const levels = option && model ? modelEfforts(option, model) : null;
   if (!option || !levels) return null;
   const picked = !!selection.selectedModelConfigId;
+  // Nothing to set an effort on while the default cannot run.
+  if (!picked && defaultUnusable(selection)) return null;
   return {
     option,
     model,
@@ -688,15 +717,20 @@ export function ModelSelector({
       : DEFAULT_ROW_KEY;
   const effortContext = resolveEffortContext(selection);
   // The trigger names the model in use, without where the default came from.
-  const triggerName =
-    inUse.model ||
-    inUse.option?.name ||
-    (selection.default.source === 'workspace_env'
-      ? defaultSourceLabel(selection)
-      : '未设置模型');
-  const fullLabel = inUse.model
-    ? [inUse.option?.name, inUse.model].filter(Boolean).join(' · ')
-    : triggerName;
+  const unusable = !picked && defaultUnusable(selection);
+  const triggerName = unusable
+    ? selection.default.connectionMissing
+      ? '连接不可用'
+      : '未选择模型'
+    : inUse.model ||
+      inUse.option?.name ||
+      (selection.default.source === 'workspace_env'
+        ? defaultSourceLabel(selection)
+        : '未选择模型');
+  const fullLabel =
+    inUse.model && !unusable
+      ? [inUse.option?.name, inUse.model].filter(Boolean).join(' · ')
+      : triggerName;
   const tooltip = picked
     ? fullLabel
     : `${defaultSourceLabel(selection)} · ${fullLabel}`;
@@ -825,7 +859,7 @@ export function ModelSelector({
 
   const mark = saving ? (
     <Loader2 className="size-5 shrink-0 animate-spin p-0.5" />
-  ) : inUse.option ? (
+  ) : inUse.option && !unusable ? (
     <VendorTile
       size="sm"
       vendor={vendorOf(inUse.option, inUse.model)}
@@ -867,7 +901,14 @@ export function ModelSelector({
               {mark}
               {!compact && (
                 <>
-                  <span className="min-w-0 truncate">{triggerName}</span>
+                  <span
+                    className={cn(
+                      'min-w-0 truncate',
+                      unusable && 'text-warning',
+                    )}
+                  >
+                    {triggerName}
+                  </span>
                   {shown?.level && (
                     <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
                       <span
@@ -901,7 +942,14 @@ export function ModelSelector({
                   className={cn(TRIGGER_CLASS, 'max-w-[240px]')}
                 >
                   {mark}
-                  <span className="min-w-0 truncate">{triggerName}</span>
+                  <span
+                    className={cn(
+                      'min-w-0 truncate',
+                      unusable && 'text-warning',
+                    )}
+                  >
+                    {triggerName}
+                  </span>
                   {chevron}
                 </button>
               </TooltipTrigger>
@@ -1306,7 +1354,11 @@ function ModelPanel({
           {showDefault && (
             <RowButton
               checked={selectedKey === DEFAULT_ROW_KEY}
-              disabled={disabled}
+              // A default that cannot run is not offered as a choice.
+              disabled={
+                disabled ||
+                (defaultUnusable(selection) && selectedKey !== DEFAULT_ROW_KEY)
+              }
               onClick={() => onPick(null)}
               mark={
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-selected text-muted-foreground">
@@ -1314,7 +1366,8 @@ function ModelPanel({
                 </span>
               }
               title={sourceLabel}
-              detail={describeDefaultModel(selection)}
+              detail={describeDefaultModel(selection, !!onAddModel)}
+              warning={defaultUnusable(selection)}
             />
           )}
           {showDefault && selectedKey === DEFAULT_ROW_KEY && effortRow}
@@ -1500,6 +1553,7 @@ function RowButton({
   mark,
   title,
   detail,
+  warning = false,
 }: {
   checked: boolean;
   disabled: boolean;
@@ -1507,6 +1561,8 @@ function RowButton({
   mark: ReactNode;
   title: string;
   detail: string;
+  /** The second line says why this cannot run. */
+  warning?: boolean;
 }) {
   return (
     <button
@@ -1527,7 +1583,12 @@ function RowButton({
         <span className="block truncate text-body font-medium text-foreground">
           {title}
         </span>
-        <span className="block truncate text-caption text-muted-foreground">
+        <span
+          className={cn(
+            'block truncate text-caption',
+            warning ? 'text-warning' : 'text-muted-foreground',
+          )}
+        >
           {detail}
         </span>
       </span>
