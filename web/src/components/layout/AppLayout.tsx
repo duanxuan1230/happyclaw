@@ -27,6 +27,7 @@ import { useUsageLimitWaitSubscription } from '../../stores/usage-limit-waits';
 import { useAutomationSubscription } from '../../stores/automations';
 import { AutomationFormHost } from '../automations/AutomationFormHost';
 import { CreateWorkspaceHost } from './CreateWorkspaceHost';
+import { syncAppBadge } from '../../utils/appBadge';
 
 export function AppLayout() {
   const location = useLocation();
@@ -177,6 +178,11 @@ export function AppLayout() {
     const appName = appearance?.appName || 'HappyClaw';
     document.title = totalUnread > 0 ? `(${totalUnread}) ${appName}` : appName;
   }, [totalUnread, appearance?.appName]);
+  // 同一个未读数也挂到安装后应用的图标上；离开已登录外壳（退出登录）时清掉
+  useEffect(() => {
+    syncAppBadge(totalUnread);
+  }, [totalUnread]);
+  useEffect(() => () => syncAppBadge(0), []);
 
   // 全局监听 agent_status，确保不在 ChatView 页面时也能更新 sub-agent 状态
   useEffect(() => {

@@ -22,6 +22,7 @@ import {
 } from './utils/staleChunkReload';
 import { Toaster } from '@/components/ui/sonner';
 import { ConfirmHost } from '@/components/common/ConfirmHost';
+import { useLaunchQueue } from './hooks/useLaunchQueue';
 
 // The shell and chat page are preloaded at entry and render without
 // suspending once loaded (see preloadedComponent): with lazy() each load
@@ -348,6 +349,7 @@ function getAppRouter() {
 }
 
 export function App() {
+  useLaunchQueue(getAppRouter());
   return (
     <>
       {/* Top center stays clear of page header actions on both sides. */}
