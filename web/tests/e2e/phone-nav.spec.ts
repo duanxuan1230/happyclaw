@@ -272,6 +272,7 @@ test.describe('phone', () => {
     await expect(routeProbe(page)).toHaveText('/settings?tab=profile');
     await expect(drawer).toHaveCount(0);
 
+    await page.getByRole('button', { name: '返回' }).click();
     await page.getByRole('button', { name: '打开菜单' }).click();
     await page
       .getByTestId('nav-drawer')
@@ -294,11 +295,16 @@ test.describe('phone', () => {
       '页面 /automations',
     );
 
-    await openShell(page, '/settings?tab=profile');
+    // Settings owns its bar: the section list keeps the hamburger, a section
+    // swaps it for back, and back returns to the list.
+    await openShell(page, '/settings');
     await expect(page.getByTestId('phone-top-bar')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '打开菜单' })).toHaveCount(1);
-    await page.getByRole('button', { name: '设置分区' }).click();
-    await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible();
+    await page.getByRole('button', { name: '个人资料' }).click();
+    await expect(routeProbe(page)).toHaveText('/settings?tab=profile');
+    await expect(page.getByRole('button', { name: '打开菜单' })).toHaveCount(0);
+    await page.getByRole('button', { name: '返回' }).click();
+    await expect(routeProbe(page)).toHaveText('/settings');
   });
 
   test('a settings save bar sits on the bottom edge without a tab bar', async ({

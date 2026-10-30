@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  ChevronRight,
   CreditCard,
   Gauge,
   Info,
@@ -223,6 +224,11 @@ interface SettingsNavProps {
   mustChangePassword: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /**
+   * `sidebar`: the desktop column plus a sheet for narrow windows. `page`:
+   * the phone's full-page section list.
+   */
+  variant?: 'sidebar' | 'page';
 }
 
 const navRowClass = cn(sidebarRowClass, 'gap-2.5 pointer-coarse:h-11');
@@ -237,6 +243,7 @@ export function SettingsNav({
   mustChangePassword,
   open,
   onOpenChange,
+  variant = 'sidebar',
 }: SettingsNavProps) {
   const [query, setQuery] = useState('');
   const sections = getSettingsSections({
@@ -317,6 +324,58 @@ export function SettingsNav({
       )}
     </>
   );
+
+  if (variant === 'page') {
+    // A phone's settings home (cindy's settings screen): grouped rows that
+    // each open their section as a page of its own.
+    const renderPageItem = (item: NavItem) => (
+      <button
+        key={item.key}
+        type="button"
+        disabled={disabled(item)}
+        onClick={() => {
+          if (!disabled(item)) onTabChange(item.key);
+        }}
+        className="flex min-h-13 w-full items-center gap-3 px-4 text-left text-body text-foreground outline-none transition-colors duration-100 focus-visible:bg-surface-hover active:bg-surface-hover disabled:opacity-50"
+      >
+        <item.icon
+          aria-hidden="true"
+          className="size-5 shrink-0 text-muted-foreground"
+        />
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        <ChevronRight
+          aria-hidden="true"
+          className="size-4 shrink-0 text-faint-foreground"
+        />
+      </button>
+    );
+    const pageGroups = [
+      ...visibleSections,
+      ...(showAbout ? [{ label: '', items: [aboutItem] }] : []),
+    ];
+    return (
+      <nav aria-label="设置导航" className="space-y-5 px-4 pt-2 pb-6">
+        {search}
+        {pageGroups.map((section) => (
+          <section key={section.label || 'about'} className="space-y-1.5">
+            {section.label && (
+              <h2 className="px-4 text-caption font-medium text-muted-foreground">
+                {section.label}
+              </h2>
+            )}
+            <div className="divide-y divide-surface-border overflow-hidden rounded-xl bg-surface-raised ring-1 ring-surface-border">
+              {section.items.map(renderPageItem)}
+            </div>
+          </section>
+        ))}
+        {pageGroups.length === 0 && (
+          <p className="py-6 text-center text-caption text-muted-foreground">
+            没有匹配的设置
+          </p>
+        )}
+      </nav>
+    );
+  }
 
   return (
     <>

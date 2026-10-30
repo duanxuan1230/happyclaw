@@ -1,6 +1,14 @@
-import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
-import { Navigate, useSearchParams } from 'react-router-dom';
-import { ListTree, Menu } from 'lucide-react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { ChevronLeft, Menu } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Badge } from '@/components/ui/badge';
@@ -84,6 +92,7 @@ export function SettingsPage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [navOpen, setNavOpen] = useState(false);
+  const navigate = useNavigate();
   const isPhone = useIsPhone();
 
   const hasSystemConfigPermission =
@@ -135,13 +144,34 @@ export function SettingsPage() {
     currentUser?.role,
   ]);
 
+  // A phone shows the section list until a section is picked (the URL names
+  // it), so the system back gesture returns from a section to the list.
+  const showPhoneList = isPhone && !rawTabValue && !mustChangePassword;
+  const openedFromListRef = useRef(false);
+
   const handleTabChange = useCallback(
     (tab: SettingsTab) => {
       setNavOpen(false);
-      setSearchParams({ tab }, { replace: true });
+      if (isPhone) {
+        // Pushed, so back pops to the list instead of leaving settings.
+        openedFromListRef.current = true;
+        setSearchParams({ tab });
+      } else {
+        setSearchParams({ tab }, { replace: true });
+      }
     },
-    [setSearchParams],
+    [isPhone, setSearchParams],
   );
+
+  const backToSectionList = () => {
+    if (openedFromListRef.current) {
+      openedFromListRef.current = false;
+      navigate(-1);
+    } else {
+      // Opened by a link: there is no list entry behind it to pop.
+      navigate('/settings', { replace: true });
+    }
+  };
 
   const sectionTitle: Record<SettingsTab, string> = {
     claude: '模型配置',
@@ -206,129 +236,163 @@ export function SettingsPage() {
   const legacyRoute =
     !mustChangePassword && rawTab ? LEGACY_TAB_ROUTES[rawTab] : undefined;
   if (legacyRoute) return <Navigate to={legacyRoute} replace />;
+  const renderSection = () => (
+    <div data-settings-content="true" className="min-w-0 flex-1">
+      <PageContainer size={WIDE_TABS.includes(activeTab) ? 'wide' : 'narrow'}>
+        <header className="mb-8 flex items-start justify-between gap-4 phone:mb-5">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              {/* A phone names the section in its top bar. */}
+              <h1 className="text-title-lg text-foreground phone:hidden">
+                {sectionTitle[activeTab]}
+              </h1>
+              {sectionScope[activeTab] && (
+                <Badge variant="neutral">{sectionScope[activeTab]}</Badge>
+              )}
+            </div>
+            {sectionDescription[activeTab] && (
+              <p className="mt-1 text-body text-muted-foreground">
+                {sectionDescription[activeTab]}
+              </p>
+            )}
+          </div>
+          {activeTab === 'monitor' && !isPhone && <MonitorRefreshButton />}
+        </header>
+
+        {mustChangePassword && (
+          <div
+            role="alert"
+            className="mb-6 rounded-lg bg-warning/10 px-3 py-2.5 text-body text-warning"
+          >
+            检测到首次登录或管理员重置密码，请先在“安全与设备”中修改密码；完成前其他设置暂不可用。
+          </div>
+        )}
+
+        {EMBEDDED_PAGE_TABS.includes(activeTab) ? (
+          <>
+            {activeTab === 'users' && <UsersPage embedded />}
+            {activeTab === 'monitor' && <MonitorPage embedded />}
+            {activeTab === 'billing' && (
+              <Suspense fallback={null}>
+                <BillingPage managementOnly />
+              </Suspense>
+            )}
+          </>
+        ) : activeTab === 'system' ? (
+          <SystemSettingsSection scope="runtime" />
+        ) : activeTab === 'main-agent' ? (
+          <div className="space-y-10">
+            <MainAgentIdentitySection />
+            <MainAgentCapabilitiesSection />
+            <HostIntegrationSettingsSection scope="main-agent" />
+          </div>
+        ) : activeTab === 'host-integration' ? (
+          <HostIntegrationSettingsSection scope="host" />
+        ) : (
+          <>
+            {activeTab === 'claude' && (
+              <ClaudeProviderSection
+                setNotice={(message) => message && toast.success(message)}
+                setError={(message) => message && toast.error(message)}
+              />
+            )}
+            {activeTab === 'registration' && (
+              <div className="space-y-10">
+                <RegistrationSection />
+                <SystemSettingsSection scope="security" />
+              </div>
+            )}
+            {activeTab === 'appearance' && <AppearanceSection />}
+            {activeTab === 'profile' && <ProfileSection />}
+            {activeTab === 'preferences' && <PreferencesSection />}
+            {activeTab === 'my-channels' && <UserChannelsSection />}
+            {activeTab === 'security' && <SecuritySection />}
+            {activeTab === 'about' && <AboutSection />}
+          </>
+        )}
+      </PageContainer>
+    </div>
+  );
+
+  const navProps = {
+    activeTab,
+    onTabChange: handleTabChange,
+    canManageSystemConfig,
+    canManageBilling,
+    canManageUsers: !!canManageUsers,
+    isAdmin: currentUser?.role === 'admin',
+    mustChangePassword,
+  };
+
+  // Phone: a stack. The section list is the settings home; a section opens
+  // as its own page with a back button (cindy's settings screens).
+  if (isPhone) {
+    const phoneBar = (
+      title: string,
+      leading: ReactNode,
+      action?: ReactNode,
+    ) => (
+      <div className="sticky top-0 z-10 flex h-13 items-center gap-1 border-b border-surface-border bg-background/90 px-2 backdrop-blur">
+        {leading}
+        <h1 className="min-w-0 flex-1 truncate text-title-sm text-foreground">
+          {title}
+        </h1>
+        {action}
+      </div>
+    );
+    if (showPhoneList) {
+      return (
+        <div data-settings-page="true" className="min-h-full">
+          {phoneBar('设置', <NavDrawerButton />)}
+          <SettingsNav {...navProps} variant="page" />
+        </div>
+      );
+    }
+    return (
+      <div data-settings-page="true" className="min-h-full">
+        {phoneBar(
+          sectionTitle[activeTab],
+          // Until the password is changed there is nowhere else to go.
+          mustChangePassword ? (
+            <NavDrawerButton />
+          ) : (
+            <IconButton
+              label="返回"
+              icon={<ChevronLeft className="size-6" />}
+              size="icon"
+              hideTooltip
+              onClick={backToSectionList}
+              className="size-11 rounded-full text-foreground"
+            />
+          ),
+          activeTab === 'monitor' && <MonitorRefreshButton compact />,
+        )}
+        {renderSection()}
+      </div>
+    );
+  }
 
   return (
     <div
       data-settings-page="true"
       className="min-h-full lg:flex lg:items-start"
     >
-      {/* Mobile header. On a phone the hamburger opens the app drawer and
-          the section list moves to the right. */}
-      <div className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden phone:h-13 phone:gap-1">
-        {isPhone ? (
-          <NavDrawerButton />
-        ) : (
-          <IconButton
-            label="打开导航"
-            hideTooltip
-            size="icon"
-            icon={<Menu className="size-4 text-muted-foreground" />}
-            onClick={() => setNavOpen(true)}
-            className="pointer-coarse:size-11"
-          />
-        )}
+      {/* Narrow desktop header; the menu opens the section sheet. */}
+      <div className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden">
+        <IconButton
+          label="打开导航"
+          hideTooltip
+          size="icon"
+          icon={<Menu className="size-4 text-muted-foreground" />}
+          onClick={() => setNavOpen(true)}
+        />
         {/* The section title is the h1 below; the bar only names the page. */}
-        <span className="truncate text-title-sm text-foreground phone:text-title">
-          设置
-        </span>
-        {isPhone && (
-          <IconButton
-            label="设置分区"
-            hideTooltip
-            size="icon"
-            icon={<ListTree className="size-5" />}
-            onClick={() => setNavOpen(true)}
-            className="ml-auto size-11 rounded-full text-muted-foreground"
-          />
-        )}
+        <span className="truncate text-title-sm text-foreground">设置</span>
       </div>
 
-      <SettingsNav
-        activeTab={activeTab}
-        onTabChange={handleTabChange}
-        canManageSystemConfig={canManageSystemConfig}
-        canManageBilling={canManageBilling}
-        canManageUsers={!!canManageUsers}
-        isAdmin={currentUser?.role === 'admin'}
-        mustChangePassword={mustChangePassword}
-        open={navOpen}
-        onOpenChange={setNavOpen}
-      />
+      <SettingsNav {...navProps} open={navOpen} onOpenChange={setNavOpen} />
 
-      <div data-settings-content="true" className="min-w-0 flex-1">
-        <PageContainer size={WIDE_TABS.includes(activeTab) ? 'wide' : 'narrow'}>
-          <header className="mb-8 flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                <h1 className="text-title-lg text-foreground">
-                  {sectionTitle[activeTab]}
-                </h1>
-                {sectionScope[activeTab] && (
-                  <Badge variant="neutral">{sectionScope[activeTab]}</Badge>
-                )}
-              </div>
-              {sectionDescription[activeTab] && (
-                <p className="mt-1 text-body text-muted-foreground">
-                  {sectionDescription[activeTab]}
-                </p>
-              )}
-            </div>
-            {activeTab === 'monitor' && <MonitorRefreshButton />}
-          </header>
-
-          {mustChangePassword && (
-            <div
-              role="alert"
-              className="mb-6 rounded-lg bg-warning/10 px-3 py-2.5 text-body text-warning"
-            >
-              检测到首次登录或管理员重置密码，请先在“安全与设备”中修改密码；完成前其他设置暂不可用。
-            </div>
-          )}
-
-          {EMBEDDED_PAGE_TABS.includes(activeTab) ? (
-            <>
-              {activeTab === 'users' && <UsersPage embedded />}
-              {activeTab === 'monitor' && <MonitorPage embedded />}
-              {activeTab === 'billing' && (
-                <Suspense fallback={null}>
-                  <BillingPage managementOnly />
-                </Suspense>
-              )}
-            </>
-          ) : activeTab === 'system' ? (
-            <SystemSettingsSection scope="runtime" />
-          ) : activeTab === 'main-agent' ? (
-            <div className="space-y-10">
-              <MainAgentIdentitySection />
-              <MainAgentCapabilitiesSection />
-              <HostIntegrationSettingsSection scope="main-agent" />
-            </div>
-          ) : activeTab === 'host-integration' ? (
-            <HostIntegrationSettingsSection scope="host" />
-          ) : (
-            <>
-              {activeTab === 'claude' && (
-                <ClaudeProviderSection
-                  setNotice={(message) => message && toast.success(message)}
-                  setError={(message) => message && toast.error(message)}
-                />
-              )}
-              {activeTab === 'registration' && (
-                <div className="space-y-10">
-                  <RegistrationSection />
-                  <SystemSettingsSection scope="security" />
-                </div>
-              )}
-              {activeTab === 'appearance' && <AppearanceSection />}
-              {activeTab === 'profile' && <ProfileSection />}
-              {activeTab === 'preferences' && <PreferencesSection />}
-              {activeTab === 'my-channels' && <UserChannelsSection />}
-              {activeTab === 'security' && <SecuritySection />}
-              {activeTab === 'about' && <AboutSection />}
-            </>
-          )}
-        </PageContainer>
-      </div>
+      {renderSection()}
     </div>
   );
 }
