@@ -434,6 +434,19 @@ function storedDespiteError(err: unknown): boolean {
   return (err as ApiError | null)?.body?.stored === true;
 }
 
+/**
+ * A stored send is settled, and a 409 means the id is spent on other
+ * content: either way the next send to this target needs a fresh id.
+ */
+function settleFailedSend(target: string, err: unknown): void {
+  if (
+    storedDespiteError(err) ||
+    (err as { status?: unknown } | null)?.status === 409
+  ) {
+    unconfirmedSends.delete(target);
+  }
+}
+
 const showStoredButFailed = () =>
   showToast('消息已发送', '但处理可能失败，请稍后查看回复');
 const showAlreadySent = () => showToast('这条消息已经发送过');
@@ -3869,6 +3882,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       // 弱网/断网/后端 500 等场景：记录错误并给用户可见的 toast，
       // 返回 false 让调用方（MessageInput）保留输入不清空。
+      settleFailedSend(jid, err);
       if (storedDespiteError(err)) {
         showStoredButFailed();
         return true;
@@ -6290,6 +6304,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().handleRunStarted(runtimeJid, data.runId);
       }
     } catch (err) {
+      settleFailedSend(runtimeJid, err);
       if (storedDespiteError(err)) {
         showStoredButFailed();
         return true;

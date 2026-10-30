@@ -294,7 +294,7 @@ describe('stored, then failed on the server', () => {
     body: { stored: true, messageId: 'm-stored' },
   };
 
-  it('counts as sent, says processing may have failed, and keeps the id', async () => {
+  it('counts as sent, says processing may have failed, and spends the id', async () => {
     const send = useChatStore.getState().sendMessage;
     apiPostMock.mockRejectedValueOnce(storedError);
     expect(await send(JID, 'stored anyway')).toBe(true);
@@ -306,10 +306,21 @@ describe('stored, then failed on the server', () => {
       '发送失败',
       expect.anything(),
     );
+    // The input was cleared as sent: the same text again is a new message.
     apiPostMock.mockResolvedValueOnce(accepted);
     await send(JID, 'stored anyway');
     const [first, second] = sentIds();
-    expect(second).toBe(first);
+    expect(second).not.toBe(first);
+  });
+
+  it('a 409 spends the id too', async () => {
+    const send = useChatStore.getState().sendMessage;
+    apiPostMock.mockRejectedValueOnce({ status: 409, message: 'conflict' });
+    expect(await send(JID, 'conflicted')).toBe(false);
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await send(JID, 'conflicted');
+    const [first, second] = sentIds();
+    expect(second).not.toBe(first);
   });
 
   it('in a session too', async () => {
