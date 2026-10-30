@@ -65,7 +65,7 @@ describe('the resolved model', () => {
     const container = await render(
       <ModelResolutionRow
         resolution={{
-          source: 'default',
+          source: 'system_main',
           model_config_id: 'official',
           model_config_name: 'Claude 官方',
           model: 'opus',
@@ -74,7 +74,7 @@ describe('the resolved model', () => {
       />,
     );
     expect(container.textContent).toContain('Claude 官方 · opus');
-    expect(container.textContent).toContain('全局默认');
+    expect(container.textContent).toContain('跟随主 HappyClaw');
     expect(container.querySelector('.text-warning')).toBeNull();
   });
 
