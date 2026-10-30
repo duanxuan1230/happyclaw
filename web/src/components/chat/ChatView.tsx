@@ -1793,6 +1793,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         <SheetContent
           side="bottom"
           detents
+          // Its header, view rows and file toolbar take ~370px: a lower half
+          // shows no file at all (an iPhone 14 in Safari gets 372px).
+          minHalf={440}
           data-testid="mobile-context-sheet"
           className="gap-0 p-0 data-[side=bottom]:h-[80dvh]"
         >

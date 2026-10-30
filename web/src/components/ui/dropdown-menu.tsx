@@ -44,17 +44,28 @@ function DropdownMenuPortal({
 
 /**
  * Radix opens a menu on pointerdown. For a finger that means a scroll that
- * starts on the trigger opens it, so touch and pen open on the click a tap
- * ends with instead (Radix Select already does). The mouse is unchanged.
+ * starts on the trigger opens it, so touch and pen open when the tap ends
+ * instead: on its pointerup, which a scroll replaces with pointercancel.
+ * Not on the click: iOS Safari sends none for a touch whose pointerdown was
+ * cancelled, and cancelling it is what keeps Radix from opening. The mouse
+ * is unchanged.
  */
 function DropdownMenuTrigger({
   onPointerDown,
+  onPointerUp,
+  onPointerCancel,
   onClick,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Trigger>) {
   const setOpen = React.useContext(DropdownMenuOpenContext);
-  // Set by a touch pointerdown on the closed trigger, spent by its click.
+  // Set by a touch pointerdown on the closed trigger, spent by the tap's
+  // end (its pointerup, or a click should none come).
   const tapRef = React.useRef(false);
+  const endTap = (event: React.SyntheticEvent) => {
+    if (!tapRef.current) return;
+    tapRef.current = false;
+    if (!event.defaultPrevented && !props.disabled) setOpen?.(true);
+  };
   return (
     <DropdownMenuPrimitive.Trigger
       data-slot="dropdown-menu-trigger"
@@ -73,11 +84,17 @@ function DropdownMenuTrigger({
         event.preventDefault();
         tapRef.current = true;
       }}
+      onPointerUp={(event) => {
+        onPointerUp?.(event);
+        endTap(event);
+      }}
+      onPointerCancel={(event) => {
+        onPointerCancel?.(event);
+        tapRef.current = false;
+      }}
       onClick={(event) => {
         onClick?.(event);
-        if (!tapRef.current) return;
-        tapRef.current = false;
-        if (!event.defaultPrevented && !props.disabled) setOpen?.(true);
+        endTap(event);
       }}
       {...props}
     />

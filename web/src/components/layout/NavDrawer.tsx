@@ -151,7 +151,11 @@ export function NavDrawer() {
           <SheetDescription className="sr-only">
             搜索、新对话和应用页面
           </SheetDescription>
-          <DropdownMenu>
+          {/* Not modal: the drawer already blocks the page. A modal menu
+              closing with the drawer (a choice that navigates) can leave
+              Radix's body `pointer-events: none` behind, a dead page, when
+              the drawer finishes unmounting first. */}
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"

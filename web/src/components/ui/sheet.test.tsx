@@ -99,6 +99,9 @@ describe('bottom sheet detents (cindy contextSheetModel)', () => {
     expect(bottomSheetSnapHeights(844)).toEqual({ half: 473, full: 780 });
     // Small screens keep at least 320px.
     expect(bottomSheetSnapHeights(480)).toEqual({ half: 320, full: 416 });
+    // Too short a half for the content leaves only full.
+    expect(bottomSheetSnapHeights(664, 440)).toEqual({ half: 600, full: 600 });
+    expect(bottomSheetSnapHeights(844, 440)).toEqual({ half: 473, full: 780 });
   });
 
   test('a release settles to the nearest detent, or closes well below half', () => {
