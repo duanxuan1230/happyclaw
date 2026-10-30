@@ -1394,3 +1394,78 @@ test.describe('tablet composer', () => {
       .toBeGreaterThan(300);
   });
 });
+
+test.describe('AskUserQuestion cards', () => {
+  test('answers fill the composer, each under its question', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?ask=1`);
+    await expect(composer(page)).toBeVisible();
+    const cards = page.locator('[data-hc-ask-card]');
+    const single = cards.nth(0);
+    const steps = cards.nth(1);
+
+    // One single-choice question: the tap fills the composer, once.
+    await single.getByRole('button', { name: '窄 selector' }).click();
+    await expect.poll(() => composerText(page)).toBe('窄 selector');
+    await single.getByRole('button', { name: '窄 selector' }).click();
+    await expect.poll(() => composerText(page)).toBe('窄 selector');
+    await expect(single).toContainText('已填入输入框');
+
+    // Several questions: one at a time.
+    await composer(page).click();
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.press('Backspace');
+    await expect(steps).toContainText('问题 1/3');
+    await steps.getByRole('button', { name: '看展' }).click();
+    await expect(steps).toContainText('问题 2/3');
+    await steps.getByRole('button', { name: '相机' }).click();
+    await steps.getByRole('button', { name: '伞' }).click();
+    await expect(steps).toContainText('问题 2/3');
+    await steps.getByRole('button', { name: '下一题' }).click();
+    await steps.getByRole('button', { name: '10 点' }).click();
+    await steps.getByRole('button', { name: '填入输入框' }).click();
+    await expect
+      .poll(() => composerText(page))
+      .toBe(
+        '周末去哪？\n答：看展\n带什么？\n答：相机、伞\n几点出发？\n答：10 点',
+      );
+    await expect(steps.getByRole('button', { name: '已填入' })).toBeDisabled();
+
+    // Every control is a comfortable touch target on a phone.
+    if (page.viewportSize()!.width < 500) {
+      for (const name of ['10 点', '上一题', '已填入']) {
+        const box = (await steps.getByRole('button', { name }).boundingBox())!;
+        expect(box.height).toBeGreaterThanOrEqual(40);
+      }
+    }
+  });
+});
+
+test.describe('AskUserQuestion cards, own answers and keys', () => {
+  test('an own answer and the keyboard fill the composer', async ({ page }) => {
+    await page.goto(`${HARNESS_PATH}?ask=1`);
+    await expect(composer(page)).toBeVisible();
+    const steps = page.locator('[data-hc-ask-card]').nth(1);
+
+    const own = steps.getByRole('textbox', { name: /其他答案/ });
+    await own.fill('去海边');
+    await own.press('Enter');
+    await expect(steps).toContainText('问题 2/3');
+    if (page.viewportSize()!.width >= 640) {
+      // Keys while the card has focus: 1–9 pick, Enter moves on.
+      await steps.getByRole('button', { name: '水' }).focus();
+      await page.keyboard.press('2');
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('1');
+    } else {
+      await steps.getByRole('button', { name: '相机' }).click();
+      await steps.getByRole('button', { name: '下一题' }).click();
+      await steps.getByRole('button', { name: '8 点' }).click();
+    }
+    await steps.getByRole('button', { name: '填入输入框' }).click();
+    await expect
+      .poll(() => composerText(page))
+      .toBe('周末去哪？\n答：去海边\n带什么？\n答：相机\n几点出发？\n答：8 点');
+  });
+});
