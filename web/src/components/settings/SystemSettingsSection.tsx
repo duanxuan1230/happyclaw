@@ -236,7 +236,7 @@ function NumberSettingField({
               onBlur={onBlur}
               aria-invalid={!!error}
               aria-describedby={`${descriptionId}${error ? ` ${errorId}` : ''}`}
-              className="min-w-0 tabular-nums sm:w-28 pointer-coarse:min-h-11"
+              className="min-w-0 tabular-nums sm:w-28"
             />
             <span className="w-8 shrink-0 text-caption text-muted-foreground">
               {field.unit}
@@ -458,6 +458,7 @@ export function SystemSettingsSection({
                 htmlFor="system-setting-fallbackModel"
                 control={
                   <Input
+                    variant="code"
                     id="system-setting-fallbackModel"
                     type="text"
                     value={fallbackModel}
@@ -785,7 +786,7 @@ export function HostIntegrationSettingsSection({
                         }}
                         aria-invalid={!!mainAutoCompactError}
                         aria-describedby={`main-agent-auto-compact-percentage-description${mainAutoCompactError ? ' main-agent-auto-compact-percentage-error' : ''}`}
-                        className="min-w-0 tabular-nums sm:w-28 pointer-coarse:min-h-11"
+                        className="min-w-0 tabular-nums sm:w-28"
                       />
                       <span className="w-8 shrink-0 text-caption text-muted-foreground">
                         %
@@ -870,7 +871,8 @@ export function HostIntegrationSettingsSection({
                 }
                 placeholder="留空使用 ~/.claude"
                 aria-describedby="host-integration-claude-dir-description"
-                className="font-mono sm:w-72 pointer-coarse:min-h-11"
+                variant="code"
+                className="font-mono sm:w-72"
               />
             }
           />

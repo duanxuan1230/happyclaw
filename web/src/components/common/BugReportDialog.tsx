@@ -345,7 +345,7 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent
         className={cn(
-          'max-h-[85vh] overflow-y-auto',
+          'max-h-[85dvh] overflow-y-auto',
           step === 2 ? 'sm:max-w-2xl' : 'sm:max-w-lg',
         )}
       >

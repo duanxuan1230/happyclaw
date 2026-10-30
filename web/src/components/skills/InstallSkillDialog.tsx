@@ -371,6 +371,7 @@ export function InstallSkillDialog({
               <Input
                 type="text"
                 value={searchQuery}
+                enterKeyHint="search"
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="搜索关键词..."
                 aria-label="搜索技能市场"
@@ -443,6 +444,7 @@ export function InstallSkillDialog({
                   技能包名称
                 </label>
                 <Input
+                  variant="code"
                   id="skill-pkg"
                   type="text"
                   value={pkg}
@@ -471,6 +473,7 @@ export function InstallSkillDialog({
                   HTTPS Git 仓库地址
                 </label>
                 <Input
+                  variant="code"
                   id="skill-git-url"
                   type="url"
                   value={gitUrl}
@@ -488,6 +491,7 @@ export function InstallSkillDialog({
                     分支或 Tag（可选）
                   </label>
                   <Input
+                    variant="code"
                     id="skill-git-ref"
                     value={gitRef}
                     onChange={(e) => setGitRef(e.target.value)}
@@ -503,6 +507,7 @@ export function InstallSkillDialog({
                     子目录（可选）
                   </label>
                   <Input
+                    variant="code"
                     id="skill-git-subdirectory"
                     value={gitSubdirectory}
                     onChange={(e) => setGitSubdirectory(e.target.value)}

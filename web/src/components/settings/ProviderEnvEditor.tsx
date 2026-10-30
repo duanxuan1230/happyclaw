@@ -226,6 +226,7 @@ export function ProviderEnvEditor({
                     </div>
                     <div className="flex min-w-0 items-center gap-1">
                       <Input
+                        variant="code"
                         id={inputId}
                         type="text"
                         value={current}
@@ -248,7 +249,6 @@ export function ProviderEnvEditor({
                           icon={<RotateCcw />}
                           onClick={() => resetOverride(row.key)}
                           disabled={disabled}
-                          className="pointer-coarse:size-11"
                         />
                       )}
                     </div>
@@ -284,7 +284,7 @@ export function ProviderEnvEditor({
               size="sm"
               onClick={() => setRows([...value.rows, { key: '', value: '' }])}
               disabled={disabled}
-              className="shrink-0 pointer-coarse:min-h-11"
+              className="shrink-0"
             >
               <Plus />
               添加
@@ -314,6 +314,7 @@ export function ProviderEnvEditor({
                   className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center"
                 >
                   <Input
+                    variant="code"
                     type="text"
                     value={row.key}
                     onChange={(e) => updateRow(idx, 'key', e.target.value)}
@@ -326,6 +327,7 @@ export function ProviderEnvEditor({
                     {row.key.trim() === 'ANTHROPIC_CUSTOM_HEADERS' ? (
                       // Claude Code reads one `Name: value` per line.
                       <Textarea
+                        variant="code"
                         value={row.value}
                         onChange={(e) =>
                           updateRow(idx, 'value', e.target.value)
@@ -339,6 +341,7 @@ export function ProviderEnvEditor({
                       />
                     ) : (
                       <Input
+                        variant="code"
                         type={shown[idx] ? 'text' : 'password'}
                         value={row.value}
                         onChange={(e) =>

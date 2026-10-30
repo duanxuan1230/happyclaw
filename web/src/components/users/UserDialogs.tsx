@@ -168,6 +168,7 @@ export function CreateUserDialog({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <SettingsField label="用户名" htmlFor="create-user-username">
               <Input
+                variant="code"
                 id="create-user-username"
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value)}
@@ -545,7 +546,8 @@ export function ResetPasswordDialog({
 
   return (
     <Dialog open={!!target} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      {/* One field: the keyboard may come up with it. */}
+      <DialogContent className="sm:max-w-md" autoFocusOnPhone>
         <form onSubmit={handleChangePassword} className="grid gap-4">
           <DialogHeader>
             <DialogTitle>修改密码</DialogTitle>

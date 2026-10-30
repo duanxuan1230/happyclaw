@@ -665,6 +665,7 @@ export function AddModelWizard({
                 }
               >
                 <Input
+                  variant="code"
                   id="wizard-claude-credential"
                   type="password"
                   value={credentialInput}
@@ -729,6 +730,7 @@ export function AddModelWizard({
             }
           >
             <Input
+              variant="code"
               id="wizard-preset-url"
               value={preset.baseUrl}
               readOnly
@@ -779,6 +781,7 @@ export function AddModelWizard({
             }
           >
             <Input
+              variant="code"
               id="wizard-base-url"
               type="url"
               inputMode="url"
@@ -1032,6 +1035,7 @@ function KeyField({
       description={description}
     >
       <Input
+        variant="code"
         id="wizard-api-key"
         type="password"
         value={value}
