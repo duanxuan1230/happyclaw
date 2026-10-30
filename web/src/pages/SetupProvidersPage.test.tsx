@@ -108,18 +108,28 @@ async function addPresetConnection() {
 }
 
 describe('first-run setup', () => {
-  test('uses the shared wizard and always enables the first connection', async () => {
+  test('uses the shared wizard and saves the first connection', async () => {
     await render();
     expect(button('完成并进入后台').disabled).toBe(true);
     await addPresetConnection();
-    // The pool switch is not offered: the first connection must run.
+    // No pool: a connection is used by what binds it.
     expect(document.querySelector('#wizard-pool')).toBeNull();
     await click(button('保存'));
     await flush();
-    expect(mocks.post).toHaveBeenCalledWith(
-      '/api/config/claude/providers',
-      expect.objectContaining({ presetId: 'deepseek', enabled: true }),
+    const body = mocks.post.mock.calls.find(
+      ([path]) => path === '/api/config/claude/providers',
+    )?.[1] as Record<string, unknown>;
+    expect(body).toEqual(
+      expect.objectContaining({
+        presetId: 'deepseek',
+        customEnv: {
+          API_TIMEOUT_MS: '3000000',
+          CLAUDE_CODE_NO_FLICKER: '1',
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        },
+      }),
     );
+    expect(body).not.toHaveProperty('enabled');
     expect(text()).toContain('已添加模型连接「DeepSeek」');
     expect(text()).toContain('连接测试通过');
   });

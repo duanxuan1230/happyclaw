@@ -142,19 +142,19 @@ describe('settings information architecture', () => {
       /消息响应方式|supports_owner_mention|require_mention/,
     );
     expect(providerEnv).toContain('高级设置 · 环境变量');
-    expect(providerEnv).toContain('系统预填环境变量');
-    expect(providerEnv).toContain('已自定义');
-    expect(providerEnv).toContain('恢复默认值');
-    expect(providerModel).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
-    // 1M is a per-model switch, both when adding and when managing models.
-    expect(wizardModels).toContain('1M 上下文');
-    expect(connectionModels).toContain('<OneMillionToggle');
-    expect(wizard).toContain('系统预填 Claude Code 运行环境');
-    // The default is a deliberate, clearable choice (按钮「默认」), not the
-    // old always-present "系统默认" pointer.
-    expect(providerList).toContain('onSetDefault');
-    expect(providerList).toContain('aria-pressed={isDefault}');
-    expect(providerList).not.toContain('系统默认');
+    // Model keys are derived at launch, never typed as env.
+    expect(providerEnv).toContain('CONNECTION_MODEL_ENV_KEYS');
+    expect(providerModel).toContain('CONNECTION_ENV_PREFILL');
+    expect(providerModel).not.toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+    // A context window per model, both when adding and when managing models;
+    // no 1M switch.
+    expect(wizardModels).toContain('<ModelCapabilityFields');
+    expect(connectionModels).toContain('<ModelCapabilityFields');
+    expect(wizardModels).not.toContain('OneMillionToggle');
+    expect(wizard).toContain('<ProviderEnvEditor');
+    // Settings only adds connections: no default, no pool, no weights.
+    expect(providerList).not.toContain('onSetDefault');
+    expect(providerList).not.toContain('<Switch');
     expect(providerList).not.toContain('权重');
     expect(settings).toContain('toast.success(message)');
     expect(settings).toContain('toast.error(message)');
@@ -163,12 +163,10 @@ describe('settings information architecture', () => {
   test('offers supported official model aliases', () => {
     const wizard = read('web/src/components/settings/AddModelWizard.tsx');
 
-    // What a Claude subscription offers when its model list cannot be read,
-    // next to leaving the model to Claude Code.
+    // What a Claude subscription offers when its model list cannot be read.
     expect(wizard).toMatch(
       /CLAUDE_MODEL_ALIASES = \['opus', 'sonnet', 'haiku', 'fable'\]/,
     );
-    expect(wizard).toContain("label: '不指定（由 Claude Code 选择）'");
   });
 
   test('keeps Agent add-ons, project context, and Provider settings in distinct layers', () => {

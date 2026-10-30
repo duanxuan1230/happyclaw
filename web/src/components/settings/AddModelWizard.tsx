@@ -17,13 +17,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
 import {
   PROVIDER_ERROR_COPY,
   describeBaseUrlProblem,
   findPresetsByBaseUrl,
   getModelPreset,
+  normalizeConnectionModelRoles,
   normalizeProviderBaseUrl,
+  type ConnectionModelRoles,
   type ModelPreset,
 } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
@@ -41,8 +42,8 @@ import {
   AUTO_AUTH_MODE_HINT,
   CONNECTION_KIND_LABELS,
   PROVIDERS_API,
-  allowsNoDefaultModel,
   discoverModels,
+  discoveredModelsFor,
   isThirdPartyKind,
   testConnection,
   testOutcome,
@@ -54,18 +55,18 @@ import {
 import {
   ModelPicker,
   addCandidates,
-  candidateId,
+  candidateEntry,
   type DiscoveryState,
   type ModelCandidate,
 } from './ModelPicker';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
-import {
-  ProviderEnvEditor,
-  buildProviderCustomEnv,
-  type ProviderEnvDraft,
-} from './ProviderEnvEditor';
+import { ProviderEnvEditor, buildProviderCustomEnv } from './ProviderEnvEditor';
 import { SettingsField } from './SettingsLayout';
-import { getErrorMessage, type UnifiedProviderPublic } from './types';
+import {
+  getErrorMessage,
+  type EnvRow,
+  type UnifiedProviderPublic,
+} from './types';
 import {
   ExternalAnchor,
   WizardSourceStep,
@@ -88,25 +89,12 @@ const STEPS: ReadonlyArray<{ key: Step; label: string }> = [
  */
 const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'];
 
-const OFFICIAL_PASS_THROUGH = {
-  label: '不指定（由 Claude Code 选择）',
-  hint: 'Claude Code 使用它自己的默认模型；别名会自动解析为最新版本。',
-};
-const RELAY_PASS_THROUGH = {
-  label: '不指定（透传）',
-  hint: 'Claude Code 继续请求 Claude 模型名，由中转站自行路由。',
-};
-
 function sourceKey(source: WizardSource | null): string {
   if (!source) return '';
   return source.kind === 'preset' ? `preset:${source.presetId}` : source.kind;
 }
 
 interface AddModelWizardProps {
-  /** Connections already enabled; the new one joins the pool when none is. */
-  enabledCount: number;
-  /** Offer the 加入自动池 switch (the first-run page always joins). */
-  showPoolSwitch?: boolean;
   /** The connection was saved; `verified` = its test passed. */
   onDone: (provider: UnifiedProviderPublic, verified: boolean) => void;
   /** An OAuth login created the connection before the wizard finished. */
@@ -126,8 +114,6 @@ interface AddModelWizardProps {
  * that arrives after its inputs changed is dropped.
  */
 export function AddModelWizard({
-  enabledCount,
-  showPoolSwitch = true,
   onDone,
   onConnectionCreated,
   onCancel,
@@ -141,7 +127,9 @@ export function AddModelWizard({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [credentialInput, setCredentialInput] = useState('');
-  const [env, setEnv] = useState<ProviderEnvDraft>({ overrides: {}, rows: [] });
+  // A third-party connection starts from the runtime defaults; a row the
+  // user deletes or empties is not saved, so it is not injected.
+  const [env, setEnv] = useState<EnvRow[]>(buildDefaultProviderEnv);
   /** Made by an OAuth callback; later steps update it instead of creating. */
   const [created, setCreated] = useState<UnifiedProviderPublic | null>(null);
   const [detected, setDetected] = useState<ModelPreset | null>(null);
@@ -149,7 +137,7 @@ export function AddModelWizard({
 
   // ─── Models ───
   const [candidates, setCandidates] = useState<ModelCandidate[]>([]);
-  const [defaultBase, setDefaultBase] = useState('');
+  const [roles, setRoles] = useState<ConnectionModelRoles>({});
   const [discovery, setDiscovery] = useState<DiscoveryState>({
     status: 'idle',
   });
@@ -172,7 +160,6 @@ export function AddModelWizard({
 
   // ─── Test and save ───
   const [name, setName] = useState('');
-  const [poolChoice, setPoolChoice] = useState<boolean | null>(null);
   const [test, setTest] = useState<{
     signature: string;
     outcome: TestOutcome | null;
@@ -191,9 +178,6 @@ export function AddModelWizard({
   const baseUrlProblem =
     kind === 'custom' ? describeBaseUrlProblem(baseUrl) : null;
   const picked = candidates.filter((candidate) => candidate.picked);
-  const defaultCandidate = candidates.find(
-    (candidate) => candidate.picked && candidate.base === defaultBase,
-  );
   const codexModel =
     codexPick?.model ?? (created?.anthropicModel || codexCatalog.defaultModel);
   const codexEffort =
@@ -203,24 +187,16 @@ export function AddModelWizard({
       codexModel,
       (created && storedCodexEffort(created)) || codexCatalog.defaultEffort,
     );
-  const defaultModelId =
-    kind === 'chatgpt'
-      ? codexModel
-      : defaultCandidate
-        ? candidateId(defaultCandidate)
-        : '';
-  const passThrough = !allowsNoDefaultModel(kind)
-    ? null
-    : kind === 'custom'
-      ? RELAY_PASS_THROUGH
-      : OFFICIAL_PASS_THROUGH;
+  // The first checked model is the connection's own; nothing names it a
+  // default, since Agents and chats pick their model.
+  const connectionModel =
+    kind === 'chatgpt' ? codexModel : (picked[0]?.id ?? '');
 
-  // A custom address may need its own environment, such as the custom
+  // A third-party address may need its own environment, such as the custom
   // headers its key travels in; they go with every request for the draft.
-  const envResult =
-    kind === 'custom'
-      ? buildProviderCustomEnv(true, env)
-      : { customEnv: {}, error: null };
+  const envResult = thirdParty
+    ? buildProviderCustomEnv(env)
+    : { customEnv: {}, error: null };
   const customEnv = envResult.customEnv;
   const hasCustomHeaders = !!customEnv.ANTHROPIC_CUSTOM_HEADERS?.trim();
 
@@ -238,7 +214,7 @@ export function AddModelWizard({
   // makes a new test worth sending.
   const testSignature = created
     ? connectionSignature
-    : JSON.stringify([connectionSignature, defaultModelId]);
+    : JSON.stringify([connectionSignature, connectionModel]);
   const latest = useRef({ connectionSignature, testSignature });
   latest.current = { connectionSignature, testSignature };
 
@@ -250,25 +226,17 @@ export function AddModelWizard({
   const chooseSource = (next: WizardSource) => {
     if (sourceKey(next) !== sourceKey(source)) {
       // A different vendor starts from its own models; models typed by hand
-      // stay, and so does a default the user set among them.
+      // stay.
       const manual = candidates.filter(
         (candidate) => candidate.origin === 'manual',
       );
       const nextPreset =
         next.kind === 'preset' ? getModelPreset(next.presetId) : null;
-      const nextCandidates = nextPreset
-        ? addCandidates(manual, nextPreset.models, 'preset', true)
-        : manual;
-      setCandidates(nextCandidates);
-      const keepDefault = manual.some(
-        (candidate) => candidate.picked && candidate.base === defaultBase,
+      setCandidates(
+        nextPreset
+          ? addCandidates(manual, nextPreset.models, 'preset', true)
+          : manual,
       );
-      if (!keepDefault) {
-        setDefaultBase(
-          nextCandidates.find((candidate) => candidate.origin === 'preset')
-            ?.base ?? '',
-        );
-      }
       setDiscovery({ status: 'idle' });
       discoveredFor.current = null;
     }
@@ -303,6 +271,7 @@ export function AddModelWizard({
           presetId: preset!.id,
           anthropicBaseUrl: preset!.baseUrl,
           anthropicAuthToken: apiKey.trim(),
+          ...(Object.keys(customEnv).length > 0 ? { customEnv } : {}),
         };
       case 'custom':
         return {
@@ -349,13 +318,14 @@ export function AddModelWizard({
         };
         extra = () => {
           // Built-in aliases are what a subscription runs: offer them
-          // checked. A vendor's own list arrives unchecked.
+          // checked. From a vendor's own list the models the registry knows
+          // arrive checked, the rest unchecked.
           setCandidates((current) =>
             addCandidates(
               current,
-              result.models,
+              discoveredModelsFor(kind, result.models),
               'discovered',
-              result.source === 'builtin',
+              result.source === 'builtin' ? true : 'known',
             ),
           );
           setDiscoveredAuthMode(result.authMode ?? null);
@@ -373,7 +343,7 @@ export function AddModelWizard({
                 current,
                 CLAUDE_MODEL_ALIASES.map((id) => ({ id })),
                 'discovered',
-                kind === 'claude_subscription',
+                kind === 'claude_subscription' ? true : 'known',
               ),
             );
         }
@@ -447,7 +417,7 @@ export function AddModelWizard({
       ? { providerId: created.id }
       : {
           ...draftBody(),
-          anthropicModel: defaultModelId,
+          anthropicModel: connectionModel,
         };
     const settle = (outcome: TestOutcome | null, error: string | null) => {
       if (
@@ -483,40 +453,24 @@ export function AddModelWizard({
     (kind === 'custom'
       ? hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
       : CONNECTION_KIND_LABELS[kind ?? 'custom']);
-  // Same rule the server applies: join the pool when nothing else is in it.
-  // A connection an OAuth login made already carries the server's choice;
-  // the first-run page, without the switch, always joins.
-  const poolDefault =
-    created && showPoolSwitch ? created.enabled : enabledCount === 0;
-  const poolEnabled = poolChoice ?? poolDefault;
-
   const save = async () => {
     if (authInvalid || testing || saving) return;
     setSaving(true);
     setSaveError(null);
     const trimmedName = name.trim() || defaultName;
-    const models = picked.map((candidate) => ({ id: candidateId(candidate) }));
+    const models = picked.map(candidateEntry);
     try {
       let provider: UnifiedProviderPublic;
       if (created) {
         const patch: Record<string, unknown> =
           kind === 'chatgpt'
             ? codexDefaultsPatch(created, codexModel, codexEffort)
-            : { models, anthropicModel: defaultModelId };
+            : { models, anthropicModel: connectionModel };
         if (trimmedName !== created.name) patch.name = trimmedName;
         provider =
           Object.keys(patch).length > 0
             ? await updateConnection(created.id, patch)
             : created;
-        if (provider.enabled !== poolEnabled) {
-          provider = (
-            await api.post<{ provider: UnifiedProviderPublic }>(
-              `${PROVIDERS_API}/${created.id}/toggle`,
-              { enabled: poolEnabled },
-              120_000,
-            )
-          ).provider;
-        }
       } else {
         // A model list the endpoint answered proves the header; the test's
         // report counts only when the list did not.
@@ -524,11 +478,14 @@ export function AddModelWizard({
         const body: Record<string, unknown> = {
           name: trimmedName,
           ...draftBody(),
-          anthropicModel: defaultModelId,
+          anthropicModel: connectionModel,
           models,
-          enabled: poolEnabled,
         };
-        if (thirdParty && authMode) body.anthropicAuthMode = authMode;
+        if (thirdParty) {
+          // A role on a model left unchecked follows the turn's model.
+          body.roles = normalizeConnectionModelRoles(roles, models);
+          if (authMode) body.anthropicAuthMode = authMode;
+        }
         provider = await api.post<UnifiedProviderPublic>(PROVIDERS_API, body);
         // The draft test was not stored; test the saved connection so its
         // status is on record.
@@ -557,6 +514,7 @@ export function AddModelWizard({
           !envResult.error
         );
       case 'preset':
+        return !!apiKey.trim() && !envResult.error;
       case 'anthropic_api':
         return !!apiKey.trim();
       default:
@@ -582,10 +540,6 @@ export function AddModelWizard({
     onConnectionCreated?.(provider);
     setStep('models');
   };
-
-  const compactWindow = buildDefaultProviderEnv(defaultModelId).find(
-    (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-  )?.value;
 
   const footer = (
     <>
@@ -617,7 +571,7 @@ export function AddModelWizard({
       {step === 'models' && (
         <Button
           onClick={() => setStep('save')}
-          disabled={kind === 'chatgpt' && !codexModel}
+          disabled={kind === 'chatgpt' ? !codexModel : picked.length === 0}
         >
           下一步
         </Button>
@@ -830,12 +784,12 @@ export function AddModelWizard({
             placeholder="粘贴 API Key 或 Token"
             description={`认证方式会自动识别：${AUTO_AUTH_MODE_HINT}`}
           />
-          <ProviderEnvEditor
-            thirdParty
-            defaultModel={defaultModelId}
-            value={env}
-            onChange={setEnv}
-          />
+        </div>
+      )}
+
+      {step === 'connect' && thirdParty && (
+        <div className="space-y-1">
+          <ProviderEnvEditor value={env} onChange={setEnv} />
           <KeyError message={envResult.error} />
         </div>
       )}
@@ -853,9 +807,8 @@ export function AddModelWizard({
         <ModelPicker
           candidates={candidates}
           onCandidatesChange={setCandidates}
-          defaultBase={defaultBase}
-          onDefaultChange={setDefaultBase}
-          passThrough={passThrough}
+          roles={thirdParty ? roles : null}
+          onRolesChange={setRoles}
           discovery={discovery}
           onRetryDiscovery={runDiscovery}
         />
@@ -883,53 +836,30 @@ export function AddModelWizard({
                 </span>
               )}
             </dd>
-            <dt className="text-muted-foreground">默认模型</dt>
-            <dd className="truncate font-mono text-foreground">
-              {defaultModelId || passThrough?.label || '—'}
+            <dt className="text-muted-foreground">模型</dt>
+            <dd className="min-w-0 text-foreground">
+              {kind === 'chatgpt' ? (
+                <span className="font-mono">{codexModel || '—'}</span>
+              ) : (
+                <>
+                  {picked.length} 个
+                  <span className="ml-2 block truncate font-mono text-muted-foreground sm:inline">
+                    {picked.map((candidate) => candidate.id).join('、')}
+                  </span>
+                </>
+              )}
             </dd>
-            {kind !== 'chatgpt' && (
-              <>
-                <dt className="text-muted-foreground">模型</dt>
-                <dd className="text-foreground">{picked.length} 个</dd>
-              </>
-            )}
             {thirdParty && (
               <>
-                <dt className="text-muted-foreground">运行环境</dt>
+                <dt className="text-muted-foreground">环境变量</dt>
                 <dd className="text-foreground">
-                  系统预填 Claude Code 运行环境：Opus / Sonnet / Haiku / 子
-                  Agent 跟随默认模型，压缩窗口{' '}
-                  {Number(compactWindow).toLocaleString('en-US')}{' '}
-                  tokens。保存后可在连接设置里调整。
+                  {Object.keys(customEnv).length > 0
+                    ? `${Object.keys(customEnv).length} 项`
+                    : '无'}
                 </dd>
               </>
             )}
           </dl>
-
-          {showPoolSwitch && (
-            <label
-              htmlFor="wizard-pool"
-              className="flex cursor-pointer items-start justify-between gap-4 rounded-lg px-3 py-2.5 ring-1 ring-surface-border"
-            >
-              <span className="min-w-0">
-                <span className="block text-label text-foreground">
-                  加入自动池
-                </span>
-                <span className="mt-0.5 block text-caption leading-5 text-muted-foreground">
-                  没有手动选择模型的对话，会在自动池里的连接之间分配。
-                  {poolDefault
-                    ? '目前没有其他启用的连接，默认加入。'
-                    : '已有启用的连接，默认不加入，不改变现有分配。'}
-                </span>
-              </span>
-              <Switch
-                id="wizard-pool"
-                checked={poolEnabled}
-                onCheckedChange={setPoolChoice}
-                aria-label="加入自动池"
-              />
-            </label>
-          )}
 
           <div className="space-y-2">
             <ConnectionTestResult
@@ -1085,7 +1015,6 @@ function LoggedIn({ provider }: { provider: UnifiedProviderPublic }) {
 
 interface AddModelWizardDialogProps {
   open: boolean;
-  enabledCount: number;
   /**
    * The wizard closed. `saved` is the finished connection; `created` one an
    * OAuth login made before the user left.
@@ -1103,7 +1032,6 @@ interface AddModelWizardDialogProps {
  */
 export function AddModelWizardDialog({
   open,
-  enabledCount,
   onClose,
 }: AddModelWizardDialogProps) {
   const [busy, setBusy] = useState(false);
@@ -1128,7 +1056,6 @@ export function AddModelWizardDialog({
           </DialogDescription>
         </DialogHeader>
         <AddModelWizard
-          enabledCount={enabledCount}
           onBusyChange={setBusy}
           onConnectionCreated={(provider) => {
             created.current = provider;

@@ -1,4 +1,5 @@
 import type {
+  ConnectionModelRoles,
   ProviderModelEntry,
   ProviderTestRecord,
 } from '@/lib/model-providers';
@@ -9,8 +10,6 @@ export interface UnifiedProviderPublic {
   id: string;
   name: string;
   type: 'official' | 'third_party';
-  enabled: boolean;
-  weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
   /** null for third-party providers saved before the explicit choice. */
@@ -53,6 +52,8 @@ export interface UnifiedProviderPublic {
   customEnv: Record<string, string>;
   /** The connection's effective model list; [] for ChatGPT (it uses its catalog). */
   models: ProviderModelEntry[];
+  /** Which of its models Claude Code uses for sub-agents and background calls. */
+  roles?: ConnectionModelRoles;
   /** The MODEL_PRESETS id the connection started from. */
   presetId: string | null;
   /** The outcome of the last connection test. */
@@ -60,32 +61,8 @@ export interface UnifiedProviderPublic {
   updatedAt: string;
 }
 
-export interface ProviderHealthStatus {
-  profileId: string;
-  healthy: boolean;
-  consecutiveErrors: number;
-  lastErrorAt: number | null;
-  lastSuccessAt: number | null;
-  unhealthySince: number | null;
-  activeSessionCount: number;
-}
-
-export interface ProviderWithHealth extends UnifiedProviderPublic {
-  health: ProviderHealthStatus | null;
-}
-
-export interface BalancingConfig {
-  strategy: 'round-robin' | 'weighted-round-robin' | 'failover';
-  unhealthyThreshold: number;
-  recoveryIntervalMs: number;
-}
-
 export interface ProvidersListResponse {
-  providers: ProviderWithHealth[];
-  balancing: BalancingConfig;
-  enabledCount: number;
-  /** The configuration unselected conversations run on; null = automatic pool. */
-  defaultModelConfigId: string | null;
+  providers: UnifiedProviderPublic[];
 }
 
 // ─── 通用类型 ────────────────────────────────────────────────
