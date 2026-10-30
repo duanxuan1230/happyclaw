@@ -120,8 +120,9 @@ Public：
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
 `default.source` 按与运行时相同的函数解析，取值 `agent`（智能体自己的绑定）、
 `workspace_env`（工作区自带 Provider 环境变量）、`owner_main`（工作区所有者的主智能体）、
-`system_main`（系统主 HappyClaw：最早创建的 active admin 的主智能体）、`none`；已删除或
-没有凭据的绑定跳到下一步。`default.model` 是不选择时实际运行的模型（不带 `[1m]`；
+`system_main`（系统主 HappyClaw：最早创建的 admin 的主智能体）、`none`；未设置的一步
+跳过，已设置但连接已删除或没有凭据时 `default.connectionMissing` 为 true，本轮失败并提示
+重新选择（不改用别的连接）；`none` 时同样失败，提示为主 HappyClaw 选择模型。`default.model` 是不选择时实际运行的模型（不带 `[1m]`；
 `workspace_env`、`none` 与直通中转为 `null`），`default.effort` 是不选择时运行的推理
 等级（该模型不支持档位时为 `null`）。
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, 模型）优先于智能体
