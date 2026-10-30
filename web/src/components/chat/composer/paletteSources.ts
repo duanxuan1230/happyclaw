@@ -132,14 +132,22 @@ export function loadWorkspaceSkills(
   );
 }
 
-/** One directory level of the workspace, directories first. */
+/** Never offered by `@`: version-control internals, not something to cite. */
+const UNLISTED_NAMES = new Set(['.git', '.hg', '.svn']);
+
+/**
+ * One directory level of the workspace: directories first, hidden entries
+ * (dot names) after the visible ones of their kind.
+ */
 export async function loadWorkspaceDirectory(
   workspaceJid: string,
   dir: string,
 ): Promise<WorkspaceEntry[]> {
   const data = await listWorkspaceFiles(workspaceJid, dir);
+  const hidden = (entry: WorkspaceEntry) =>
+    entry.name.startsWith('.') ? 1 : 0;
   return data.files
-    .filter((file) => !file.isSystem)
+    .filter((file) => !file.isSystem && !UNLISTED_NAMES.has(file.name))
     .map((file) => ({
       type: file.type === 'directory' ? ('dir' as const) : ('file' as const),
       name: file.name,
@@ -148,6 +156,7 @@ export async function loadWorkspaceDirectory(
     .sort(
       (a, b) =>
         (a.type === b.type ? 0 : a.type === 'dir' ? -1 : 1) ||
+        hidden(a) - hidden(b) ||
         a.name.localeCompare(b.name),
     )
     .slice(0, MAX_LISTED_ENTRIES);

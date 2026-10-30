@@ -65,7 +65,11 @@ function payload(selection: Selection) {
   };
 }
 
-async function openHarness(page: Page, initial: Partial<Selection> = {}) {
+async function openHarness(
+  page: Page,
+  initial: Partial<Selection> = {},
+  { openCard = true }: { openCard?: boolean } = {},
+) {
   const state: Selection = {
     selectedModelConfigId: null,
     selectedModel: null,
@@ -84,8 +88,12 @@ async function openHarness(page: Page, initial: Partial<Selection> = {}) {
     await route.fulfill({ json: payload(state) });
   });
   await page.goto(HARNESS_PATH);
-  await openComposerCard(page);
-  await expect(modelButton(page)).toBeVisible();
+  if (openCard) {
+    await openComposerCard(page);
+    await expect(modelButton(page)).toBeVisible();
+  } else {
+    await expect(page.locator('[data-hc-composer]')).toBeVisible();
+  }
   return { puts, state };
 }
 
@@ -152,6 +160,34 @@ const settleAnimations = (scope: Locator) =>
         .getAnimations({ subtree: true })
         .map((animation) => animation.finished.catch(() => undefined)),
     ),
+  );
+
+/**
+ * WebKit's focus rules in Chromium (iOS Safari, which this box cannot run):
+ * a tapped <button> never takes focus, so the focused editor blurs with
+ * relatedTarget null, unless the page cancelled the press. Installed after
+ * React's own listener (window, bubbling), so it sees what the page did.
+ */
+async function emulateWebKitButtonFocus(page: Page) {
+  await page.addInitScript(() => {
+    window.addEventListener('mousedown', (event) => {
+      const button =
+        event.target instanceof Element ? event.target.closest('button') : null;
+      if (!button || event.defaultPrevented) return;
+      event.preventDefault();
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body) {
+        active.blur();
+      }
+    });
+  });
+}
+
+const dockState = (page: Page) =>
+  page.locator('[data-hc-composer]').getAttribute('data-composer-dock');
+const editorFocused = (page: Page) =>
+  page.evaluate(
+    () => !!(document.activeElement as HTMLElement | null)?.isContentEditable,
   );
 
 const sendButton = (page: Page) =>
@@ -308,6 +344,139 @@ test.describe('phone model sheet', () => {
   });
 });
 
+test.describe('phone model entry', () => {
+  test.beforeEach(({ isMobile }) => {
+    test.skip(!isMobile, 'the resting pill and its chip are a phone layout');
+  });
+
+  test("a tap on the resting pill's model chip opens the sheet and picks a model", async ({
+    page,
+  }) => {
+    const { puts } = await openHarness(page, {}, { openCard: false });
+    expect(await dockState(page)).toBe('pill');
+    const chip = page.locator('[data-model-pill="compact"]');
+    await expect(chip).toBeVisible();
+
+    await chip.tap();
+    const sheet = page.getByRole('dialog', { name: '选择模型' });
+    await expect(sheet).toBeVisible();
+    // No keyboard: the editor was never focused on the way.
+    expect(await editorFocused(page)).toBe(false);
+    // The card opens behind the sheet while it is up (cindy's
+    // composerCardActive), the same button now the full pill.
+    await expect.poll(() => dockState(page)).toBe('card');
+    await expect(page.locator('[data-model-pill=""]')).toBeVisible();
+
+    await modelRow(page, 'gpt-6-astra').tap();
+    await expect.poll(() => puts.length).toBe(1);
+    expect(puts[0]).toMatchObject({
+      modelConfigId: 'chatgpt',
+      model: 'gpt-6-astra',
+    });
+    // Still open, the new model's levels right under it.
+    await expect(sheet).toBeVisible();
+    await expect(
+      page.locator('[data-effort-segments]').getByRole('button'),
+    ).toHaveCount(1 + EFFORTS.length);
+    await effortSegment(page, '高').tap();
+    await expect.poll(() => puts.length).toBe(2);
+    expect(puts[1]).toMatchObject({ model: 'gpt-6-astra', effort: 'high' });
+
+    await page.keyboard.press('Escape');
+    await expect(sheet).toHaveCount(0);
+    await expect.poll(() => dockState(page)).toBe('pill');
+    await expect(chip).toBeVisible();
+  });
+
+  test('with WebKit focus rules, a tap on the model pill in the focused card opens the sheet', async ({
+    page,
+  }) => {
+    await emulateWebKitButtonFocus(page);
+    await openHarness(page, {}, { openCard: false });
+    await page.locator('[data-hc-composer] [data-composer-editor]').tap();
+    await expect.poll(() => dockState(page)).toBe('card');
+    expect(await editorFocused(page)).toBe(true);
+
+    await modelButton(page).tap();
+    await expect(page.getByRole('dialog', { name: '选择模型' })).toBeVisible();
+    expect(await dockState(page)).toBe('card');
+  });
+
+  test('with WebKit focus rules, + in the focused card opens its sheet', async ({
+    page,
+  }) => {
+    await emulateWebKitButtonFocus(page);
+    await openHarness(page, {}, { openCard: false });
+    await page.locator('[data-hc-composer] [data-composer-editor]').tap();
+    await expect.poll(() => dockState(page)).toBe('card');
+
+    await page.locator('[data-composer-tools] > button').first().tap();
+    await expect(page.locator('[data-composer-plus-sheet]')).toBeVisible();
+    expect(await dockState(page)).toBe('card');
+  });
+
+  test('without the right to change it, the chip says why instead of opening', async ({
+    page,
+  }) => {
+    await page.route('**/api/groups/**/model-selection**', (route) =>
+      route.fulfill({
+        json: payload({
+          selectedModelConfigId: null,
+          selectedModel: null,
+          selectedEffort: null,
+        }),
+      }),
+    );
+    await page.goto(`${HARNESS_PATH}?readonly=1`);
+    const chip = page.locator('[data-model-pill="compact"]');
+    await expect(chip).toHaveAttribute('aria-disabled', 'true');
+    // aria-disabled, not disabled: a finger can still press it.
+    await chip.tap({ force: true });
+    await expect(page.getByText('你没有修改此工作区配置的权限')).toBeVisible();
+    await expect(page.getByRole('dialog', { name: '选择模型' })).toHaveCount(0);
+  });
+
+  test('the sheet opens on the model in use, its list filling the sheet', async ({
+    page,
+  }) => {
+    await openHarness(
+      page,
+      { selectedModelConfigId: 'chatgpt', selectedModel: 'gpt-5.5' },
+      { openCard: false },
+    );
+    await page.setViewportSize({ width: 390, height: 600 });
+    await page.locator('[data-model-pill]').tap();
+    const sheet = page.getByRole('dialog', { name: '选择模型' });
+    await expect(sheet).toBeVisible();
+    await settleAnimations(sheet);
+    const list = sheet.getByRole('radiogroup');
+    const row = modelRow(page, 'gpt-5.5');
+    const [listBox, rowBox] = await Promise.all([
+      list.boundingBox(),
+      row.boundingBox(),
+    ]);
+    // The selected row is in view without scrolling by hand.
+    expect(rowBox!.y).toBeGreaterThanOrEqual(listBox!.y - 0.5);
+    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(
+      listBox!.y + listBox!.height + 0.5,
+    );
+    // Connections by name (a touch screen has no tooltips).
+    await expect(
+      sheet.getByRole('button', { name: 'Claude 官方', exact: true }),
+    ).toBeVisible();
+    // The search field: 16px, no autocapitalisation or autocorrect.
+    const search = sheet.getByRole('textbox', { name: '搜索模型' });
+    expect(
+      await search.evaluate((element) => [
+        getComputedStyle(element).fontSize,
+        element.getAttribute('autocapitalize'),
+        element.getAttribute('autocorrect'),
+        element.getAttribute('enterkeyhint'),
+      ]),
+    ).toEqual(['16px', 'none', 'off', 'search']);
+  });
+});
+
 test.describe('model picker', () => {
   test('fits the composer row without pushing the send button off a phone', async ({
     page,
@@ -370,8 +539,13 @@ test.describe('model picker', () => {
     await expect(modelButton(page)).toContainText('gpt-6-astra');
 
     if (isMobile) {
-      // A phone picks the level in the sheet, under the model in use.
-      await modelButton(page).click();
+      // A phone keeps the sheet open on the new model and offers its
+      // levels right under it.
+      await expect(panel).toBeVisible();
+      await expect(modelRow(page, 'gpt-6-astra')).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
       await expect(
         page.locator('[data-effort-segments]').getByRole('button'),
       ).toHaveCount(1 + EFFORTS.length);

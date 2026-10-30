@@ -4,7 +4,9 @@
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6. The chip renders through `renderHTML` with HappyClaw tokens
  * instead of a React NodeView and cindy's InlineReferenceChip; the native
- * title previews the text.
+ * title previews the text. On touch screens only the chip's own expand
+ * control unfolds it (a tap on the chip selects it), so placing the caret
+ * beside it never spills the whole paste into the editor.
  *
  * Atomic long-paste chip for the composer. The full text remains the payload
  * sent to the Agent; the chip only collapses its editable presentation.
@@ -94,6 +96,24 @@ export function replacePastedTextChipWithPlainText(
   return true;
 }
 
+/** The chip's expand control, the only part that unfolds it on touch. */
+export const PASTED_TEXT_EXPAND_ATTR = 'data-pasted-text-expand';
+
+/**
+ * Whether a click on a long-paste chip should unfold it: anywhere on the chip
+ * with a fine pointer, only on its expand control with a coarse one.
+ */
+export function pastedTextChipClickExpands(
+  target: EventTarget | null,
+  coarsePointer: boolean,
+): boolean {
+  if (!coarsePointer) return true;
+  return (
+    target instanceof Element &&
+    !!target.closest(`[${PASTED_TEXT_EXPAND_ATTR}]`)
+  );
+}
+
 function previewOf(text: string): string {
   return text.length > PREVIEW_CHARS
     ? `${text.slice(0, PREVIEW_CHARS)}…`
@@ -153,6 +173,17 @@ export const PastedTextChipNode = Node.create<
         'M16 17H8',
       ]),
       ['span', { class: 'min-w-0 truncate' }, attrs.display],
+      // Touch only: a padded unfold control (a fine pointer clicks the chip).
+      [
+        'span',
+        {
+          [PASTED_TEXT_EXPAND_ATTR]: '',
+          'aria-hidden': 'true',
+          class:
+            'relative -mr-1 hidden size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground before:absolute before:-inset-3 pointer-coarse:inline-flex',
+        },
+        chipIcon(['m7 15 5 5 5-5', 'm7 9 5-5 5 5']),
+      ],
     ];
   },
 });

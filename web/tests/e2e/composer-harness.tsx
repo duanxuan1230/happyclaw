@@ -4,6 +4,7 @@
 //   ?empty=1   the main conversation starts with no messages
 //   ?statusbar=1  the composer alone over a stub list, with a status bar
 //                 that shows while setStatusRunning(true)
+//   ?readonly=1   the user may not change the workspace's configuration
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
@@ -24,6 +25,8 @@ import '../../src/styles/globals.css';
 const groupJid = 'web:e2e-composer';
 const startsEmpty =
   new URLSearchParams(window.location.search).get('empty') === '1';
+const readOnly =
+  new URLSearchParams(window.location.search).get('readonly') === '1';
 const userId = 'composer-user';
 
 const user: UserPublic = {
@@ -199,7 +202,7 @@ useChatStore.setState({
       kind: 'web',
       is_home: false,
       is_my_home: false,
-      can_modify: true,
+      can_modify: !readOnly,
       execution_mode: 'container',
       agent_profile_name: '测试智能体',
     },
