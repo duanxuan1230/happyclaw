@@ -60,13 +60,16 @@ function inert(cell: string): string {
     : cell;
 }
 
-/** Rows of `separator`-joined cells, quoting (RFC 4180) any that match `special`. */
+/**
+ * Rows of `separator`-joined cells, quoting (RFC 4180) a cell that holds the
+ * separator, a quote or a line break.
+ */
 function delimited(
   rows: readonly (readonly string[])[],
   separator: string,
-  special: RegExp,
   newline: string,
 ): string {
+  const special = new RegExp(`["${separator}\r\n]`);
   const field = (cell: string) => {
     const safe = inert(cell);
     return special.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
@@ -80,12 +83,12 @@ function delimited(
  * inside the cell.
  */
 export function toTsv(rows: readonly (readonly string[])[]): string {
-  return delimited(rows, '\t', /["\t\r\n]/, '\n');
+  return delimited(rows, '\t', '\n');
 }
 
 /** CSV (RFC 4180, CRLF) with a byte-order mark so Excel reads it as UTF-8. */
 export function toCsv(rows: readonly (readonly string[])[]): string {
-  return '﻿' + delimited(rows, ',', /[",\r\n]/, '\r\n');
+  return '﻿' + delimited(rows, ',', '\r\n');
 }
 
 /** `表格-20261030-1542.csv`, in local time. */

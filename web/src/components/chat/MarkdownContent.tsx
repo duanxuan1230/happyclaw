@@ -75,6 +75,11 @@ export interface MarkdownRendererProps {
    * and move the text arriving under it.
    */
   settled?: boolean;
+  /**
+   * Show 复制 and 下载 CSV under each table (default). A view that never
+   * settles, such as a sub-agent's text tail, leaves them out.
+   */
+  tableTools?: boolean;
 }
 
 interface MarkdownContentProps extends MarkdownRendererProps {
@@ -239,6 +244,16 @@ function extractText(node: React.ReactNode): string {
  */
 const STICKY_FIRST_CELL =
   'phone:first:sticky phone:first:left-0 phone:first:z-1 phone:first:shadow-[inset_-1px_0_0_var(--surface-border)] [.share-card-content_&]:static';
+const TH_CLASS = cn(
+  'border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75',
+  STICKY_FIRST_CELL,
+  'phone:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--md-table-bg,var(--background)))]',
+);
+const TABLE_TOOL_CLASS =
+  'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5';
+
+/** Whether tables show their tools (`MarkdownRendererProps.tableTools`). */
+const MarkdownTableToolsContext = createContext(true);
 
 /**
  * A reply's table, with 复制 (tab-separated, so a spreadsheet paste splits it
@@ -246,13 +261,12 @@ const STICKY_FIRST_CELL =
  */
 function MarkdownTable({ children }: { children: React.ReactNode }) {
   const streaming = useContext(MarkdownStreamingContext);
+  const tools = useContext(MarkdownTableToolsContext);
   const tableRef = useRef<HTMLTableElement>(null);
   const { copied, copy } = useCopyFeedback();
   const rows = () => (tableRef.current ? readTable(tableRef.current) : []);
   const download = () =>
     downloadTextFile(toCsv(rows()), csvFileName(), 'text/csv;charset=utf-8');
-  const tool =
-    'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5';
   return (
     <div data-md-table="" className="group/table my-4">
       <HorizontalScroll
@@ -268,36 +282,38 @@ function MarkdownTable({ children }: { children: React.ReactNode }) {
       </HorizontalScroll>
       {/* Held, not left out, while the reply streams: the text under the
           table does not move down when the tools appear. */}
-      <div
-        data-md-table-tools=""
-        inert={streaming}
-        className={cn(
-          'mt-1 flex justify-end gap-0.5 font-sans text-caption text-muted-foreground opacity-0 transition-opacity select-none group-hover/table:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 [.share-card-content_&]:hidden',
-          streaming && 'invisible',
-        )}
-      >
-        <button
-          type="button"
-          onClick={() => copy(toTsv(rows()))}
-          aria-label="复制表格，可直接粘贴到表格软件"
-          className={tool}
+      {tools && (
+        <div
+          data-md-table-tools=""
+          inert={streaming}
+          className={cn(
+            'mt-1 flex justify-end gap-0.5 font-sans text-caption text-muted-foreground opacity-0 transition-opacity select-none group-hover/table:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 [.share-card-content_&]:hidden',
+            streaming && 'invisible',
+          )}
         >
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-          {copied ? '已复制' : '复制'}
-        </button>
-        <span className="sr-only" aria-live="polite">
-          {copied ? '已复制表格' : ''}
-        </span>
-        <button
-          type="button"
-          onClick={download}
-          aria-label="下载为 CSV"
-          className={tool}
-        >
-          <Download size={13} />
-          CSV
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => copy(toTsv(rows()))}
+            aria-label="复制表格，可直接粘贴到表格软件"
+            className={TABLE_TOOL_CLASS}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            {copied ? '已复制' : '复制'}
+          </button>
+          <span className="sr-only" aria-live="polite">
+            {copied ? '已复制表格' : ''}
+          </span>
+          <button
+            type="button"
+            onClick={download}
+            aria-label="下载为 CSV"
+            className={TABLE_TOOL_CLASS}
+          >
+            <Download size={13} />
+            CSV
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -668,14 +684,7 @@ function markdownComponents(
     ),
     // GFM column alignment arrives as an inline `text-align` style.
     th: ({ children, style }) => (
-      <th
-        style={style}
-        className={cn(
-          'border-b border-surface-border px-3 py-2 text-start align-top text-caption font-medium whitespace-nowrap text-foreground/75',
-          STICKY_FIRST_CELL,
-          'phone:first:bg-[color-mix(in_srgb,var(--muted)_60%,var(--md-table-bg,var(--background)))]',
-        )}
-      >
+      <th style={style} className={TH_CLASS}>
         {children}
       </th>
     ),
@@ -824,6 +833,7 @@ export function MarkdownContent({
   trimEdges = true,
   fade,
   settled = !streaming && !fade,
+  tableTools = true,
   remarkPlugins,
   rehypePlugins,
   pipeline,
@@ -899,7 +909,9 @@ export function MarkdownContent({
       )}
     >
       <MarkdownStreamingContext.Provider value={streaming}>
-        {rendered}
+        <MarkdownTableToolsContext.Provider value={tableTools}>
+          {rendered}
+        </MarkdownTableToolsContext.Provider>
       </MarkdownStreamingContext.Provider>
     </div>
   );

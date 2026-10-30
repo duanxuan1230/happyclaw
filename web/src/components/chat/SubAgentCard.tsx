@@ -79,16 +79,17 @@ export function SubAgentBody({
           className="mt-0 mb-0"
         />
       )}
-      {/* Only the tail of the sub-agent's words, always streaming: a table
-          here may be cut off, and its tools would never become usable, so
-          they take no room. */}
       {task.textTail && (
-        <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0 [&_[data-md-table-tools]]:hidden">
+        <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
+          {/* Only the tail of the sub-agent's words, always streaming: a
+              table here may be cut off, and its tools would never become
+              usable. */}
           <MarkdownRenderer
             content={textTailMarkdown}
             groupJid={groupJid}
             variant="docs"
             streaming
+            tableTools={false}
           />
         </div>
       )}
