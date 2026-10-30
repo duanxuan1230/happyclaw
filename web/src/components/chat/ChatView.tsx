@@ -1518,8 +1518,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               }
               onClick={handleContextPanelToggle}
               className={cn(
-                // Its left neighbours are hidden on a phone: keep the whole hit area.
-                'text-muted-foreground pointer-coarse:size-10 phone:after:left-[min(0px,calc(50%-22px))]!',
+                'text-muted-foreground pointer-coarse:size-10',
                 phoneHeaderButton,
               )}
             />
