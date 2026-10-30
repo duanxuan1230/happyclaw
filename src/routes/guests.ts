@@ -106,10 +106,23 @@ function serializeGuest(guest: User) {
     username: guest.username,
     display_name: guest.display_name,
     status: guest.status === 'active' ? 'active' : 'disabled',
+    disabled_by_admin: isDisabledByAdmin(guest),
     created_at: guest.created_at,
     last_login_at: guest.last_login_at,
     workspaces,
   };
+}
+
+const OWNER_DISABLE_REASON = 'disabled_by_owner';
+
+/**
+ * Disabled by someone other than its owner (user management). The owner may
+ * still see and delete it, but not re-enable or change it.
+ */
+function isDisabledByAdmin(guest: User): boolean {
+  return (
+    guest.status === 'disabled' && guest.disable_reason !== OWNER_DISABLE_REASON
+  );
 }
 
 /** Owner-scoped guest lookup; anything else is "not found". */
@@ -234,6 +247,12 @@ guestRoutes.patch('/:id', authMiddleware, async (c) => {
   if (!owner) return c.json({ error: 'Forbidden' }, 403);
   const guest = findOwnGuest(owner, c.req.param('id'));
   if (!guest) return c.json({ error: 'Guest not found' }, 404);
+  if (isDisabledByAdmin(guest)) {
+    return c.json(
+      { error: 'This guest was disabled by an administrator' },
+      403,
+    );
+  }
 
   const validation = GuestPatchSchema.safeParse(
     await c.req.json().catch(() => ({})),
@@ -263,7 +282,7 @@ guestRoutes.patch('/:id', authMiddleware, async (c) => {
   if (data.status !== undefined && data.status !== guest.status) {
     updates.status = data.status;
     updates.disable_reason =
-      data.status === 'disabled' ? 'disabled_by_owner' : null;
+      data.status === 'disabled' ? OWNER_DISABLE_REASON : null;
   }
   if (data.password !== undefined) {
     updates.password_hash = await hashPassword(data.password);

@@ -554,8 +554,10 @@ Channel Reliability 的 Inbox/Turn/Outbox/Card 表由
   白名单放行访客的 GET，新路由默认拒绝；访客 WebSocket 只接收（`ping` 除外）。
   文件路由对访客隐藏所有点开头的条目、常见密钥文件和 `logs`/`conversations`，按
   会话的文件根和真实路径判断。访客看到的思考和工具调用与 owner 相同，但看不到
-  git diff、模型选择、上下文用量和自动化的前置检查；访客没有 Home、Agent、记忆写入、
-  钱包或订阅。
+  git diff 与 worktree、模型选择、上下文用量、token 用量与费用和自动化的前置检查，
+  REST 与 WebSocket 一致（广播用 `getGroupAudience` 区分 owner 与访客）。Host
+  工作区的授权只在 owner 仍是 admin 时生效。访客没有 Home、Agent、记忆写入、钱包或
+  订阅。
 
 完整边界见 `docs/ACL-MATRIX.md`。
 

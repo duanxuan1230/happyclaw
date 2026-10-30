@@ -44,7 +44,11 @@ import {
   type DirtyWorktree,
 } from '../session-worktree.js';
 import { listSessionWorktreesByFolder } from '../session-worktree-store.js';
-import { canViewGroup, canViewHostGroup } from '../guest-access.js';
+import {
+  canViewGroup,
+  canViewHostGroup,
+  withoutUsageForGuest,
+} from '../guest-access.js';
 import {
   clearSessionChannelOwner,
   getRegisteredGroup,
@@ -3010,9 +3014,20 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
   }
 });
 
-/** Thumbnails, and automation inputs without their hidden run context. */
-function presentWebMessages<T extends NewMessage>(rows: T[]): Promise<T[]> {
-  return presentMessagesForWeb(rows.map(presentAutomationMessage));
+/**
+ * Thumbnails, and automation inputs without their hidden run context; for a
+ * guest also without token usage and cost.
+ */
+async function presentWebMessages<T extends NewMessage>(
+  rows: T[],
+  viewer: AuthUser,
+): Promise<T[]> {
+  const presented = await presentMessagesForWeb(
+    rows.map(presentAutomationMessage),
+  );
+  return viewer.role === 'guest'
+    ? presented.map(withoutUsageForGuest)
+    : presented;
 }
 
 // GET /api/groups/:jid/messages - 获取消息历史
@@ -3076,6 +3091,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
           ),
           agentExposure,
         ),
+        authUser,
       );
       return c.json({ messages });
     }
@@ -3089,6 +3105,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         }),
         agentExposure,
       ),
+      authUser,
     );
     return c.json({ messages, hasMore });
   }
@@ -3112,6 +3129,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
           ),
           exposure,
         ),
+        authUser,
       );
       return c.json({ messages });
     }
@@ -3125,6 +3143,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         }),
         exposure,
       ),
+      authUser,
     );
     return c.json({ messages, hasMore });
   }
@@ -3139,6 +3158,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
         ),
         exposure,
       ),
+      authUser,
     );
     return c.json({ messages });
   }
@@ -3157,6 +3177,7 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
       }),
       exposure,
     ),
+    authUser,
   );
   return c.json({ messages, hasMore });
 });

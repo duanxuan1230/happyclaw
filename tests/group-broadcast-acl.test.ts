@@ -24,6 +24,8 @@ vi.mock('../src/db.js', () => ({
   listActiveGuestIdsForWorkspace: (workspaceJid: string, ownerId: string) =>
     state.guests.get(`${workspaceJid}|${ownerId}`) ?? [],
   getUserById: (id: string) => ({ id, role: state.roles.get(id) ?? 'admin' }),
+  workspaceHasGuestGrants: (workspaceJid: string) =>
+    [...state.guests.keys()].some((key) => key.startsWith(`${workspaceJid}|`)),
 }));
 vi.mock('../src/runtime-config.js', () => ({
   getSystemSettings: () => ({ allowMemberGuests: state.allowMemberGuests }),

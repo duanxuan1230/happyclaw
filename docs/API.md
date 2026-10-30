@@ -96,6 +96,8 @@ active 的 admin 可以为自己创建只读访客（`role=guest`），并授权
   member 未开放 403，已有 `max_guests`（20）个未删除的访客或用户名已存在 409。
 - `PATCH /api/guests/:id`：`display_name`、`status`、`workspace_jids`（整体替换）、
   `password` 任选；授权变更对下一次请求立即生效，状态或密码变更同时注销访客的会话。
+  被管理员通过用户管理禁用的访客（列表里 `disabled_by_admin: true`）返回 403，
+  owner 只能删除它。
 - `DELETE /api/guests/:id`：标记删除并清除授权、置顶和会话。
 
 `allowMemberGuests` 关闭后，member 仍可列出、编辑和删除自己的访客，但这些访客无法

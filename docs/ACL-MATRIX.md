@@ -417,7 +417,9 @@ Agent MCP 调用没有 Cookie，但必须携带由主进程创建的运行上下
   `delete-impact`、工作区的渠道与运行会话挂载、`/api/automations/for-session`、
   `/api/status*`、用量与计费。
 - Host：访客对已授权的 Host 工作区（典型是 admin Home）只有读取例外
-  （`canViewHostGroup`）；所有执行路径仍要求 admin。
+  （`canViewHostGroup`）；所有执行路径仍要求 admin。Host 工作区的授权只在 owner
+  当前仍是 active 的 admin 时有效（条件写在统一的授权 SQL 里，REST、文件和广播共用），
+  owner 被降为 member 后立即失效。
 - 文件：访客看不到、也无法列出或读取任意层级中以 `.` 开头的条目（`.git`、`.ssh`、
   `.aws`、`.env*`、`.npmrc`、`.claude` 等）、`*.pem`/`*.key`/`*.p12`/`*.pfx`/
   `*.keystore`、`id_rsa*`/`id_dsa*`/`id_ecdsa*`/`id_ed25519*`、`credentials.json`，
@@ -431,12 +433,16 @@ Agent MCP 调用没有 Cookie，但必须携带由主进程创建的运行上下
 - WebSocket：访客连接只接收。除 `ping`（回 `pong`）外，任何入站消息（`send_message`、
   `terminal_*` 及未来类型）都在分发前以 `ws_error` 拒绝。广播受众
   （`getGroupAllowedUserIds`）包含持有有效授权的访客，包括 Host 工作区事件、流式思考
-  与工具调用、重连快照和自动化事件；访客看到的过程信息与 owner 相同。
+  与工具调用、重连快照和自动化事件；访客看到的过程信息与 owner 相同。REST 不给访客
+  的数据在广播里也不给：`context_usage` 只发 owner，流式 `usage` 事件（token 与
+  费用）不发访客，`new_message` 去掉 `token_usage`/`cost_usd`，`agent_status` 去掉
+  `worktree`；REST 的消息历史与会话列表同样去掉这些字段。
 - 访客没有 Home、Agent Profile、钱包或订阅；计费管理不能给访客分配套餐或调整余额。
   访客不能创建工作区、会话、自动化、Skills、MCP、Plugins、渠道账号或访客，访客没有
   能触发的轮次，因此也不会写 Workspace Memory。
 - 管理员用户管理能禁用、删除、重置访客，但不能把访客改成其他角色或反之；邀请码和
-  注册不会产生访客。删除工作区会删除其授权；删除访客会删除授权与置顶。
+  注册不会产生访客。被用户管理禁用的访客（`disable_reason` 不是
+  `disabled_by_owner`），owner 只能查看和删除，`PATCH /api/guests/:id` 返回 403。删除工作区会删除其授权；删除访客会删除授权与置顶。
 
 ## 12. 修改 ACL 的验证要求
 

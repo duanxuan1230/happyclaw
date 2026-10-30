@@ -10848,6 +10848,27 @@ export function replaceGuestWorkspaceGrants(
       insert.run(guestUserId, jid, ownerUserId, now);
     }
   })();
+  // The only insert path: the next lookup reloads the set.
+  grantedWorkspaceJids = null;
+}
+
+/**
+ * Workspace JIDs with any grant row, whatever its state: a superset of the
+ * workspaces that have viewing guests, so a JID absent here needs no grant
+ * query. Rows are only added by replaceGuestWorkspaceGrants, which drops the
+ * set; deletions leave it a (still safe) superset until then.
+ */
+let grantedWorkspaceJids: Set<string> | null = null;
+
+export function workspaceHasGuestGrants(workspaceJid: string): boolean {
+  grantedWorkspaceJids ??= new Set(
+    (
+      prepareCached(
+        'SELECT DISTINCT workspace_jid FROM guest_workspace_grants',
+      ).all() as Array<{ workspace_jid: string }>
+    ).map((row) => row.workspace_jid),
+  );
+  return grantedWorkspaceJids.has(workspaceJid);
 }
 
 export function deleteGuestWorkspaceGrantsForGuest(guestUserId: string): void {
@@ -10858,15 +10879,19 @@ export function deleteGuestWorkspaceGrantsForGuest(guestUserId: string): void {
 
 /**
  * The only grant predicate: the grant row exists, the guest is an active
- * guest of the grant's owner, the owner is active and not itself a guest, and
- * the workspace is still owned by that owner.
+ * guest of the grant's owner, the owner is active and not itself a guest, the
+ * workspace is still owned by that owner, and a Host workspace's owner is
+ * still an admin (Host workspaces require the admin role, CLAUDE.md §8).
  */
 const ACTIVE_GUEST_GRANT_SQL = `FROM guest_workspace_grants g
      JOIN users gu ON gu.id = g.guest_user_id
      JOIN users o ON o.id = g.owner_user_id
+     JOIN registered_groups r
+       ON r.jid = g.workspace_jid AND r.created_by = g.owner_user_id
      WHERE gu.role = 'guest' AND gu.status = 'active'
        AND gu.guest_owner_id = g.owner_user_id
-       AND o.status = 'active' AND o.role != 'guest'`;
+       AND o.status = 'active' AND o.role != 'guest'
+       AND (r.execution_mode IS NOT 'host' OR o.role = 'admin')`;
 
 export function hasActiveGuestWorkspaceGrant(
   guestUserId: string,
@@ -10891,17 +10916,11 @@ export function listActiveGuestIdsForWorkspace(
   return rows.map((row) => row.id);
 }
 
-/**
- * Workspace JIDs a guest may currently view: active grants on workspaces the
- * granting owner still owns.
- */
+/** Workspace JIDs a guest may currently view. */
 export function listActiveGuestGrantJids(guestUserId: string): string[] {
   const rows = prepareCached(
     `SELECT g.workspace_jid AS jid ${ACTIVE_GUEST_GRANT_SQL}
-       AND g.guest_user_id = ?
-       AND EXISTS (SELECT 1 FROM registered_groups r
-                   WHERE r.jid = g.workspace_jid
-                     AND r.created_by = g.owner_user_id)`,
+       AND g.guest_user_id = ?`,
   ).all(guestUserId) as Array<{ jid: string }>;
   return rows.map((row) => row.jid);
 }
@@ -13227,6 +13246,7 @@ export function tryIncrementRedeemCodeUsage(
  */
 export function closeDatabase(): void {
   _stmts = null;
+  grantedWorkspaceJids = null;
   _newMsgStmtCache.clear();
   _sqlStmtCache.clear();
   _sqlStmtCacheDb = null;

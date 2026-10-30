@@ -463,6 +463,7 @@ function GuestRow({
   const updateGuest = useGuestsStore((s) => s.updateGuest);
   const deleteGuest = useGuestsStore((s) => s.deleteGuest);
   const active = guest.status === 'active';
+  const lockedByAdmin = guest.disabled_by_admin;
   const granted = guest.workspaces.map(workspaceLabel).join('、');
 
   const toggleStatus = async () => {
@@ -499,7 +500,7 @@ function GuestRow({
       title={guest.display_name || guest.username}
       badges={
         <Badge variant="outline" dot={active ? 'success' : 'warning'}>
-          {active ? '启用' : '禁用'}
+          {active ? '启用' : lockedByAdmin ? '已被管理员停用' : '禁用'}
         </Badge>
       }
       description={
@@ -532,19 +533,26 @@ function GuestRow({
             />
           }
           groups={[
-            [
-              { label: '编辑授权', icon: Edit3, onSelect: () => onEdit(guest) },
-              {
-                label: '重置密码',
-                icon: KeyRound,
-                onSelect: () => onResetPassword(guest),
-              },
-              {
-                label: active ? '禁用' : '启用',
-                icon: active ? ShieldOff : ShieldCheck,
-                onSelect: () => void toggleStatus(),
-              },
-            ],
+            // Disabled by an administrator: only deleting is left to the owner.
+            lockedByAdmin
+              ? []
+              : [
+                  {
+                    label: '编辑授权',
+                    icon: Edit3,
+                    onSelect: () => onEdit(guest),
+                  },
+                  {
+                    label: '重置密码',
+                    icon: KeyRound,
+                    onSelect: () => onResetPassword(guest),
+                  },
+                  {
+                    label: active ? '禁用' : '启用',
+                    icon: active ? ShieldOff : ShieldCheck,
+                    onSelect: () => void toggleStatus(),
+                  },
+                ],
             [
               {
                 label: '删除',

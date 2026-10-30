@@ -258,7 +258,7 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
   const linkedByAgent = getGroupsByTargetAgents(
     agents.filter((a) => a.kind === 'conversation').map((a) => a.id),
   );
-  const worktrees = worktreesBySession(group.folder);
+  const worktrees = worktreesBySession(group.folder, user);
   return c.json({
     agents: agents.map((a) => {
       const base = {
@@ -323,7 +323,7 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
       [...mountsBySession.values()].flat().map((mount) => mount.channel_jid),
     ),
   ]);
-  const worktrees = worktreesBySession(group.folder);
+  const worktrees = worktreesBySession(group.folder, user);
 
   return c.json({
     sessions: [
@@ -451,7 +451,12 @@ async function createRequestedWorktree(
 
 /** The workspace's worktrees, rechecked on disk so the list shows broken and
  * recovered checkouts as they are now. */
-function worktreesBySession(folder: string): Map<string, SessionWorktree> {
+/** Each session's worktree; none for guests, who get no repository details. */
+function worktreesBySession(
+  folder: string,
+  user: { role: string },
+): Map<string, SessionWorktree> {
+  if (user.role === 'guest') return new Map();
   return new Map(
     listSessionWorktreesByFolder(folder).map((record) => [
       record.agent_id,

@@ -151,3 +151,14 @@ export function redactAutomationRunForGuest(run: AutomationRun): AutomationRun {
     ? { ...run, preCheck: { ...run.preCheck, stdout: '', stderr: '' } }
     : run;
 }
+
+/** A message as guests see it: no token usage or cost. */
+export function withoutUsageForGuest<
+  T extends { token_usage?: unknown; cost_usd?: unknown },
+>(message: T): T {
+  if (message.token_usage === undefined && message.cost_usd === undefined) {
+    return message;
+  }
+  const { token_usage: _usage, cost_usd: _cost, ...rest } = message;
+  return rest as T;
+}

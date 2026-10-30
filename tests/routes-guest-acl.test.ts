@@ -907,6 +907,278 @@ describe('receive-only WebSocket', () => {
     expect(ids).toEqual(['m-granted', 'm-home']);
     ws.close();
   });
+
+  test('usage, context usage and worktree details stay with the owner', async () => {
+    const owner = await connect(ownerCookie);
+    const guest = await connect(guestCookie);
+    const usage = {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      reasoningTokens: 0,
+      costUSD: 0.42,
+      durationMs: 1,
+      numTurns: 1,
+    };
+    web.broadcastStreamEvent(GRANTED, {
+      eventType: 'usage',
+      turnId: 'turn-usage',
+      usage,
+    } as any);
+    web.broadcastStreamEvent(GRANTED, {
+      eventType: 'text_delta',
+      turnId: 'turn-usage',
+      text: 'hello',
+    } as any);
+    await web.broadcastContextUsage('flow-x', null, {
+      usedTokens: 1000,
+      contextWindow: 200000,
+    } as any);
+    web.broadcastAgentStatus(GRANTED, WORKTREE_SESSION, 'idle', 'Worktree', '');
+    web.broadcastNewMessage(GRANTED, {
+      id: 'm-usage',
+      chat_jid: GRANTED,
+      sender: 'happyclaw-agent',
+      sender_name: 'Agent',
+      content: 'done',
+      timestamp: new Date().toISOString(),
+      token_usage: JSON.stringify({ costUSD: 0.42 }),
+    } as any);
+    const done = (list: any[]) =>
+      list.some((m) => m.type === 'new_message') &&
+      list.some((m) => m.type === 'agent_status');
+    await until(() => done(owner.messages) && done(guest.messages));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const types = (list: any[]) =>
+      list
+        .filter((m) => m.type !== 'active_run_snapshot')
+        .map((m) => (m.type === 'stream_event' ? m.event.eventType : m.type))
+        .sort();
+    expect(types(owner.messages)).toEqual([
+      'agent_status',
+      'context_usage',
+      'new_message',
+      'text_delta',
+      'usage',
+    ]);
+    expect(types(guest.messages)).toEqual([
+      'agent_status',
+      'new_message',
+      'text_delta',
+    ]);
+    const find = (list: any[], type: string) =>
+      list.find((m) => m.type === type);
+    expect(find(owner.messages, 'agent_status').worktree.branch).toBe(
+      'happyclaw/wt',
+    );
+    expect(find(guest.messages, 'agent_status')).not.toHaveProperty('worktree');
+    expect(find(owner.messages, 'new_message').message.token_usage).toBe(
+      JSON.stringify({ costUSD: 0.42 }),
+    );
+    expect(find(guest.messages, 'new_message').message).not.toHaveProperty(
+      'token_usage',
+    );
+    expect(JSON.stringify(guest.messages)).not.toContain('0.42');
+    owner.ws.close();
+    guest.ws.close();
+  });
+});
+
+describe('withheld from guests over REST', () => {
+  test('messages carry no token usage, sessions no worktree', async () => {
+    db.ensureChatExists(GRANTED);
+    db.storeMessageDirect(
+      'm-cost',
+      GRANTED,
+      'happyclaw-agent',
+      'Agent',
+      'answer',
+      new Date().toISOString(),
+      true,
+      { tokenUsage: JSON.stringify({ costUSD: 0.42 }) },
+    );
+    const ownerView = await call(
+      ownerCookie,
+      'GET',
+      `/api/groups/${GRANTED}/messages`,
+    );
+    const guestView = await call(
+      guestCookie,
+      'GET',
+      `/api/groups/${GRANTED}/messages`,
+    );
+    const ownerMessage = ownerView.body.messages.find(
+      (m: any) => m.id === 'm-cost',
+    );
+    const guestMessage = guestView.body.messages.find(
+      (m: any) => m.id === 'm-cost',
+    );
+    expect(ownerMessage.token_usage).toContain('0.42');
+    expect(guestMessage.content).toBe('answer');
+    expect(guestMessage).not.toHaveProperty('token_usage');
+    expect(guestMessage).not.toHaveProperty('cost_usd');
+
+    for (const route of ['sessions', 'agents']) {
+      const ownerList = await call(
+        ownerCookie,
+        'GET',
+        `/api/groups/${GRANTED}/${route}`,
+      );
+      const guestList = await call(
+        guestCookie,
+        'GET',
+        `/api/groups/${GRANTED}/${route}`,
+      );
+      const pick = (body: any) =>
+        (body.sessions ?? body.agents).find(
+          (item: any) => item.id === WORKTREE_SESSION,
+        );
+      expect([route, pick(ownerList.body).worktree?.branch]).toEqual([
+        route,
+        'happyclaw/wt',
+      ]);
+      expect([route, pick(guestList.body).worktree ?? null]).toEqual([
+        route,
+        null,
+      ]);
+    }
+  });
+});
+
+describe('admin decisions and host grants', () => {
+  test('a guest disabled by an administrator stays disabled for its owner', async () => {
+    const created = await call(ownerCookie, 'POST', '/api/guests', {
+      username: 'locked_guest',
+      password: GUEST_PASSWORD,
+      workspace_jids: [GRANTED],
+    });
+    expect(created.status).toBe(201);
+    const lockedId = created.body.guest.id;
+
+    // The owner's own disable can be undone by the owner.
+    expect(
+      (
+        await call(ownerCookie, 'PATCH', `/api/guests/${lockedId}`, {
+          status: 'disabled',
+        })
+      ).body.guest.disabled_by_admin,
+    ).toBe(false);
+    expect(
+      (
+        await call(ownerCookie, 'PATCH', `/api/guests/${lockedId}`, {
+          status: 'active',
+        })
+      ).status,
+    ).toBe(200);
+
+    // User management disables it: the owner may look and delete only.
+    const adminDisable = await call(
+      ownerCookie,
+      'PATCH',
+      `/api/admin/users/${lockedId}`,
+      { status: 'disabled' },
+    );
+    expect(adminDisable.status).toBe(200);
+    for (const body of [
+      { status: 'active' },
+      { display_name: 'renamed' },
+      { password: 'Another-pass-123' },
+      { workspace_jids: [GRANTED, UNGRANTED] },
+    ]) {
+      const res = await call(
+        ownerCookie,
+        'PATCH',
+        `/api/guests/${lockedId}`,
+        body,
+      );
+      expect([JSON.stringify(body), res.status]).toEqual([
+        JSON.stringify(body),
+        403,
+      ]);
+    }
+    const stored = db.getUserById(lockedId)!;
+    expect(stored.status).toBe('disabled');
+    expect(stored.display_name).not.toBe('renamed');
+    const listed = (await call(ownerCookie, 'GET', '/api/guests')).body.guests;
+    expect(listed.find((g: any) => g.id === lockedId).disabled_by_admin).toBe(
+      true,
+    );
+    expect(
+      (await call(ownerCookie, 'DELETE', `/api/guests/${lockedId}`)).status,
+    ).toBe(200);
+  });
+
+  test('a Host grant lapses once its owner is no longer an admin', async () => {
+    const on = await call(ownerCookie, 'PUT', '/api/config/system', {
+      allowMemberGuests: true,
+    });
+    expect(on.status).toBe(200);
+    db.updateUserFields(OWNER, { role: 'member' });
+    try {
+      const groups = await call(guestCookie, 'GET', '/api/groups');
+      expect(groups.status).toBe(200);
+      expect(Object.keys(groups.body.groups)).toEqual([GRANTED]);
+      for (const url of [
+        `/api/groups/${HOME}/messages`,
+        `/api/groups/${HOME}/files`,
+        `/api/workspaces/${HOME}`,
+      ]) {
+        const res = await call(guestCookie, 'GET', url);
+        expect([url, res.status]).toEqual([url, 404]);
+      }
+      expect(getGroupAllowedUserIds(HOME)?.has(guestId)).toBe(false);
+      // A container workspace of the same owner is still shared.
+      expect(getGroupAllowedUserIds(GRANTED)?.has(guestId)).toBe(true);
+    } finally {
+      db.updateUserFields(OWNER, { role: 'admin' });
+      invalidateUserSessions(OWNER);
+      await call(ownerCookie, 'PUT', '/api/config/system', {
+        allowMemberGuests: false,
+      });
+    }
+    expect(getGroupAllowedUserIds(HOME)?.has(guestId)).toBe(true);
+  });
+
+  test('a new or revoked grant reaches broadcasts at once', async () => {
+    expect(getGroupAllowedUserIds(UNGRANTED)?.has(guestId)).toBe(false);
+    await call(ownerCookie, 'PATCH', `/api/guests/${guestId}`, {
+      workspace_jids: [HOME, GRANTED, UNGRANTED],
+    });
+    expect(getGroupAllowedUserIds(UNGRANTED)?.has(guestId)).toBe(true);
+    await call(ownerCookie, 'PATCH', `/api/guests/${guestId}`, {
+      workspace_jids: [HOME, GRANTED],
+    });
+    expect(getGroupAllowedUserIds(UNGRANTED)?.has(guestId)).toBe(false);
+  });
+
+  test('a guest file listing resolves only the symlinks', async () => {
+    const dir = path.join(tmp, 'groups', 'flow-x', 'many');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 20; i++) {
+      fs.writeFileSync(path.join(dir, `f${i}.txt`), 'x');
+    }
+    fs.symlinkSync(
+      path.join(tmp, 'groups', 'flow-x', '.env'),
+      path.join(dir, 'link'),
+    );
+    const realpath = vi.spyOn(fs, 'realpathSync');
+    try {
+      const list = await call(
+        guestCookie,
+        'GET',
+        `/api/groups/${GRANTED}/files?path=many`,
+      );
+      expect(list.status).toBe(200);
+      expect(list.body.files).toHaveLength(20);
+      // A fixed few (root, listed directory, the one symlink), not one per
+      // listed file.
+      expect(realpath.mock.calls.length).toBeLessThan(10);
+    } finally {
+      realpath.mockRestore();
+    }
+  });
 });
 
 describe('member guests and the per-owner cap', () => {

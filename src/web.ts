@@ -50,6 +50,7 @@ import {
   GUEST_READ_ONLY_ERROR,
   canViewGroup,
   redactAutomationRunForGuest,
+  withoutUsageForGuest,
 } from './guest-access.js';
 import { getGuestAccountState } from './guest-accounts.js';
 
@@ -115,6 +116,7 @@ import {
 } from './db.js';
 import {
   getGroupAllowedUserIds,
+  getGroupAudience,
   listViewingGuestIds,
 } from './group-broadcast-acl.js';
 import { onConversationContextCleared } from './context-usage-events.js';
@@ -2861,6 +2863,32 @@ function normalizeRuntimeJid(chatJid: string): string {
   return `${normalizeHomeJid(baseJid)}${chatJid.slice(markerIndex)}`;
 }
 
+/**
+ * Send a chat's event to its owner and, as `guestMsg`, to the guests watching
+ * it: the same message by default, a trimmed copy, or nothing (null) for
+ * data REST also withholds from guests (token usage and cost, worktree
+ * details).
+ */
+function broadcastToGroupAudience(
+  aclJid: string,
+  msg: WsMessageOut,
+  adminOnly: boolean,
+  guestMsg: WsMessageOut | null = msg,
+): void {
+  const audience = getGroupAudience(aclJid);
+  // Unresolvable ownership: nobody, admins included.
+  if (!audience) return;
+  const { ownerId, guestIds } = audience;
+  if (guestMsg === msg) {
+    safeBroadcast(msg, adminOnly, new Set([ownerId, ...guestIds]));
+    return;
+  }
+  safeBroadcast(msg, adminOnly, new Set([ownerId]));
+  if (guestMsg && guestIds.length > 0) {
+    safeBroadcast(guestMsg, adminOnly, new Set(guestIds));
+  }
+}
+
 export function broadcastToWebClients(chatJid: string, text: string): void {
   const timestamp = new Date().toISOString();
   const jid = normalizeHomeJid(chatJid);
@@ -2943,18 +2971,24 @@ function deliverNewMessage(
     if (!effectiveAgentId) effectiveAgentId = parts[1];
   }
   const jid = normalizeHomeJid(baseChatJid);
-  const allowedUserIds = getGroupAllowedUserIds(baseChatJid);
+  const message = {
+    ...sequencedMessage,
+    is_from_me: sequencedMessage.is_from_me ?? false,
+  };
   const wsMsg: WsMessageOut = {
     type: 'new_message',
     chatJid: jid,
-    message: {
-      ...sequencedMessage,
-      is_from_me: sequencedMessage.is_from_me ?? false,
-    },
+    message,
     ...(effectiveAgentId ? { agentId: effectiveAgentId } : {}),
     ...(source ? { source } : {}),
   };
-  safeBroadcast(wsMsg, isHostGroupJid(baseChatJid), allowedUserIds);
+  const guestMessage = withoutUsageForGuest(message);
+  broadcastToGroupAudience(
+    baseChatJid,
+    wsMsg,
+    isHostGroupJid(baseChatJid),
+    guestMessage === message ? wsMsg : { ...wsMsg, message: guestMessage },
+  );
 }
 
 /** Broadcast one committed message-row deletion by its full composite key. */
@@ -3834,7 +3868,6 @@ export function broadcastStreamEvent(
   }
 
   const jid = normalizeHomeJid(chatJid);
-  const allowedUserIds = getGroupAllowedUserIds(chatJid);
   // Agent streams use virtual JID format (jid#agent:agentId) as the exact
   // query-lifecycle key. turnId ownership survives an A→B replacement so a
   // delayed callback from A cannot be relabelled as B.
@@ -3867,7 +3900,13 @@ export function broadcastStreamEvent(
         event,
         runId: decision.runId,
       };
-  safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
+  // Token usage and cost (the run's `usage` event) stay with the owner.
+  broadcastToGroupAudience(
+    chatJid,
+    msg,
+    isHostGroupJid(chatJid),
+    event.eventType === 'usage' ? null : msg,
+  );
 
   // Accumulate snapshot for both main and agent streams.
   updateStreamingSnapshot(snapshotJid, event, decision.runId);
@@ -3973,7 +4012,6 @@ export function broadcastAgentStatus(
   titleGenerating?: boolean,
 ): void {
   const jid = normalizeHomeJid(chatJid);
-  const allowedUserIds = getGroupAllowedUserIds(chatJid);
   // Resolve kind from DB if not provided
   const resolvedKind = kind || getAgent(agentId)?.kind;
   // Every tab learns a session's worktree branch from its status updates.
@@ -3993,7 +4031,14 @@ export function broadcastAgentStatus(
     titleGenerating,
     ...(worktree ? { worktree } : {}),
   };
-  safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
+  // Guests see sessions, not their git worktrees (git review is denied).
+  const { worktree: _worktree, ...forGuests } = msg;
+  broadcastToGroupAudience(
+    chatJid,
+    msg,
+    isHostGroupJid(chatJid),
+    worktree ? (forGuests as WsMessageOut) : msg,
+  );
 }
 
 export function broadcastAgentRemoved(
@@ -4127,7 +4172,8 @@ export async function broadcastContextUsage(
           ...value,
         },
         isHostGroupJid(jid),
-        getGroupAllowedUserIds(jid),
+        // Token usage; REST denies guests context-usage too.
+        getGroupAllowedUserIds(jid, { includeGuests: false }),
       );
     }
   } catch (err) {

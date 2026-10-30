@@ -15,6 +15,8 @@ export interface GuestAccount {
   username: string;
   display_name: string;
   status: 'active' | 'disabled';
+  /** Disabled through user management: the owner may only view or delete. */
+  disabled_by_admin: boolean;
   created_at: string;
   last_login_at: string | null;
   workspaces: GuestWorkspaceRef[];

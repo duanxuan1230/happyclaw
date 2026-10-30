@@ -307,6 +307,20 @@ function resolveRequestFileRoot(
   return { rootOverride: getFileRootOverride(group, agentId) };
 }
 
+/** Names of the symlinks in `dir`, or null when it cannot be read. */
+function symlinkNames(dir: string): Set<string> | null {
+  try {
+    return new Set(
+      fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isSymbolicLink())
+        .map((entry) => entry.name),
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** Never hides anything: owners see every file. */
 const SHOW_ALL = () => false;
 
@@ -407,8 +421,21 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
 
   try {
     const result = listFiles(group.folder, subPath, rootOverride);
+    // The listed directory itself passed the real-path check, so only its
+    // symlinks can point elsewhere; every other entry is judged by its name.
+    const links = isGuest
+      ? symlinkNames(path.join(fileRoot, subPath))
+      : undefined;
     const files = result.files
-      .filter((entry) => !isHidden(entry.path, path.join(fileRoot, entry.path)))
+      .filter(
+        (entry) =>
+          !isGuest ||
+          !(
+            isGuestHiddenWorkspacePath(entry.path) ||
+            ((!links || links.has(entry.name)) &&
+              isHidden(entry.path, path.join(fileRoot, entry.path)))
+          ),
+      )
       .map((entry) => ({
         ...entry,
         // Guests do not need (and should not learn) host filesystem paths.
