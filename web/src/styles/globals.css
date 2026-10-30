@@ -223,8 +223,10 @@
   /* AI message card shadow */
   --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 
-  /* iOS keyboard height */
-  --keyboard-height: 0px;
+  /* Keyboard occlusion, published inline on <html> by useVisualViewportVars.
+     --keyboard-height is a legacy alias for callers not yet switched over. */
+  --keyboard-inset: 0px;
+  --keyboard-height: var(--keyboard-inset);
 
   /* Liquid Glass design tokens */
 }
@@ -552,9 +554,8 @@ html.font-anthropic .font-mono {
 html {
   height: 100%;
   overflow: hidden;
-  /* 声明式禁双指缩放（替代全局非 passive touchmove 监听）：
-     允许单指平移滚动，pinch-zoom 不在允许列表内即被浏览器拦截。 */
-  touch-action: pan-x pan-y;
+  /* 允许平移和双指缩放，只去掉双击缩放带来的点击延迟。 */
+  touch-action: manipulation;
 }
 
 body {
@@ -725,6 +726,10 @@ pre code.hljs {
   background: transparent !important;
   border-radius: 0;
   padding: 0 !important;
+  /* highlight.js makes the code element its own x-scroller; hand scrolling
+     back to the <pre> (HorizontalScroll) so its edge fades see the overflow.
+     Its stylesheet loads later with the renderer chunk, hence !important. */
+  overflow: visible !important;
 }
 
 /* Dark mode syntax highlighting — GitHub Dark Dimmed */

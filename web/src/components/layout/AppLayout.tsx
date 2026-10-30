@@ -9,6 +9,7 @@ import { wsManager } from '../../api/ws';
 import { useTheme } from '../../hooks/useTheme';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useRouteRestore } from '../../hooks/useRouteRestore';
+import { useVisualViewportVars } from '../../hooks/useVisualViewport';
 import { useBillingStore } from '../../stores/billing';
 import { useGroupsStore } from '../../stores/groups';
 import { useChatStore } from '../../stores/chat';
@@ -37,6 +38,7 @@ export function AppLayout() {
     isPhone && !isChatRoute && !location.pathname.startsWith('/settings');
   useTheme(); // 应用并同步持久化的主题偏好
   useRouteRestore(); // PWA 重启时恢复上次访问的路由（默认关闭，设置中启用）
+  useVisualViewportVars(); // 全局唯一的 --vvh / --keyboard-inset 来源
 
   // ⌘B / Ctrl+B toggles the desktop sidebar between full width and icon rail.
   const toggleSidebar = useShellStore((s) => s.toggleSidebar);
