@@ -304,6 +304,7 @@ function BareComposer() {
         {askCards && (
           <div className="mx-auto max-w-3xl pt-4">
             <AskUserQuestionCard
+              toolUseId="ask-single"
               questions={[
                 {
                   question: '用哪个方案？',
@@ -312,6 +313,7 @@ function BareComposer() {
               ]}
             />
             <AskUserQuestionCard
+              toolUseId="ask-steps"
               questions={[
                 { question: '周末去哪？', options: ['爬山', '看展', '在家'] },
                 {

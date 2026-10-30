@@ -8,6 +8,7 @@ import {
   composeReply,
 } from '../src/components/chat/AskUserQuestionCard';
 import type { StepQuestion } from '../src/lib/stream-steps';
+import { useAskAnswersStore } from '../src/stores/ask-answers';
 import { useShellStore } from '../src/stores/shell';
 
 (
@@ -18,7 +19,8 @@ let root: Root;
 let container: HTMLDivElement;
 
 beforeEach(() => {
-  useShellStore.setState({ composerDraftRequest: null });
+  useShellStore.setState({ composerDraftRequest: null, composerFills: {} });
+  useAskAnswersStore.setState({ progress: {} });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -31,7 +33,9 @@ afterEach(async () => {
 
 const render = (questions: StepQuestion[]) =>
   act(async () => {
-    root.render(<AskUserQuestionCard questions={questions} />);
+    root.render(
+      <AskUserQuestionCard toolUseId="toolu_1" questions={questions} />,
+    );
   });
 const button = (name: string) => {
   const found = [...container.querySelectorAll('button')].find(
@@ -62,9 +66,58 @@ describe('AskUserQuestionCard', () => {
     await click('窄 selector');
     expect(draft()?.nonce).toBe(nonce);
 
-    // Another answer is filled.
+    // Another answer takes the place of the first.
     await click('宽 selector');
-    expect(draft()?.text).toBe('宽 selector');
+    expect(draft()).toMatchObject({
+      text: '宽 selector',
+      replaces: '窄 selector',
+    });
+  });
+
+  it('shows what an option means under its label', async () => {
+    await render([
+      {
+        question: '用哪个方案？',
+        options: ['窄', '宽'],
+        descriptions: ['只改按钮', ''],
+      },
+    ]);
+    const options = container.querySelectorAll('[data-hc-question-option]');
+    expect(options).toHaveLength(2);
+    expect(options[0].textContent).toBe('窄只改按钮');
+    expect(options[1].textContent).toBe('宽');
+  });
+
+  it('fills again once the composer no longer holds the answer', async () => {
+    await render([{ question: 'Q？', options: ['甲', '乙'] }]);
+    await click('甲');
+    const nonce = draft()?.nonce;
+    // The composer saw the text cleared, edited away or sent.
+    await act(async () =>
+      useShellStore.getState().forgetComposerFills(['toolu_1']),
+    );
+    expect(text()).not.toContain('已填入输入框');
+    await click('甲');
+    expect(draft()?.nonce).toBe((nonce ?? 0) + 1);
+    expect(draft()?.replaces).toBeUndefined();
+  });
+
+  it('keeps the answers when the card is rendered anew', async () => {
+    const questions: StepQuestion[] = [
+      { question: 'A？', options: ['a1', 'a2'] },
+      { question: 'B？', multiSelect: true, options: ['b1', 'b2'] },
+    ];
+    await render(questions);
+    await click('a2');
+    await click('b2');
+    // The streamed reply settles: another component renders the card.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(questions);
+    expect(text()).toContain('问题 2/2');
+    expect(button('b2').getAttribute('aria-pressed')).toBe('true');
+    await click('上一题');
+    expect(button('a2').getAttribute('aria-pressed')).toBe('true');
   });
 
   it('walks several questions one at a time and fills each answer under its question', async () => {
@@ -198,6 +251,20 @@ describe('AskUserQuestionCard, own answers and keys', () => {
     expect(button('b2').getAttribute('aria-pressed')).toBe('false');
     await key(card(), 'Enter');
     expect(draft()?.text).toBe('A？\n答：a2\nB？\n答：b1、b3');
+  });
+
+  it('leaves Enter on a button to the button', async () => {
+    await render([
+      { question: 'A？', options: ['a1', 'a2'] },
+      { question: 'B？', multiSelect: true, options: ['b1', 'b2'] },
+    ]);
+    await click('a1');
+    // The bubbled Enter of a focused option neither moves on nor fills.
+    await key(button('b2'), 'Enter');
+    expect(text()).toContain('问题 2/2');
+    expect(draft()).toBeNull();
+    await key(button('上一题'), 'Enter');
+    expect(text()).toContain('问题 2/2');
   });
 
   it("fills a lone question's own answer on Enter", async () => {

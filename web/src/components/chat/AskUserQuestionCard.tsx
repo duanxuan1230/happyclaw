@@ -1,19 +1,19 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from 'react';
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { StepQuestion } from '../../lib/stream-steps';
+import { useAskAnswersStore, type AskProgress } from '../../stores/ask-answers';
 import { useShellStore } from '../../stores/shell';
+
+const NO_PROGRESS: AskProgress = { picked: [], own: [], index: 0 };
 
 /**
  * AskUserQuestion options. The runner has no interactive answer channel, so
  * the reply is the user's next message: the card collects the answers and
- * fills them into the composer for the user to edit and send.
+ * fills them into the composer for the user to edit and send. Filling again
+ * replaces what the card filled before, while the composer still holds it.
+ * The answers so far live in a store by `toolUseId`, so they survive the
+ * card being rendered anew once the reply settles.
  *
  * - One single-choice question: a tap fills the composer right away.
  * - Several questions: one at a time; a single choice moves on by itself,
@@ -21,20 +21,25 @@ import { useShellStore } from '../../stores/shell';
  *   under its question, so the reply says which answer is for what.
  * - 其他… takes an answer of the reader's own: for a single choice it
  *   replaces the option, for a multi-select it is one more.
- * - Keys, while the card has focus: 1–9 pick an option, Enter goes on to the
- *   next question, or fills the composer on the last.
+ * - Keys, while the card or 其他… has focus: 1–9 pick an option (not in
+ *   其他…), Enter goes on to the next question, or fills the composer on the
+ *   last. On a button Enter is the button's own.
  */
 export function AskUserQuestionCard({
+  toolUseId,
   questions,
 }: {
+  toolUseId: string;
   questions: readonly StepQuestion[];
 }) {
-  const [picked, setPicked] = useState<string[][]>(() =>
-    questions.map(() => []),
-  );
-  const [own, setOwn] = useState<string[]>(() => questions.map(() => ''));
-  const [index, setIndex] = useState(0);
-  const [filled, setFilled] = useState<string | null>(null);
+  const { picked, own, index } =
+    useAskAnswersStore((s) => s.progress[toolUseId]) ?? NO_PROGRESS;
+  const filled = useShellStore((s) => s.composerFills[toolUseId]);
+  const save = (next: Partial<AskProgress>) =>
+    useAskAnswersStore
+      .getState()
+      .setProgress(toolUseId, { picked, own, index, ...next });
+  const setIndex = (next: number) => save({ index: next });
   const cardRef = useRef<HTMLDivElement>(null);
   // Moving to another question unmounts the focused option: the card takes
   // focus instead, so the keys keep working.
@@ -59,42 +64,43 @@ export function AskUserQuestionCard({
   );
   const reply = composeReply(questions, answers);
   const answered = answers.filter((a) => a.length > 0).length;
+  const isFilled = filled === reply;
 
   const fill = (text: string) => {
     if (!text || text === filled) return;
-    useShellStore.getState().requestComposerDraft(text);
-    setFilled(text);
+    useShellStore.getState().requestComposerDraft(text, toolUseId);
   };
 
+  // Questions can grow while the call streams in; answers follow them.
+  const withAt = <T,>(list: readonly T[], value: T, empty: T) =>
+    questions.map((_, i) => (i === at ? value : (list[i] ?? empty)));
+
   const choose = (label: string) => {
-    // Questions can grow while the call streams in; answers follow them.
-    setPicked(
-      questions.map((_, i) => {
-        const a = picked[i] ?? [];
-        if (i !== at) return a;
-        if (!q.multiSelect) return [label];
-        return a.includes(label) ? a.filter((x) => x !== label) : [...a, label];
-      }),
-    );
+    const mine = chosen.includes(label)
+      ? chosen.filter((x) => x !== label)
+      : [...chosen, label];
+    const next: Partial<AskProgress> = {
+      picked: withAt(picked, q.multiSelect ? mine : [label], []),
+    };
     if (!q.multiSelect) {
       // A single choice is the option or the reader's own answer, not both.
-      setOwn(questions.map((_, i) => (i === at ? '' : (own[i] ?? ''))));
+      next.own = withAt(own, '', '');
+      if (!quick && at < total - 1) next.index = at + 1;
     }
+    save(next);
     if (quick) fill(label);
-    else if (!q.multiSelect && at < total - 1) setIndex(at + 1);
   };
 
   const write = (text: string) => {
-    setOwn(questions.map((_, i) => (i === at ? text : (own[i] ?? ''))));
-    if (!q.multiSelect && text.trim()) {
-      setPicked(questions.map((_, i) => (i === at ? [] : (picked[i] ?? []))));
-    }
+    const next: Partial<AskProgress> = { own: withAt(own, text, '') };
+    if (!q.multiSelect && text.trim()) next.picked = withAt(picked, [], []);
+    save(next);
   };
 
   /** Enter: on to the next question, or fill the composer on the last. */
   const advance = () => {
     if (at < total - 1) setIndex(at + 1);
-    else fill(quick ? (answers[0] ?? []).join('、') : reply);
+    else fill(reply);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -109,6 +115,8 @@ export function AskUserQuestionCard({
     }
     const typing = event.target instanceof HTMLInputElement;
     if (event.key === 'Enter') {
+      // A focused button takes Enter as its own click.
+      if (!typing && event.target !== event.currentTarget) return;
       event.preventDefault();
       advance();
       return;
@@ -214,7 +222,7 @@ export function AskUserQuestionCard({
             aria-label={`${q.question} 的其他答案`}
             enterKeyHint={at < total - 1 ? 'next' : 'done'}
             className={cn(
-              'h-7 w-28 min-w-0 rounded-md bg-transparent px-2.5 text-caption text-foreground ring-1 ring-surface-border transition-[width,box-shadow] outline-none placeholder:text-muted-foreground focus:w-48 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-10 pointer-coarse:text-base',
+              'h-7 w-28 min-w-0 rounded-md bg-transparent px-2.5 text-caption text-foreground ring-1 ring-surface-border transition-[width,box-shadow] outline-none placeholder:text-muted-foreground focus:w-48 focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base',
               (own[at] ?? '').trim() && 'w-48 ring-foreground/60',
             )}
           />
@@ -247,7 +255,7 @@ export function AskUserQuestionCard({
             </>
           )}
           <span className="flex-1 truncate text-caption text-muted-foreground">
-            {filled && filled === reply
+            {isFilled
               ? '已填入输入框，可修改后发送'
               : total > 1
                 ? `已答 ${answered}/${total}`
@@ -255,11 +263,11 @@ export function AskUserQuestionCard({
           </span>
           <button
             type="button"
-            disabled={!reply || reply === filled}
+            disabled={!reply || isFilled}
             onClick={() => fill(reply)}
-            className="inline-flex h-7 shrink-0 cursor-pointer items-center rounded-md bg-foreground px-3 text-caption font-medium text-background transition-opacity outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:opacity-40 pointer-coarse:h-10"
+            className="inline-flex h-7 shrink-0 cursor-pointer items-center rounded-md bg-foreground px-3 text-caption font-medium text-background transition-opacity outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:opacity-40 pointer-coarse:h-11"
           >
-            {filled && filled === reply ? '已填入' : '填入输入框'}
+            {isFilled ? '已填入' : '填入输入框'}
           </button>
         </div>
       )}
@@ -285,7 +293,7 @@ function NavButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground ring-1 ring-surface-border transition-colors outline-none hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:opacity-40 pointer-coarse:size-10"
+      className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground ring-1 ring-surface-border transition-colors outline-none hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default disabled:opacity-40 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -293,10 +301,10 @@ function NavButton({
 }
 
 /** A question's answer: the options picked and the reader's own words. */
-export function mergeAnswer(
+function mergeAnswer(
   picked: readonly string[],
   own: string,
-  multiSelect = false,
+  multiSelect: boolean | undefined,
 ): string[] {
   const text = own.trim();
   if (!text) return [...picked];
