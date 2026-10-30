@@ -85,6 +85,13 @@ test.describe('on a phone (Pixel 7)', () => {
     expect(await hitAt(page, right.x + right.width + 7.5, cy)).toBe('right');
   });
 
+  test('a button after a phone-hidden one keeps its left hit area', async ({
+    page,
+  }) => {
+    const b = await box(page, 'after-hidden');
+    expect(await hitAt(page, b.x - 6, b.cy)).toBe('after-hidden');
+  });
+
   test('an absolutely placed button stays where its caller put it', async ({
     page,
   }) => {
