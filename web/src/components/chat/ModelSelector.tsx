@@ -461,6 +461,9 @@ export function ModelSelector({
   );
   const [loadFailed, setLoadFailed] = useState(false);
   const [open, setOpen] = useDockOverlay('model');
+  // The sheet's detent: half on open, full while searching (cindy's picker
+  // makes room for the keyboard when its field gets focus).
+  const [snap, setSnap] = useState<'half' | 'full'>('half');
   const [saving, setSaving] = useState(false);
   const modelTooltip = useQuietTooltip();
   const lastRefreshAt = useRef(0);
@@ -521,6 +524,7 @@ export function ModelSelector({
       return;
     }
     modelTooltip.onMenuOpenChange(next);
+    if (next) setSnap('half');
     setOpen(next);
     if (next) refreshCatalog();
   };
@@ -691,6 +695,7 @@ export function ModelSelector({
         if (!phone) handleOpenChange(false);
         pickRow(row);
       }}
+      onSearchFocus={phone ? () => setSnap('full') : undefined}
       footer={
         phone && (
           <ConversationContextUsageLine jid={groupJid} agentId={agentId} />
@@ -797,6 +802,8 @@ export function ModelSelector({
           <SheetContent
             side="bottom"
             detents
+            snap={snap}
+            onSnapChange={setSnap}
             className="gap-0 p-0"
             // Focus the sheet, not the search field: a phone keyboard would
             // cover the list.
@@ -959,6 +966,8 @@ interface ModelPanelProps {
   touch: boolean;
   /** Below the hint, e.g. a phone's context usage. */
   footer?: ReactNode;
+  /** The search field got focus. */
+  onSearchFocus?: () => void;
   /**
    * A phone picks the effort here, under the model in use; null when that
    * model takes none. Undefined leaves the effort to the control beside the
@@ -987,6 +996,7 @@ function ModelPanel({
   inSheet,
   touch,
   footer,
+  onSearchFocus,
   effort,
   onPick,
   onManage,
@@ -1079,6 +1089,7 @@ function ModelPanel({
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="搜索模型"
+          onFocus={onSearchFocus}
           aria-label="搜索模型"
           autoCapitalize="none"
           autoCorrect="off"

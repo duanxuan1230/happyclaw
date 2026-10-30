@@ -474,6 +474,10 @@ test.describe('phone model entry', () => {
         element.getAttribute('enterkeyhint'),
       ]),
     ).toEqual(['16px', 'none', 'off', 'search']);
+    // Searching makes room: the sheet goes to its full detent.
+    await expect(sheet).toHaveAttribute('data-snap', 'half');
+    await search.tap();
+    await expect(sheet).toHaveAttribute('data-snap', 'full');
   });
 });
 
