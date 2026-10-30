@@ -23,6 +23,7 @@ import {
 } from '../session-worktree-store.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { canAccessGroup, canModifyGroup } from '../group-acl.js';
+import { canViewGroup } from '../guest-access.js';
 import {
   getRegisteredGroup,
   getAllRegisteredGroups,
@@ -184,6 +185,16 @@ function unbindError(result: { reason: string }): string {
     : 'IM group no longer exists';
 }
 
+/** Guests get 404 so an ungranted workspace's existence is not revealed. */
+function guestAwareForbidden(
+  c: Context<{ Variables: Variables }>,
+  user: Pick<AuthUser, 'role'>,
+) {
+  return user.role === 'guest'
+    ? c.json({ error: 'Group not found' }, 404)
+    : c.json({ error: 'Forbidden' }, 403);
+}
+
 // GET /api/groups/:jid/agents — list all agents for a group
 /**
  * Names of the user's automations in a workspace, for labelling their run
@@ -234,8 +245,8 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
     return c.json({ error: 'Group not found' }, 404);
   }
 
-  if (!canAccessGroup(user, { ...group, jid })) {
-    return c.json({ error: 'Forbidden' }, 403);
+  if (!canViewGroup(user, { ...group, jid })) {
+    return guestAwareForbidden(c, user);
   }
 
   const agents = listAgentsByJid(jid);
@@ -298,8 +309,8 @@ router.get('/:jid/sessions', authMiddleware, async (c) => {
   if (!group) {
     return c.json({ error: 'Group not found' }, 404);
   }
-  if (!canAccessGroup(user, { ...group, jid })) {
-    return c.json({ error: 'Forbidden' }, 403);
+  if (!canViewGroup(user, { ...group, jid })) {
+    return guestAwareForbidden(c, user);
   }
 
   const agents = listAgentsByJid(jid).filter((a) => a.kind === 'conversation');

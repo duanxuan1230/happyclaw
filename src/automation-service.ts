@@ -60,6 +60,10 @@ import {
 } from './automation-store.js';
 import { getRegisteredGroup } from './db.js';
 import { canModifyGroup } from './group-acl.js';
+import {
+  redactAutomationForGuest,
+  redactAutomationRunForGuest,
+} from './guest-access.js';
 import { logger } from './logger.js';
 
 export interface AutomationCore {
@@ -68,6 +72,7 @@ export interface AutomationCore {
 }
 
 const OWNER_ONLY_ERROR = '只有工作区主人可以创建或修改自动化';
+const VIEWER_ERROR = '访客只能查看自动化';
 const RUN_SCOPE_ERROR = '自动化运行只能暂停、结束或删除它自己所属的自动化';
 const RUN_CANNOT_CREATE_ERROR = '自动化运行中不能再创建新的自动化';
 const NOT_FOUND_ERROR = '自动化不存在';
@@ -128,9 +133,14 @@ export function createAutomationCore(
   // ─── Visibility and permission ─────────────────────────────────────────
 
   function canSee(actor: AutomationActor, automation: Automation): boolean {
-    return actor.kind === 'web'
-      ? automation.createdBy === actor.userId
-      : automation.workspaceJid === actor.workspaceJid;
+    switch (actor.kind) {
+      case 'web':
+        return automation.createdBy === actor.userId;
+      case 'viewer':
+        return actor.workspaceJids.includes(automation.workspaceJid);
+      default:
+        return automation.workspaceJid === actor.workspaceJid;
+    }
   }
 
   function load(actor: AutomationActor, id: string): Automation {
@@ -170,6 +180,8 @@ export function createAutomationCore(
         return automation;
       case 'other_turn':
         throw new AutomationError(403, OWNER_ONLY_ERROR);
+      case 'viewer':
+        throw new AutomationError(403, VIEWER_ERROR);
     }
   }
 
@@ -467,6 +479,13 @@ export function createAutomationCore(
     return next;
   }
 
+  /** What `actor` may see of an automation: viewers miss host commands. */
+  function present(actor: AutomationActor, automation: Automation): Automation {
+    return actor.kind === 'viewer'
+      ? redactAutomationForGuest(automation)
+      : automation;
+  }
+
   /** A user stop or delete also interrupts a turn already running it. */
   function cancelLiveRun(run: AutomationRun, error: string) {
     return engine.cancelRun(run.id, error, { interrupt: true });
@@ -482,12 +501,19 @@ export function createAutomationCore(
               createdBy: actor.userId,
               workspaceJid: filter.workspaceJid,
             })
-          : listAutomations({ workspaceJid: actor.workspaceJid });
-      return decorateAll(rows);
+          : actor.kind === 'viewer'
+            ? actor.workspaceJids
+                .filter(
+                  (jid) => !filter.workspaceJid || jid === filter.workspaceJid,
+                )
+                .flatMap((workspaceJid) => listAutomations({ workspaceJid }))
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+            : listAutomations({ workspaceJid: actor.workspaceJid });
+      return decorateAll(rows).map((automation) => present(actor, automation));
     },
 
     get(actor, automationId) {
-      return decorate(load(actor, automationId));
+      return present(actor, decorate(load(actor, automationId)));
     },
 
     listRuns(actor, automationId, limit = RUNS_DEFAULT_LIMIT) {
@@ -496,7 +522,10 @@ export function createAutomationCore(
         Math.max(Math.trunc(limit) || RUNS_DEFAULT_LIMIT, 1),
         RUNS_MAX_LIMIT,
       );
-      return listAutomationRuns(automationId, capped);
+      const runs = listAutomationRuns(automationId, capped);
+      return actor.kind === 'viewer'
+        ? runs.map(redactAutomationRunForGuest)
+        : runs;
     },
 
     create(actor, input) {
@@ -516,6 +545,7 @@ export function createAutomationCore(
         throw new AutomationError(403, RUN_CANNOT_CREATE_ERROR);
       if (actor.kind === 'other_turn')
         throw new AutomationError(403, OWNER_ONLY_ERROR);
+      if (actor.kind === 'viewer') throw new AutomationError(403, VIEWER_ERROR);
       return insert(
         actor,
         { ...input, workspaceJid: actor.workspaceJid },
@@ -575,6 +605,7 @@ export function createAutomationCore(
 
     markRunsRead(actor, automationId, runIds) {
       load(actor, automationId);
+      if (actor.kind === 'viewer') throw new AutomationError(403, VIEWER_ERROR);
       markAutomationRunsRead(automationId, runIds, now().toISOString());
       const automation = getAutomation(automationId);
       if (automation) engine.emitChanged(automation);
@@ -728,7 +759,10 @@ export function createAutomationCore(
       case 'automation_create': {
         const choice = request.session ?? 'current';
         const sessionMode = choice === 'current' ? 'bound' : choice;
-        const workspaceJid = actor.kind === 'web' ? '' : actor.workspaceJid;
+        const workspaceJid =
+          actor.kind === 'web' || actor.kind === 'viewer'
+            ? ''
+            : actor.workspaceJid;
         const automation = service.create(actor, {
           workspaceJid,
           name: request.name,
@@ -742,7 +776,9 @@ export function createAutomationCore(
           execution: request.execution,
           scriptCommand: request.scriptCommand,
           targetSessionJid:
-            sessionMode === 'bound' && actor.kind !== 'web'
+            sessionMode === 'bound' &&
+            actor.kind !== 'web' &&
+            actor.kind !== 'viewer'
               ? actor.sessionJid
               : null,
         });

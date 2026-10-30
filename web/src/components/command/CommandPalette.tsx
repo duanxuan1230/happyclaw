@@ -87,14 +87,17 @@ export function CommandPalette({
 
   const commandGroups = useMemo(() => {
     const isAdmin = user?.role === 'admin';
+    const isGuest = user?.role === 'guest';
     const built = buildCommandGroups({
-      navItems: filterNavItems(billingEnabled),
+      navItems: filterNavItems(billingEnabled, isGuest),
       settingsSections: getSettingsSections({
         canManageSystemConfig: hasPermission('manage_system_config'),
         canManageBilling: hasPermission('manage_billing'),
         canManageUsers: hasPermission('manage_users'),
         isAdmin,
+        isGuest,
       }),
+      canCreate: !isGuest,
       groups,
       agents,
       canViewMonitor: hasPermission('manage_system_config'),

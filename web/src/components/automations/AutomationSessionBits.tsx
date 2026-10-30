@@ -14,6 +14,7 @@ import {
 import type { AutomationSessionGroup } from '../../lib/session-presentation';
 import { sessionJidOf } from '../../lib/session-jid';
 import { useAutomationsStore } from '../../stores/automations';
+import { useIsGuest } from '../../stores/auth';
 import { useShellStore } from '../../stores/shell';
 import type { AgentInfo } from '../../types';
 import type { NavigateToPath } from '../../lib/chat-navigation';
@@ -153,13 +154,19 @@ export function AutomationMenuItems({
   automation: Automation;
   navigate: NavigateToPath;
 }) {
+  const isGuest = useIsGuest();
   const enabled = automation.status === 'active';
+  const details = (
+    <DropdownMenuItem onClick={() => navigate(automationHref(automation.id))}>
+      <PanelRight />
+      查看详情
+    </DropdownMenuItem>
+  );
+  // Read-only guests only look.
+  if (isGuest) return details;
   return (
     <>
-      <DropdownMenuItem onClick={() => navigate(automationHref(automation.id))}>
-        <PanelRight />
-        查看详情
-      </DropdownMenuItem>
+      {details}
       <DropdownMenuItem onClick={() => void runAutomationNow(automation.id)}>
         <Play />
         立即运行

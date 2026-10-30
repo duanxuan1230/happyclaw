@@ -5,6 +5,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import { useShellStore } from '../../../stores/shell';
 import { useAutomationsStore } from '../../../stores/automations';
+import { useIsGuest } from '../../../stores/auth';
 import { useSessionActions } from '../../../hooks/useSessionActions';
 import {
   chatHref,
@@ -287,6 +288,7 @@ function AutomationGroupRow({
     toggle,
   } = useAutomationGroup(group);
   const busy = useAutomationsStore((s) => !!s.runBusy[group.automationId]);
+  const isGuest = useIsGuest();
   const expanded = forceExpanded || stored;
 
   return (
@@ -330,18 +332,20 @@ function AutomationGroupRow({
         )}
         {automation && (
           <span className="flex shrink-0 items-center">
-            <button
-              type="button"
-              aria-label={`立即运行「${name}」`}
-              disabled={busy}
-              onClick={(event) => {
-                event.stopPropagation();
-                void runAutomationNow(automation.id);
-              }}
-              className={cn(rowIconButtonClass, revealOnRowHover)}
-            >
-              <Play className="size-3.5" />
-            </button>
+            {!isGuest && (
+              <button
+                type="button"
+                aria-label={`立即运行「${name}」`}
+                disabled={busy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void runAutomationNow(automation.id);
+                }}
+                className={cn(rowIconButtonClass, revealOnRowHover)}
+              >
+                <Play className="size-3.5" />
+              </button>
+            )}
             <RowMenu label={`${name}的更多操作`}>
               <AutomationMenuItems
                 automation={automation}

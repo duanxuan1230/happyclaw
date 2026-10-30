@@ -3633,6 +3633,7 @@ function toSystemSettingsResponse(
     maxLoginAttempts: settings.maxLoginAttempts,
     loginLockoutMinutes: settings.loginLockoutMinutes,
     fallbackModel: settings.fallbackModel,
+    allowMemberGuests: settings.allowMemberGuests,
   };
 }
 

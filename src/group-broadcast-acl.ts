@@ -3,7 +3,11 @@ import {
   getChannelMount,
   getJidsByFolder,
   getRegisteredGroup,
+  getUserById,
+  listActiveGuestIdsForWorkspace,
 } from './db.js';
+import { canOwnGuests } from './guest-accounts.js';
+import { stripVirtualJidSuffix } from './utils.js';
 import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
@@ -54,5 +58,59 @@ export function getGroupAllowedUserIds(chatJid: string): Set<string> | null {
   // Ownership and binding are security-sensitive mutable state. Resolve them
   // on every broadcast instead of retaining a raw-JID cache that can outlive a
   // rebind or ownership transfer.
-  return new Set<string>([ownerId]);
+  const allowed = new Set<string>([ownerId]);
+
+  // Read-only guests with an active grant on the workspace this output is
+  // attributed to also receive it. The grant must come from the same owner
+  // that owns the workspace now (checked in SQL together with both accounts'
+  // status), so a stale grant never leaks a re-owned workspace. An owner who
+  // may no longer hold guests (allowMemberGuests off) shares with nobody.
+  const workspaceJid = resolveAudienceWorkspaceJid(
+    baseChatJid,
+    boundJid,
+    hasBinding,
+    group.folder,
+  );
+  if (workspaceJid) {
+    const workspace =
+      workspaceJid === baseChatJid ? group : getRegisteredGroup(workspaceJid);
+    if (workspace?.created_by === ownerId) {
+      for (const guestId of listViewingGuestIds(workspaceJid, ownerId)) {
+        allowed.add(guestId);
+      }
+    }
+  }
+  return allowed;
+}
+
+/**
+ * Guests currently allowed to watch `workspaceJid`, a workspace `ownerId`
+ * owns: active grants from that owner, while the owner may hold guests.
+ */
+export function listViewingGuestIds(
+  workspaceJid: string,
+  ownerId: string,
+): string[] {
+  const guestIds = listActiveGuestIdsForWorkspace(workspaceJid, ownerId);
+  if (guestIds.length === 0) return guestIds;
+  const owner = getUserById(ownerId);
+  return owner && canOwnGuests(owner) ? guestIds : [];
+}
+
+function resolveAudienceWorkspaceJid(
+  baseChatJid: string,
+  boundJid: string | null,
+  hasBinding: boolean,
+  folder: string,
+): string | null {
+  if (boundJid) {
+    const base = stripVirtualJidSuffix(boundJid);
+    return base.startsWith('web:') ? base : null;
+  }
+  if (baseChatJid.startsWith('web:')) return baseChatJid;
+  if (hasBinding) return null;
+  for (const siblingJid of getJidsByFolder(folder)) {
+    if (siblingJid.startsWith('web:')) return siblingJid;
+  }
+  return null;
 }

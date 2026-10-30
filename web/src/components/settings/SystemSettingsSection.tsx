@@ -280,6 +280,8 @@ export function SystemSettingsSection({
   // fallbackModel 是自由字符串，独立于数值 field 抽象；仅在 runtime scope 展示。
   const [fallbackModel, setFallbackModel] = useState('');
   const [initialFallbackModel, setInitialFallbackModel] = useState('');
+  // 访客开关同样独立于数值 field 抽象；仅在 security scope 展示。
+  const [allowMemberGuests, setAllowMemberGuests] = useState(false);
 
   const loadSettings = useCallback(async () => {
     if (!canManage) return;
@@ -293,6 +295,7 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setAllowMemberGuests(data.allowMemberGuests);
       setTouched({});
       setSubmitted(false);
     } catch (error) {
@@ -328,6 +331,10 @@ export function SystemSettingsSection({
 
   const fallbackModelDirty =
     scope === 'runtime' && fallbackModel.trim() !== initialFallbackModel.trim();
+  const allowMemberGuestsDirty =
+    scope === 'security' &&
+    !!settings &&
+    allowMemberGuests !== settings.allowMemberGuests;
 
   const dirty = useMemo(
     () =>
@@ -336,8 +343,15 @@ export function SystemSettingsSection({
         activeFields.some(
           (field) => values[field.key] !== initialValues[field.key],
         )) ||
+      fallbackModelDirty ||
+      allowMemberGuestsDirty,
+    [
+      activeFields,
+      initialValues,
+      values,
       fallbackModelDirty,
-    [activeFields, initialValues, values, fallbackModelDirty],
+      allowMemberGuestsDirty,
+    ],
   );
 
   const handleSave = async () => {
@@ -352,6 +366,9 @@ export function SystemSettingsSection({
     if (scope === 'runtime') {
       payload.fallbackModel = fallbackModel.trim();
     }
+    if (scope === 'security') {
+      payload.allowMemberGuests = allowMemberGuests;
+    }
 
     setSaving(true);
     try {
@@ -362,6 +379,7 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setAllowMemberGuests(data.allowMemberGuests);
       setTouched({});
       setSubmitted(false);
       toast.success('系统参数已保存，将应用于后续启动的任务');
@@ -436,6 +454,33 @@ export function SystemSettingsSection({
             </SettingsGroup>
           </SettingsSection>
         ))}
+
+        {scope === 'security' && (
+          <SettingsSection
+            title="访客账号"
+            description="访客是只读账号，由所有者直接创建，不经过邀请码。管理员始终可以创建；每位所有者最多 20 个。"
+          >
+            <SettingsGroup>
+              <SettingsSwitchRow
+                label="允许普通成员创建访客"
+                htmlFor="system-setting-allowMemberGuests"
+                description={
+                  <span id="system-setting-allowMemberGuests-description">
+                    开启后，成员可以把自己的工作区以只读方式授权给访客。关闭时成员不能新建访客，已有的成员访客也无法登录和查看。
+                  </span>
+                }
+                control={
+                  <Switch
+                    id="system-setting-allowMemberGuests"
+                    checked={allowMemberGuests}
+                    onCheckedChange={setAllowMemberGuests}
+                    aria-describedby="system-setting-allowMemberGuests-description"
+                  />
+                }
+              />
+            </SettingsGroup>
+          </SettingsSection>
+        )}
 
         {scope === 'runtime' && (
           <SettingsSection
