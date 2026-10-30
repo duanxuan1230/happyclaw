@@ -386,10 +386,18 @@ const unconfirmedSends = new Map<
     id: string;
     /** When the first attempt started, by this device's clock. */
     startedAt: number;
+    /** When an HTTP fetch showed it stored (the WS echo was missed). */
+    seenAt?: number;
   }
 >();
 // Server timestamps are compared with this device's clock.
 const SEND_CLOCK_SKEW_MS = 5_000;
+/**
+ * A send seen stored over HTTP keeps its key this long: the failure toast
+ * promised that resending the kept input will not duplicate it. After that,
+ * the same text is a new message.
+ */
+const SEEN_SEND_GRACE_MS = 60_000;
 
 function clientMessageIdFor(
   target: string,
@@ -397,7 +405,14 @@ function clientMessageIdFor(
   attachments: SendAttachment[] = [],
   mode: FollowUpMode,
 ): string {
-  const previous = unconfirmedSends.get(target);
+  let previous = unconfirmedSends.get(target);
+  if (
+    previous?.seenAt !== undefined &&
+    Date.now() - previous.seenAt > SEEN_SEND_GRACE_MS
+  ) {
+    unconfirmedSends.delete(target);
+    previous = undefined;
+  }
   if (
     previous &&
     previous.mode === mode &&
@@ -446,7 +461,7 @@ function forgetSendsSeenIn(target: string, messages: Message[]): void {
         Date.parse(m.timestamp) >= earliest,
     )
   ) {
-    unconfirmedSends.delete(target);
+    send.seenAt ??= Date.now();
   }
 }
 

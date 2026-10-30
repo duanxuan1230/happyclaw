@@ -311,7 +311,7 @@ describe('a history fetch that returns the message', () => {
     is_from_me: false,
   });
 
-  it('ends the key when the message is newer than the send', async () => {
+  it('a resend right after the fetch reuses the key; a minute later it is new', async () => {
     const send = useChatStore.getState().sendMessage;
     apiPostMock.mockRejectedValueOnce(timeout);
     await send(JID, ' fetched ');
@@ -319,10 +319,17 @@ describe('a history fetch that returns the message', () => {
       messages: [own('fetched', new Date().toISOString())],
     });
     await useChatStore.getState().refreshMessages(JID);
+    // The toast promised that resending the kept input will not duplicate.
+    apiPostMock.mockRejectedValueOnce(timeout);
+    await send(JID, ' fetched ');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
     apiPostMock.mockResolvedValueOnce(accepted);
     await send(JID, ' fetched ');
-    const [first, second] = sentIds();
-    expect(second).not.toBe(first);
+    clock.mockRestore();
+    const [first, second, third] = sentIds();
+    expect(second).toBe(first);
+    expect(third).not.toBe(first);
   });
 
   it('keeps it for the same text sent long before', async () => {
@@ -352,8 +359,11 @@ describe('a history fetch that returns the message', () => {
       ],
     });
     await useChatStore.getState().refreshAgentMessages(JID, 'agent-6');
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
     apiPostMock.mockResolvedValueOnce(accepted);
     await sendAgent(JID, 'agent-6', 'session fetched');
+    clock.mockRestore();
     const [first, second] = sentIds();
     expect(second).not.toBe(first);
   });
