@@ -568,6 +568,7 @@ describe('resolved capabilities', () => {
     expect(terra.defaultEffort).toBe('medium');
     expect(resolveModelCapabilities({ id: 'mystery' })).toEqual({
       contextWindow: null,
+      suggestedContextWindow: null,
       efforts: [],
       defaultEffort: null,
       effortsSource: 'none',
@@ -592,10 +593,33 @@ describe('resolved capabilities', () => {
     ).toBe('max');
   });
 
-  test('a declared window wins over the registry', () => {
+  test('only a declared window is used; the registry only suggests', () => {
     expect(
       resolveModelCapabilities({ id: 'gpt-6.1-sol', contextWindow: 272_000 }),
     ).toMatchObject({ contextWindow: 272_000, contextSource: 'declared' });
+    expect(resolveModelCapabilities({ id: 'gpt-6.1-sol' })).toMatchObject({
+      contextWindow: null,
+      suggestedContextWindow: 1_050_000,
+      contextSource: 'none',
+    });
+    // A registry window never adds [1m] at launch.
+    expect(
+      buildConnectionModelEnv({ model: 'claude-opus-5-5', models: [] })
+        .ANTHROPIC_MODEL,
+    ).toBe('claude-opus-5-5');
+  });
+
+  test('family inference lends efforts only, and Claude only within a variant', () => {
+    const terra = resolveModelCapabilities({ id: 'codex/gpt-6.1-terra' });
+    expect(terra.contextWindow).toBeNull();
+    expect(terra.suggestedContextWindow).toBeNull();
+    expect(
+      resolveModelCapabilities({ id: 'claude-haiku-9-9' }).effortsSource,
+    ).toBe('family');
+    // No haiku-4-5 efforts are borrowed from opus-4-5.
+    expect(
+      resolveModelCapabilities({ id: 'claude-haiku-4-5' }).effortsSource,
+    ).toBe('none');
   });
 });
 

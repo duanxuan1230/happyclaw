@@ -376,9 +376,11 @@ export function buildConnectionModelEnv(
 }
 
 /**
- * The context window a launch of `id` assumes: the connection's entry, else
- * what is known about the model, else 1M for a name still carrying `[1m]`
- * (a choice saved before the window was a field).
+ * The context window a launch of `id` assumes: the window declared on the
+ * connection's entry, else 1M for a name still carrying `[1m]` (a choice
+ * saved before the window was a field), else unknown. A registry window is
+ * only a suggestion for the add flow: it never turns on `[1m]` by itself,
+ * since a gateway may serve less and 1M may be billed as long context.
  */
 export function windowOf(
   models: readonly ProviderModelEntry[],
@@ -1920,10 +1922,10 @@ export function modelCapabilities(id: string): ModelCapabilities | null {
 
 /**
  * The registry entry a model id not in the registry borrows from, following
- * cindy's generation inheritance: a sibling of the same generation
+ * cindy's generation inheritance: for GPT a sibling of the same generation
  * (`gpt-6.1-terra` → `gpt-6.1-sol`), else the same variant of the newest
- * older generation (`gpt-6.1-terra` → `gpt-5.6-terra`). Only GPT and Claude
- * names, whose families share their efforts, are inferred.
+ * older generation (`gpt-6.1-terra` → `gpt-5.6-terra`); for Claude only the
+ * same variant of an older generation. Only efforts are inferred.
  */
 const familyCache = new Map<string, ModelCapabilities | null>();
 
@@ -1957,6 +1959,7 @@ function computeFamilyCapabilities(model: string): ModelCapabilities | null {
   const pick = (
     parse: (entryKey: string) => { version: string; variant: string } | null,
     wanted: { version: string; variant: string },
+    allowSibling: boolean,
   ): ModelCapabilityEntry | undefined => {
     const parsed = unique
       .map((entry) => {
@@ -1966,7 +1969,9 @@ function computeFamilyCapabilities(model: string): ModelCapabilities | null {
         return info ? { entry, ...info } : null;
       })
       .filter((item): item is NonNullable<typeof item> => !!item);
-    const sibling = parsed.find((item) => item.version === wanted.version);
+    const sibling = allowSibling
+      ? parsed.find((item) => item.version === wanted.version)
+      : undefined;
     if (sibling) return sibling.entry;
     return parsed
       .filter(
@@ -1984,6 +1989,8 @@ function computeFamilyCapabilities(model: string): ModelCapabilities | null {
         return m ? { version: m[1], variant: m[2] } : null;
       },
       { version: gpt[1], variant: gpt[2] },
+      // GPT generations ship every variant with the same efforts.
+      true,
     );
   } else if (claude) {
     found = pick(
@@ -1992,12 +1999,14 @@ function computeFamilyCapabilities(model: string): ModelCapabilities | null {
         return m ? { version: m[2], variant: m[1] } : null;
       },
       { version: claude[2], variant: claude[1] },
+      // Claude variants differ (haiku takes fewer efforts than opus).
+      false,
     );
   }
   if (!found) return null;
+  // Only efforts are borrowed: a window decides `[1m]`, so it is never guessed.
   return {
     id: model,
-    ...(found.contextWindow ? { contextWindow: found.contextWindow } : {}),
     ...(found.efforts ? { efforts: found.efforts } : {}),
     ...(found.defaultEffort ? { defaultEffort: found.defaultEffort } : {}),
   };
@@ -2029,7 +2038,10 @@ export function defaultEffortFor(
 export type ModelCapabilitySource = 'declared' | 'registry' | 'family' | 'none';
 
 export interface ResolvedModelCapabilities {
+  /** The window launches use: declared on the entry, or null (unknown). */
   contextWindow: number | null;
+  /** What the registry knows, offered as the add flow's starting value. */
+  suggestedContextWindow: number | null;
   efforts: ModelEffort[];
   defaultEffort: ModelEffort | null;
   effortsSource: ModelCapabilitySource;
@@ -2038,9 +2050,10 @@ export interface ResolvedModelCapabilities {
 
 /**
  * Everything the picker and the launch need to know about one model of a
- * connection. The entry's own fields win over the registry, the registry
- * over the family. A model nothing is known about takes no effort and has no
- * window, and the launch injects neither.
+ * connection. Efforts: the entry's own, else the registry's, else the
+ * family's. The window is the entry's own only (see windowOf). A model
+ * nothing is known about takes no effort and has no window, and the launch
+ * injects neither.
  */
 export function resolveModelCapabilities(
   entry: ProviderModelEntry,
@@ -2063,18 +2076,11 @@ export function resolveModelCapabilities(
   ];
   const contextSource: ModelCapabilitySource = entry.contextWindow
     ? 'declared'
-    : registry?.contextWindow
-      ? 'registry'
-      : family?.contextWindow
-        ? 'family'
-        : 'none';
-  const contextWindow =
-    entry.contextWindow ??
-    registry?.contextWindow ??
-    family?.contextWindow ??
-    null;
+    : 'none';
+  const contextWindow = entry.contextWindow ?? null;
   return {
     contextWindow,
+    suggestedContextWindow: registry?.contextWindow ?? null,
     efforts,
     defaultEffort: defaultEffortFor(
       efforts,

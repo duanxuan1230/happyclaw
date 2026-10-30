@@ -263,10 +263,12 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   问题交回主 Agent，Runner 也不把它的问题推给 Web 或飞书卡片；当前 CLI 本身就不给
   子代理这个工具。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
-  `resolvePinnedModelConfig`）：会话手选 → 智能体自己的绑定 → 工作区自带的 Provider
-  环境变量 → 所有者的主智能体（默认 profile）→ 系统主 HappyClaw（最早创建的 active
-  admin 的默认 profile）。已删除或没有凭据的绑定跳到下一步。没有全局默认、自动池和
-  启用开关：绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序共用同一个函数。
+  `resolveModelBinding`）：会话手选 → 智能体自己的绑定 → 工作区自带的 Provider
+  环境变量 → 所有者的主智能体（默认 profile）→ 系统主 HappyClaw（最早创建的 admin
+  的默认 profile）。未设置的一步跳过；会话手选的连接失效时回到默认；智能体与主智能体
+  的绑定一旦设置就是权威，连接已删除或没有凭据时本轮失败并提示，不改用别的连接；
+  一步都没有时同样失败，不落到任意连接。没有全局默认、自动池和启用开关；Web 的选择器
+  与这一顺序共用同一个函数。
 - 推理等级按会话手选 → 智能体显式档位 → 模型默认档位解析，只取该模型支持的档位，
   不支持档位的模型不下发；不存在默认 `max`。模型支持哪些档位见
   `resolveModelCapabilities`（`shared/model-providers.ts`）：连接上声明的 → 能力表 →
@@ -284,10 +286,11 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - 一个模型配置（连接）是一份凭据、一个地址和一组模型；设置页只添加和维护连接，选哪个
   模型属于智能体和会话。会话和智能体按「连接 · 模型」选择
   （`session_model_selections.model`、`agent_profiles.model`），换模型时开新的 SDK
-  会话并注入近期历史。模型条目存上游原名、上下文长度和声明的档位，模型名里从不带
-  `[1m]`：`[1m]` 是 Claude Code 的开关（请求前剥掉，只把上下文上限抬到 1M；不认识的
+  会话并注入近期历史。模型条目存上游原名、上下文长度和声明的档位，新写入的模型名里不带
+  `[1m]`（旧数据里的 `[1m]` 仍表示 1M）：`[1m]` 是 Claude Code 的开关（请求前剥掉，只把上下文上限抬到 1M；不认识的
   模型上限 200K，`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 只能往下压），运行时按上下文长度
-  推导，大于 200K 才加，再用压缩窗口压回实际长度（`buildConnectionModelEnv`）；只改
+  推导，大于 200K 才加，再用压缩窗口压回实际长度（`buildConnectionModelEnv`）；只用
+  条目上声明的长度，能力表里的长度只作为添加时的预填值，不会自行打开 `[1m]`。只改
   上下文长度不算换模型。子代理、后台轻量调用和 opus/sonnet 档由连接的 `roles` 从同一
   连接的模型里选，未设置时跟随本轮模型。连接环境变量只注入用户保存的非空值，新连接预填
   `API_TIMEOUT_MS`、`CLAUDE_CODE_NO_FLICKER`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`；
