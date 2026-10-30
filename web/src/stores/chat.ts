@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, computeUploadTimeoutMs } from '../api/client';
+import { api, computeUploadTimeoutMs, type ApiError } from '../api/client';
 import { randomUuid } from '../utils/random-uuid';
 import { sessionJidOf } from '../lib/session-jid';
 import { useFileStore } from './files';
@@ -372,9 +372,9 @@ type SendAttachment = { data: string; mimeType: string };
 /**
  * Each conversation's last unconfirmed send. Resending the same message
  * reuses its idempotency key, so the server answers from the first attempt.
- * A key is dropped once its message shows up (the server announces it with
- * the key) and is not reused after UNCONFIRMED_SEND_REUSE_MS: by then the
- * same text is a new message, not a retry.
+ * The key is kept until the server accepts the send (HTTP 200), announces
+ * its message with the key, or a send with another target, text, images or
+ * mode takes its place.
  */
 const unconfirmedSends = new Map<
   string,
@@ -383,10 +383,8 @@ const unconfirmedSends = new Map<
     attachments: SendAttachment[];
     mode: FollowUpMode;
     id: string;
-    at: number;
   }
 >();
-const UNCONFIRMED_SEND_REUSE_MS = 2 * 60_000;
 
 function clientMessageIdFor(
   target: string,
@@ -395,10 +393,8 @@ function clientMessageIdFor(
   mode: FollowUpMode,
 ): string {
   const previous = unconfirmedSends.get(target);
-  const now = Date.now();
   if (
     previous &&
-    now - previous.at < UNCONFIRMED_SEND_REUSE_MS &&
     previous.mode === mode &&
     previous.content === content &&
     previous.attachments.length === attachments.length &&
@@ -411,7 +407,7 @@ function clientMessageIdFor(
     return previous.id;
   }
   const id = randomUuid();
-  unconfirmedSends.set(target, { content, attachments, mode, id, at: now });
+  unconfirmedSends.set(target, { content, attachments, mode, id });
   return id;
 }
 
@@ -432,6 +428,15 @@ function sendMayHaveLanded(err: unknown): boolean {
 }
 
 const UNCONFIRMED_SEND_HINT = '网络较慢，消息可能已发送；重发不会重复';
+
+/** The server stored the message, then failed to process it. */
+function storedDespiteError(err: unknown): boolean {
+  return (err as ApiError | null)?.body?.stored === true;
+}
+
+const showStoredButFailed = () =>
+  showToast('消息已发送', '但处理可能失败，请稍后查看回复');
+const showAlreadySent = () => showToast('这条消息已经发送过');
 
 export interface StreamingState {
   turnId?: string;
@@ -3765,6 +3770,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // The context_reset divider arrives via WS new_message and triggers state cleanup.
       if (isClearedResponse(data)) return true;
       if (data.deduplicated) {
+        showAlreadySent();
         // The first attempt's message: show it if its announcement was
         // missed, and take its queue state from the server.
         if (!get().messages[jid]?.some((m) => m.id === data.messageId)) {
@@ -3863,9 +3869,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       // 弱网/断网/后端 500 等场景：记录错误并给用户可见的 toast，
       // 返回 false 让调用方（MessageInput）保留输入不清空。
+      if (storedDespiteError(err)) {
+        showStoredButFailed();
+        return true;
+      }
       const message = extractErrorMessage(err);
       set({ error: message });
-      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(jid);
       showToast(
         '发送失败',
         sendMayHaveLanded(err)
@@ -6273,12 +6282,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (isClearedResponse(data)) return true;
       if (!data.success) throw new Error('服务器返回失败');
       // A resend answered from the first attempt: that run may be long over.
-      if (data.deduplicated) return true;
+      if (data.deduplicated) {
+        showAlreadySent();
+        return true;
+      }
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(runtimeJid, data.runId);
       }
     } catch (err) {
-      if (!sendMayHaveLanded(err)) unconfirmedSends.delete(runtimeJid);
+      if (storedDespiteError(err)) {
+        showStoredButFailed();
+        return true;
+      }
       const detail = sendMayHaveLanded(err)
         ? UNCONFIRMED_SEND_HINT
         : err instanceof Error

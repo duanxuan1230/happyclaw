@@ -68,8 +68,21 @@ vi.mock('../src/commands.js', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   return {
     ...real,
-    executeSessionReset: async () => {
+    executeSessionReset: async (
+      chatJid: string,
+      _folder: string,
+      deps: { broadcast: (jid: string, msg: object) => void },
+    ) => {
       resets.clear += 1;
+      deps.broadcast(chatJid, {
+        id: `divider-${resets.clear}`,
+        chat_jid: chatJid,
+        sender: '__system__',
+        sender_name: 'system',
+        content: 'context_reset',
+        timestamp: new Date().toISOString(),
+        is_from_me: true,
+      });
     },
     executeFreshWindowReset: async () => {
       resets.fresh += 1;
@@ -108,11 +121,15 @@ const store = await import('../src/runtime-state-store.js');
 
 const OWNER_JID = 'web:idempotency-owner';
 const OTHER_JID = 'web:idempotency-other';
+const SESSION_ID = '11111111-2222-4333-8444-555555555555';
+const SESSION_JID = `${OWNER_JID}#agent:${SESSION_ID}`;
 
 const calls = {
   enqueue: [] as string[],
   promote: [] as string[],
+  tasks: [] as string[],
 };
+let failFormat = false;
 let activeRunId: string | null = null;
 let promoteGate: Promise<void> | null = null;
 let failNextResolve = false;
@@ -127,7 +144,10 @@ const app = web.createAppForTest({
     hasActiveMainRunnerForMessage: () => false,
     sendMessage: () => 'no_active',
     enqueueMessageCheck: (jid: string) => calls.enqueue.push(jid),
+    enqueueTask: (jid: string) => calls.tasks.push(jid),
+    closeStdin: () => {},
   },
+  processAgentConversation: async () => {},
   getSessions: () => ({}),
   setLastAgentTimestamp: () => {},
   getRegisteredGroups: () => ({}),
@@ -138,7 +158,10 @@ const app = web.createAppForTest({
     }
     return { effectiveGroup: group };
   },
-  formatMessages: () => 'formatted',
+  formatMessages: () => {
+    if (failFormat) throw new Error('failed after the message was stored');
+    return 'formatted';
+  },
   advanceGlobalCursor: () => {},
   advanceNextPullCursorOnly: () => {},
   promoteFollowUp: async (_jid: string, messageId: string) => {
@@ -165,6 +188,21 @@ beforeAll(() => {
   db.initDatabase();
   registerGroup(OWNER_JID, 'idempotency-owner', 'owner');
   registerGroup(OTHER_JID, 'idempotency-other', 'other');
+  db.createAgent({
+    id: SESSION_ID,
+    group_folder: 'idempotency-owner',
+    chat_jid: OWNER_JID,
+    name: 'Session',
+    prompt: '',
+    status: 'idle',
+    kind: 'conversation',
+    created_by: 'owner',
+    created_at: new Date().toISOString(),
+    completed_at: null,
+    result_summary: null,
+    last_im_jid: null,
+    spawned_from_jid: null,
+  });
   wsClients.set(
     {
       readyState: 1,
@@ -190,6 +228,10 @@ beforeEach(() => {
   failNextResolve = false;
   failPromote = false;
   resets.gate = null;
+  resets.clear = 0;
+  resets.fresh = 0;
+  failFormat = false;
+  calls.tasks.length = 0;
   announced.length = 0;
   calls.enqueue.length = 0;
   calls.promote.length = 0;
@@ -327,13 +369,52 @@ describe('Web send idempotency', () => {
     const resent = await post(body);
 
     expect(failed.status).toBe(500);
+    const [stored] = storedWith(OWNER_JID, 'stored then failed');
+    expect(failed.body).toMatchObject({ stored: true, messageId: stored.id });
     expect(resent.status).toBe(200);
     expect(resent.body.deduplicated).toBe(true);
+    expect(resent.body.partial).toBeUndefined();
     expect(storedWith(OWNER_JID, 'stored then failed')).toHaveLength(1);
     expect(resent.body.messageId).toBe(
       storedWith(OWNER_JID, 'stored then failed')[0].id,
     );
     expect(calls.promote).toHaveLength(1);
+  });
+
+  test('a session input stored before a failure is queued again, and again on resend', async () => {
+    failFormat = true;
+    const id = uuid();
+    const body = {
+      agentId: SESSION_ID,
+      content: 'session stored then failed',
+      clientMessageId: id,
+    };
+    const failed = await post(body);
+    expect(failed.status).toBe(500);
+    expect(failed.body.stored).toBe(true);
+    expect(calls.tasks).toEqual([SESSION_JID]);
+
+    failFormat = false;
+    const resent = await post(body);
+    expect(resent.body.deduplicated).toBe(true);
+    expect(calls.tasks).toEqual([SESSION_JID, SESSION_JID]);
+    expect(storedWith(SESSION_JID, 'session stored then failed')).toHaveLength(
+      1,
+    );
+
+    // A finished send's replay queues nothing.
+    const doneId = uuid();
+    await post({ ...body, content: 'session ok', clientMessageId: doneId });
+    calls.tasks.length = 0;
+    await post({ ...body, content: 'session ok', clientMessageId: doneId });
+    expect(calls.tasks).toEqual([]);
+  });
+
+  test('the /clear divider carries the id', async () => {
+    const id = uuid();
+    await post({ content: '/clear', clientMessageId: id });
+    const divider = announced.find((m) => m.content === 'context_reset');
+    expect(divider?.client_message_id).toBe(id);
   });
 
   test('/clear and /fresh run once per id, concurrent resends included', async () => {

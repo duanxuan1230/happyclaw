@@ -119,17 +119,23 @@ describe('send idempotency keys', () => {
     expect(ids[4]).toBe(ids[3]);
   });
 
-  it('a rejected send is not resent under the same id', async () => {
+  it('any failure keeps the id; only acceptance ends it', async () => {
     const send = useChatStore.getState().sendMessage;
-    apiPostMock.mockRejectedValueOnce({ status: 409, message: 'conflict' });
+    apiPostMock.mockRejectedValueOnce({ status: 500, message: 'boom' });
+    await send(JID, 'rejected');
+    apiPostMock.mockRejectedValueOnce({ status: 403, message: 'denied' });
     await send(JID, 'rejected');
     apiPostMock.mockResolvedValueOnce(accepted);
     await send(JID, 'rejected');
-    const [first, second] = sentIds();
-    expect(second).not.toBe(first);
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await send(JID, 'rejected');
+    const [first, second, accepted1, next] = sentIds();
+    expect(second).toBe(first);
+    expect(accepted1).toBe(first);
+    expect(next).not.toBe(first);
     expect(showToastMock).toHaveBeenCalledWith(
       '发送失败',
-      expect.not.stringContaining('重发不会重复'),
+      expect.stringContaining('消息未发送'),
     );
   });
 
@@ -171,18 +177,16 @@ describe('when a key is not reused', () => {
     expect(sentIds()[1]).not.toBe(first);
   });
 
-  it('after two minutes the same text is a new message', async () => {
+  it('a slow image resend keeps its id however long it takes', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const send = useChatStore.getState().sendMessage;
+    const images = [{ data: 'IMAGE', mimeType: 'image/png' }];
     apiPostMock.mockRejectedValue(timeout);
-    await send(JID, 'much later');
-    vi.advanceTimersByTime(119_000);
-    await send(JID, 'much later');
-    vi.advanceTimersByTime(2_000);
-    await send(JID, 'much later');
-    const [first, soon, late] = sentIds();
-    expect(soon).toBe(first);
-    expect(late).not.toBe(first);
+    await send(JID, 'big upload', images);
+    vi.advanceTimersByTime(10 * 60_000);
+    await send(JID, 'big upload', images);
+    const [first, later] = sentIds();
+    expect(later).toBe(first);
   });
 
   it('steering instead of queueing is a new message', async () => {
@@ -239,12 +243,86 @@ describe('a replayed answer', () => {
     expect(useChatStore.getState().activeRuns[JID]).toBeUndefined();
   });
 
+  it('tells the user the message was already sent', async () => {
+    apiPostMock.mockResolvedValueOnce(replay);
+    expect(await useChatStore.getState().sendMessage(JID, 'twice')).toBe(true);
+    apiPostMock.mockResolvedValueOnce(replay);
+    await useChatStore.getState().sendAgentMessage(JID, 'agent-9', 'twice');
+    expect(
+      showToastMock.mock.calls.filter(
+        ([title]) => title === '这条消息已经发送过',
+      ),
+    ).toHaveLength(2);
+  });
+
   it('in a session neither restarts the run nor waits for a reply', async () => {
     apiPostMock.mockResolvedValueOnce(replay);
     await useChatStore.getState().sendAgentMessage(JID, 'agent-9', 'again');
     const state = useChatStore.getState();
     expect(state.activeRuns[`${JID}#agent:agent-9`]).toBeUndefined();
     expect(state.agentWaiting['agent-9']).toBeUndefined();
+  });
+});
+
+describe('a /clear that timed out', () => {
+  it('is done once its divider arrives with the id; the next /clear is new', async () => {
+    const send = useChatStore.getState().sendMessage;
+    apiPostMock.mockRejectedValueOnce(timeout);
+    await send(JID, '/clear');
+    const [first] = sentIds();
+    useChatStore.getState().handleWsNewMessage(JID, {
+      id: 'divider-1',
+      chat_jid: JID,
+      sender: '__system__',
+      sender_name: 'system',
+      content: 'context_reset',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      is_from_me: true,
+      source_kind: 'context_reset',
+      client_message_id: first,
+    });
+    apiPostMock.mockResolvedValueOnce({ success: true, cleared: true });
+    await send(JID, '/clear');
+    expect(sentIds()[1]).not.toBe(first);
+  });
+});
+
+describe('stored, then failed on the server', () => {
+  const storedError = {
+    status: 500,
+    message: '消息已保存，但处理失败',
+    body: { stored: true, messageId: 'm-stored' },
+  };
+
+  it('counts as sent, says processing may have failed, and keeps the id', async () => {
+    const send = useChatStore.getState().sendMessage;
+    apiPostMock.mockRejectedValueOnce(storedError);
+    expect(await send(JID, 'stored anyway')).toBe(true);
+    expect(showToastMock).toHaveBeenCalledWith(
+      '消息已发送',
+      expect.stringContaining('处理可能失败'),
+    );
+    expect(showToastMock).not.toHaveBeenCalledWith(
+      '发送失败',
+      expect.anything(),
+    );
+    apiPostMock.mockResolvedValueOnce(accepted);
+    await send(JID, 'stored anyway');
+    const [first, second] = sentIds();
+    expect(second).toBe(first);
+  });
+
+  it('in a session too', async () => {
+    apiPostMock.mockRejectedValueOnce(storedError);
+    expect(
+      await useChatStore
+        .getState()
+        .sendAgentMessage(JID, 'agent-7', 'stored in a session'),
+    ).toBe(true);
+    expect(showToastMock).toHaveBeenCalledWith(
+      '消息已发送',
+      expect.stringContaining('处理可能失败'),
+    );
   });
 });
 
