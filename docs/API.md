@@ -198,6 +198,13 @@ Runner 启动时，选中的模型取代配置的默认模型成为 `ANTHROPIC_M
 `/fresh` 会进入与 `reset-session` 相同的 owner 级破坏性检查。`/fresh` 会开启
 新的 SDK 窗口并写入零摘要交接说明，不删除库中的旧历史，也不关闭 auto-compact。
 
+Web 客户端每次发送带一个 `clientMessageId`（UUID）；超时或网关错误后重发同一内容时
+沿用它。服务端按 `(用户, chatJid, clientMessageId)` 去重 24 小时：同一 id 且内容、
+附件、目标会话和 `followUpBehavior` 都相同的重复请求返回第一次的结果并带
+`deduplicated: true`，不再入库、入队或计费；同一 id 内容不同返回 409。消息落库后
+处理失败时返回 500 并带 `stored: true` 与 `messageId`。新消息的 WS 广播带上
+`client_message_id`，客户端据此确认送达。不带 id 的请求行为不变。
+
 `GET /api/groups/:jid/messages` 返回的图片附件是降采样缩略图，并带
 `hasOriginal` 标记；原图由
 `GET /api/groups/:jid/messages/:messageId/attachments/:index/original`

@@ -496,7 +496,7 @@ data/
   `im_context_bindings`
 - 消息：`chats`、`messages`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、
   执行轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）、
-  `usage_limit_waits`
+  `usage_limit_waits`、`web_message_dedup`（Web 发送的幂等键，保留 24 小时）
 - 自动化：`automations`、`automation_runs`、`automation_failure_streaks`
 - 记忆：`workspace_memory_*`（含召回索引 `workspace_memory_recall_fts`）
 - 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary`、
@@ -504,8 +504,8 @@ data/
 
 Channel Reliability 的 Inbox/Turn/Outbox/Card 表由
 `src/channel-reliability-store.ts` 在同一数据库连接上创建；同样，`session_worktrees` 由
-`src/session-worktree-store.ts`，自动化表由 `src/automation-store.ts`，等待、补注和用量
-连接表由 `src/runtime-state-store.ts` 创建。
+`src/session-worktree-store.ts`，自动化表由 `src/automation-store.ts`，等待、补注、用量连接
+和 Web 发送去重表由 `src/runtime-state-store.ts` 创建。
 
 ## 8. 认证与权限
 
