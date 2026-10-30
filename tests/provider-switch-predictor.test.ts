@@ -108,15 +108,21 @@ describe('willClearSessionOnProviderSwitch', () => {
     expect(willClearSessionOnProviderSwitch('grp', null, 'A')).toBe(false);
   });
 
-  test('false when nothing resolves: the Workspace environment or none', () => {
+  test('leaving a connection for the Workspace environment is a switch', () => {
     mocks.boundId = 'A';
     mocks.envOverride = { anthropicBaseUrl: 'https://own.example' };
-    expect(willClearSessionOnProviderSwitch('grp', null, null)).toBe(false);
-    mocks.envOverride = {};
+    expect(willClearSessionOnProviderSwitch('grp', null, null)).toBe(true);
+    mocks.boundId = undefined;
     expect(willClearSessionOnProviderSwitch('grp', null, null)).toBe(false);
   });
 
-  test('a binding to a deleted connection is skipped, not a switch', () => {
+  test('a launch that fails predicts nothing', () => {
+    mocks.boundId = 'A';
+    // Connections exist but nothing is bound: the launch fails.
+    expect(willClearSessionOnProviderSwitch('grp', null, null)).toBe(false);
+  });
+
+  test('a binding to a deleted connection fails the launch, not a switch', () => {
     mocks.boundId = 'A';
     mocks.sessionModel = 'A-model';
     setProviders('A');

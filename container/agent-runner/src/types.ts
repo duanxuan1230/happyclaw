@@ -210,6 +210,14 @@ export function normalizeChannelTurnContext(
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  /**
+   * The effort the host resolved for this launch: Claude Code runs at it, and
+   * null means none is sent at all, not even the Agent's own effort as the
+   * SDK option. Absent without a connection (the Workspace's own
+   * environment) or on a ChatGPT subscription, whose gateway applies it:
+   * the Agent's effort then goes as before.
+   */
+  launchEffort?: string | null;
   turnId?: string;
   /** Persisted message IDs already represented by the cold bootstrap prompt. */
   currentBatchMessageIds?: readonly string[];

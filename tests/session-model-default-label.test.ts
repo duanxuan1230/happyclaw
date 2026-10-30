@@ -283,7 +283,10 @@ describe('default.model names what an unpicked launch runs', () => {
       modelConfigId: null,
       model: null,
       effort: null,
+      connectionMissing: false,
     });
-    expect(runner.trySelectPoolProvider(FOLDER, null, null, null)).toBeNull();
+    expect(() =>
+      runner.trySelectPoolProvider(FOLDER, null, null, null),
+    ).toThrow(/还没有为主 HappyClaw 选择模型/);
   });
 });

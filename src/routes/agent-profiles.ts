@@ -72,7 +72,6 @@ import {
   bindingFromMainProfile,
   resolveModelBinding,
   summarizeModelBinding,
-  usableProvider,
 } from '../container-runner.js';
 import { resolveAgentSdkEffort } from '../agent-effort.js';
 import {
@@ -98,7 +97,10 @@ import {
 } from '../run-context-snapshot.js';
 import { getProviders, providerHasCredentials } from '../runtime-config.js';
 import { splitOneMillionSuffix } from '../model-providers.js';
-import { listConnectionModels } from '../session-model-overrides.js';
+import {
+  listConnectionModels,
+  modelEffortsFor,
+} from '../session-model-overrides.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
@@ -211,10 +213,7 @@ function agentEffortRejection(
   const provider = getProviders().find((item) => item.id === modelConfigId);
   if (!provider) return null;
   const runs = model || provider.anthropicModel;
-  const efforts: readonly string[] =
-    listConnectionModels(provider).find((entry) => entry.id === runs)
-      ?.efforts ?? [];
-  return efforts.includes(effort)
+  return modelEffortsFor(provider, runs).includes(effort)
     ? null
     : {
         error: runs
@@ -358,6 +357,12 @@ function newProfileRejection(
     const rejection = agentModelRejection(input.modelConfigId, input.model);
     if (rejection) return { status: 400, body: rejection };
   }
+  const effortRejection = agentEffortRejection(
+    input.modelConfigId ?? null,
+    input.model ?? null,
+    resolveAgentSdkEffort(input.runtimePolicy),
+  );
+  if (effortRejection) return { status: 400, body: effortRejection };
   if (hasEmptyCustomHostSkillSelection(input.runtimePolicy)) {
     return {
       status: 400,
@@ -644,14 +649,13 @@ function resolveAgentModelResolution(
   );
   return {
     source: summary.source,
-    model_config_id: summary.provider?.id ?? null,
+    model_config_id: summary.modelConfigId,
     model_config_name: summary.provider?.name ?? null,
     model: summary.model,
     effort: summary.effort,
-    // The Agent's own binding names a connection that is gone or has no
-    // credential, so the order skipped it.
-    connection_missing:
-      !!profile.model_config_id && !usableProvider(profile.model_config_id),
+    // The binding that decides names a connection that is gone or has no
+    // credential: runs fail until it is chosen again.
+    connection_missing: summary.connectionMissing,
   };
 }
 

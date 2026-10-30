@@ -47,8 +47,11 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => ({
 }));
 
 const db = await import('../src/db.js');
-const { backfillSystemMainModelBinding, installSystemMainModelConfigResolver } =
-  await import('../src/model-binding-backfill.js');
+const {
+  MODEL_BINDING_BACKFILL_KEY,
+  backfillSystemMainModelBinding,
+  installSystemMainModelConfigResolver,
+} = await import('../src/model-binding-backfill.js');
 
 function provider(id: string, patch: Record<string, unknown> = {}) {
   return {
@@ -99,6 +102,7 @@ beforeEach(() => {
   mocks.cleared = 0;
   mocks.legacy = { defaultModelConfigId: null, enabledIds: [] };
   mocks.providers = [];
+  db.setRouterState(MODEL_BINDING_BACKFILL_KEY, '');
 });
 
 describe('backfillSystemMainModelBinding', () => {
@@ -109,12 +113,12 @@ describe('backfillSystemMainModelBinding', () => {
     expect(mocks.cleared).toBe(0);
   });
 
-  test('binds the legacy default, without [1m], once', () => {
+  test('binds the legacy default and its model, once', () => {
     const admin = createUser('admin');
     createUser('admin');
     mocks.providers = [
       provider('A'),
-      provider('B', { anthropicModel: 'glm-5[1m]' }),
+      provider('B', { anthropicModel: 'glm-5' }),
     ];
     mocks.legacy = { defaultModelConfigId: 'B', enabledIds: ['A'] };
     expect(backfillSystemMainModelBinding()).toEqual({
@@ -172,12 +176,36 @@ describe('backfillSystemMainModelBinding', () => {
     expect(mocks.cleared).toBe(0);
   });
 
-  test('only the earliest active admin is the system main', () => {
+  test('runs once per release, and again only while a legacy pointer remains', () => {
+    mocks.providers = [provider('A')];
+    expect(backfillSystemMainModelBinding()).toMatchObject({
+      status: 'bound',
+      modelConfigId: 'A',
+    });
+    db.updateAgentProfile(mainOf('user-1').id, 'user-1', {
+      modelConfigId: null,
+    });
+    // Unbound again on purpose: the next boot must not bind it back.
+    expect(backfillSystemMainModelBinding()).toEqual({ status: 'skipped' });
+    expect(mainOf('user-1').model_config_id).toBeNull();
+    // A legacy pointer that is still there gets its run.
+    mocks.legacy = { defaultModelConfigId: 'A', enabledIds: [] };
+    expect(backfillSystemMainModelBinding()).toMatchObject({
+      status: 'bound',
+    });
+    db.updateAgentProfile(mainOf('user-1').id, 'user-1', {
+      modelConfigId: null,
+    });
+  });
+
+  test('the earliest admin is the system main, whatever its status', () => {
+    db.updateUserFields('user-1', { status: 'disabled' } as never);
     mocks.providers = [provider('A')];
     mocks.legacy = { defaultModelConfigId: 'A', enabledIds: [] };
     backfillSystemMainModelBinding();
     expect(mainOf('user-1').model_config_id).toBe('A');
     expect(mainOf('user-2').model_config_id).toBeNull();
+    db.updateUserFields('user-1', { status: 'active' } as never);
   });
 
   test("the host's own calls follow the system main binding", () => {

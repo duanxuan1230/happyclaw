@@ -2721,52 +2721,9 @@ export function initDatabase(
     })();
   }
 
-  // v85 -> v86: a model's window is a field of its connection, so stored
-  // model names lose Claude Code's `[1m]` switch (the launch adds it back
-  // from the window). Idempotent: a name without the suffix is left alone.
-  if (
-    rawSchemaVersionBeforeInit === null ||
-    Number(rawSchemaVersionBeforeInit) < 86
-  ) {
-    stripStoredOneMillionSuffixes();
-  }
-
   prepareCached(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', String(CURRENT_SCHEMA_VERSION));
-}
-
-/** Columns holding a model name a launch reads back. */
-const STORED_MODEL_NAME_COLUMNS = [
-  ['session_model_selections', 'model'],
-  ['agent_profiles', 'model'],
-  ['sessions', 'model'],
-] as const;
-
-function stripStoredOneMillionSuffixes(): void {
-  db.transaction(() => {
-    for (const [table, column] of STORED_MODEL_NAME_COLUMNS) {
-      if (!tableExists(table)) continue;
-      const rows = db
-        .prepare(
-          `SELECT rowid AS id, ${column} AS model FROM ${table}
-           WHERE lower(${column}) LIKE '%[1m]'`,
-        )
-        .all() as Array<{ id: number; model: string }>;
-      const update = db.prepare(
-        `UPDATE ${table} SET ${column} = ? WHERE rowid = ?`,
-      );
-      for (const row of rows) {
-        update.run(splitOneMillionSuffix(row.model).model || null, row.id);
-      }
-      if (rows.length > 0) {
-        logger.info(
-          { table, column, count: rows.length },
-          'Stripped [1m] from stored model names',
-        );
-      }
-    }
-  })();
 }
 
 const LEGACY_ROUTER_CURSOR_BLOBS: ReadonlyArray<
@@ -7248,8 +7205,7 @@ export function peekWorkspaceOwnerMainAgentProfile(
 }
 
 /**
- * The system main HappyClaw: the main Agent of the earliest-created active
- * admin. Every Agent that binds no connection, directly or through its
+ * The system main HappyClaw: the main Agent of the earliest-created admin. Every Agent that binds no connection, directly or through its
  * owner's main Agent, falls back to its binding.
  */
 export function peekSystemMainAgentProfile(): AgentProfile | undefined {
@@ -7257,10 +7213,13 @@ export function peekSystemMainAgentProfile(): AgentProfile | undefined {
   return adminId ? peekDefaultAgentProfile(adminId) : undefined;
 }
 
-/** The earliest-created active admin, whose main Agent is the system main. */
+/**
+ * The earliest-created admin, whose main Agent is the system main. Status is
+ * not consulted, so disabling an admin does not move the system main.
+ */
 export function getSystemMainAdminUserId(): string | null {
   const row = prepareCached(`SELECT id FROM users
-       WHERE role = 'admin' AND status = 'active'
+       WHERE role = 'admin'
        ORDER BY created_at ASC, id ASC
        LIMIT 1`).get() as { id: string } | undefined;
   return row?.id ?? null;

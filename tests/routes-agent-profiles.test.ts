@@ -1657,6 +1657,40 @@ describe('/api/agent-profiles model within a configuration', () => {
         runtime_policy: { reasoning: { effort: 'inherit' } },
       }),
     ).toMatchObject({ status: 200 });
+    // A name saved with `[1m]` is the same model.
+    expect(
+      await send('PATCH', `/${main.id}`, {
+        model: 'eff-a[1m]',
+        runtime_policy: { reasoning: { effort: 'high' } },
+      }),
+    ).toMatchObject({ status: 200 });
+    // Creating checks the same, so does duplicating what cannot run.
+    expect(
+      await send('POST', '/', {
+        name: `Effortless ${Math.random()}`,
+        model_config_id: effortful.id,
+        model: 'eff-none',
+        runtime_policy: { reasoning: { effort: 'high' } },
+      }),
+    ).toMatchObject({ status: 400, body: { code: 'EFFORT_NOT_SUPPORTED' } });
+    const custom = db.createAgentProfile({
+      ownerUserId: 'routes-agent-user',
+      name: `Copy source ${Math.random()}`,
+      modelConfigId: effortful.id,
+      model: 'eff-a',
+      runtimePolicy: { reasoning: { effort: 'high' } } as never,
+    });
+    db.updateAgentProfile(custom.id, 'routes-agent-user', {
+      model: 'eff-none',
+    });
+    expect(await send('POST', `/${custom.id}/duplicate`, {})).toMatchObject({
+      status: 400,
+      body: { code: 'EFFORT_NOT_SUPPORTED' },
+    });
+    db.updateAgentProfile(main.id, 'routes-agent-user', {
+      model: 'eff-none',
+      runtimePolicy: { reasoning: { effort: 'inherit' } } as never,
+    });
 
     // The system main is the earliest active admin's main Agent; its id is
     // only told to its owner.
