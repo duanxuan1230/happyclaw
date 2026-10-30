@@ -8,6 +8,11 @@ const chromiumChannel = systemChromium ? {} : { channel: 'chromium' as const };
 // WebKit needs its own browser download (`npx playwright install --with-deps
 // webkit`); its projects run when PLAYWRIGHT_WEBKIT is set.
 const withWebKit = Boolean(process.env.PLAYWRIGHT_WEBKIT);
+// Parallel worktrees each pass their own PLAYWRIGHT_PORT; with one set, a
+// server already listening there is never reused, so a run cannot silently
+// test another checkout's Vite.
+const port = Number(process.env.PLAYWRIGHT_PORT) || 5173;
+const ownPort = Boolean(process.env.PLAYWRIGHT_PORT);
 
 /** Specs whose composer and layout behaviour also run in a desktop window. */
 const desktopSpecs =
@@ -20,7 +25,7 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: 'line',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -54,9 +59,9 @@ export default defineConfig({
       : []),
   ],
   webServer: {
-    command: 'npm run dev -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:5173/tests/e2e/mobile-chat-harness.html',
-    reuseExistingServer: !process.env.CI,
+    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    url: `http://127.0.0.1:${port}/tests/e2e/mobile-chat-harness.html`,
+    reuseExistingServer: !process.env.CI && !ownPort,
     timeout: 120_000,
   },
 });
