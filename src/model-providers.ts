@@ -342,11 +342,6 @@ export interface ConnectionModelEnvInput {
   model: string;
   models: readonly ProviderModelEntry[];
   roles?: ConnectionModelRoles | null;
-  /**
-   * The haiku-tier name to keep when no small/fast role is set, e.g. the
-   * ChatGPT gateway's marker for Claude Code's background calls.
-   */
-  smallFastFallback?: string;
 }
 
 /**
@@ -367,7 +362,7 @@ export function buildConnectionModelEnv(
   if (current) env.ANTHROPIC_MODEL = current;
   const opus = named(roles.opus) ?? current;
   const sonnet = named(roles.sonnet) ?? current;
-  const haiku = named(roles.smallFast) ?? input.smallFastFallback ?? current;
+  const haiku = named(roles.smallFast) ?? current;
   const subagent = named(roles.subagent) ?? current;
   if (opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
   if (sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;

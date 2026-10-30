@@ -524,8 +524,12 @@ describe('connection model env', () => {
   test('a pass-through connection only gets the roles it names', () => {
     expect(buildConnectionModelEnv({ model: '', models })).toEqual({});
     expect(
-      buildConnectionModelEnv({ model: '', models, smallFastFallback: 'h' }),
-    ).toEqual({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'h' });
+      buildConnectionModelEnv({
+        model: '',
+        models,
+        roles: { smallFast: 'small' },
+      }),
+    ).toEqual({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' });
   });
 
   test('a choice saved with [1m] keeps its 1M window', () => {
