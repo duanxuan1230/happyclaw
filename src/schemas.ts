@@ -156,6 +156,10 @@ export const MessageCreateSchema = z
     content: z.string().max(MAX_MESSAGE_CONTENT_LENGTH).optional().default(''),
     attachments: z.array(MessageAttachmentSchema).max(10).optional(),
     followUpBehavior: z.enum(['queue', 'steer']).optional().default('queue'),
+    // Idempotency key minted by the client for one logical send and reused
+    // when it resends after a timeout, so a slow network never stores (and
+    // bills) the same message twice.
+    clientMessageId: z.string().uuid().optional(),
   })
   .superRefine((data, ctx) => {
     const hasContent = data.content.trim().length > 0;
