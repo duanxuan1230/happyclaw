@@ -72,6 +72,38 @@ describe('notifyIfHidden', () => {
     expect(stateUpdated).toBe(true);
   });
 
+  test('after a throw the permission prompt is no longer offered', async () => {
+    vi.resetModules();
+    const fresh = await import('./toast');
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(
+        vi.fn(function () {
+          throw new TypeError('Illegal constructor');
+        }),
+        { permission: 'granted' },
+      ),
+    );
+    setHidden(true);
+    fresh.notifyIfHidden('HappyClaw');
+
+    (Notification as unknown as { permission: string }).permission = 'default';
+    fresh.showNotificationPromptToast();
+    expect(toastMock).not.toHaveBeenCalled();
+  });
+
+  test('the permission prompt is offered while permission is undecided', async () => {
+    vi.resetModules();
+    const fresh = await import('./toast');
+    vi.stubGlobal(
+      'Notification',
+      Object.assign(vi.fn(), { permission: 'default' }),
+    );
+    fresh.showNotificationPromptToast();
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    expect(toastMock.mock.calls[0][1].action.label).toBe('开启');
+  });
+
   test('stays silent while the page is visible', () => {
     const Ctor = vi.fn();
     vi.stubGlobal(

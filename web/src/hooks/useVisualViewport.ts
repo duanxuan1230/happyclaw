@@ -102,9 +102,17 @@ export function useKeyboardInset(): number {
 export function useVisualViewportVars(): void {
   useEffect(() => {
     const root = document.documentElement;
+    // Root custom properties restyle the whole page; during the keyboard
+    // animation only one of the two usually moves, so skip the other.
+    const set = (name: string, px: number) => {
+      const value = `${px}px`;
+      if (root.style.getPropertyValue(name) !== value) {
+        root.style.setProperty(name, value);
+      }
+    };
     const publish = () => {
-      root.style.setProperty('--vvh', `${snapshot.height}px`);
-      root.style.setProperty('--keyboard-inset', `${snapshot.keyboardInset}px`);
+      set('--vvh', snapshot.height);
+      set('--keyboard-inset', snapshot.keyboardInset);
     };
     const unsubscribe = subscribe(publish);
     publish();

@@ -5,11 +5,12 @@ type WsHandler = (data: any) => void;
 /** A handshake still pending after this long is abandoned and retried. */
 export const WS_HANDSHAKE_TIMEOUT_MS = 15_000;
 /**
- * Back in the foreground, an open socket that has received nothing for this
- * long is presumed dead. Mobile browsers freeze background pages and often
- * never deliver the close of a socket the server or network dropped, and the
- * server's heartbeat pings are invisible to page JS, so silence is the only
- * signal. Replacing a healthy socket costs one reconnect sync.
+ * Back from at least this long in the background, an open socket that has
+ * also received nothing for this long is presumed dead. Mobile browsers freeze
+ * background pages and often never deliver the close of a socket the server
+ * or network dropped, and the server's heartbeat pings are invisible to page
+ * JS, so silence is the only signal. Replacing a healthy socket costs one
+ * reconnect sync, so a quick tab switch never does.
  */
 export const WS_FOREGROUND_STALE_MS = 30_000;
 
@@ -27,6 +28,8 @@ class WsManager {
   private wanted = false;
   /** Last open or received message on the current socket. */
   private lastActivityAt = 0;
+  /** When the page was last hidden; null while visible. */
+  private hiddenAt: number | null = null;
 
   connect() {
     this.wanted = true;
@@ -170,15 +173,21 @@ class WsManager {
   }
 
   /**
-   * Reconnect now unless the socket is open and recently heard from. A
-   * replaced socket's close is ignored; the new socket's open reports
-   * `reconnect: true`, which runs the usual missed-state sync.
+   * Reconnect now unless the socket is open and either recently heard from
+   * or only briefly away (`awayMs`). A replaced socket's close is ignored;
+   * the new socket's open reports `reconnect: true`, which runs the usual
+   * missed-state sync.
    */
-  private ensureLive() {
+  private ensureLive(awayMs = Infinity) {
     if (!this.wanted) return;
+    // A pending handshake is already a fresh attempt (resume often fires
+    // pageshow, online and visibilitychange together); its deadline covers
+    // one that hangs.
+    if (this.ws?.readyState === WebSocket.CONNECTING) return;
     if (
       this.ws?.readyState === WebSocket.OPEN &&
-      Date.now() - this.lastActivityAt < WS_FOREGROUND_STALE_MS
+      (awayMs < WS_FOREGROUND_STALE_MS ||
+        Date.now() - this.lastActivityAt < WS_FOREGROUND_STALE_MS)
     ) {
       return;
     }
@@ -193,13 +202,20 @@ class WsManager {
   setupNetworkListeners() {
     // Network restored or page back in front: the socket may have died
     // unnoticed, and any pending backoff is no longer worth waiting out.
-    // Going offline leaves the backoff running; nothing ever cancels it.
+    // A network change and a back/forward cache restore are away for an
+    // unknown time, so silence alone decides. Going offline leaves the
+    // backoff running; nothing ever cancels it.
     window.addEventListener('online', () => this.ensureLive());
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this.ensureLive();
+      if (document.visibilityState !== 'visible') {
+        this.hiddenAt = Date.now();
+        return;
+      }
+      const awayMs = this.hiddenAt === null ? 0 : Date.now() - this.hiddenAt;
+      this.hiddenAt = null;
+      this.ensureLive(awayMs);
     });
-    // A page kept in the back/forward cache resumes with a socket that
-    // closed while it was frozen.
+    // A page kept in the back/forward cache was frozen with its socket.
     window.addEventListener('pageshow', (event) => {
       if (event.persisted) this.ensureLive();
     });

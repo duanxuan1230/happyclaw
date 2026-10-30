@@ -2,7 +2,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { useKeyboardHeight } from './useKeyboardHeight';
 
 (
@@ -72,6 +72,7 @@ describe('useKeyboardHeight', () => {
   });
 
   test('no longer scrolls focused fields into view', async () => {
+    vi.useFakeTimers();
     await act(async () => root?.render(<Probe />));
     const input = document.createElement('input');
     let scrolled = false;
@@ -81,7 +82,8 @@ describe('useKeyboardHeight', () => {
     document.body.appendChild(input);
     input.focus();
     input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    vi.advanceTimersByTime(1000);
+    vi.useRealTimers();
     expect(scrolled).toBe(false);
     input.remove();
   });

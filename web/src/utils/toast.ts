@@ -8,6 +8,8 @@ let ownerTrackingBound = false;
 let lastBackgroundTaskNotice: { taskId: string; at: number } | null = null;
 
 const BODY_MAX_CHARS = 120;
+/** Set once a page-constructed Notification has thrown (Android Chrome). */
+let pageNotificationsUnsupported = false;
 
 /** Shows a notice through the app's sonner Toaster. */
 export function showToast(
@@ -43,7 +45,9 @@ export function notifyIfHidden(title: string, body?: string): void {
     new Notification(title, { body });
   } catch {
     // Android Chrome only allows notifications from a service worker and
-    // throws "Illegal constructor" here; callers go on to update state.
+    // throws "Illegal constructor" here; callers go on to update state, and
+    // the page stops offering a permission it cannot use.
+    pageNotificationsUnsupported = true;
   }
 }
 
@@ -109,7 +113,7 @@ function isNoticeOwner(): boolean {
 let notificationPromptShown = false;
 
 export function showNotificationPromptToast(): void {
-  if (notificationPromptShown) return;
+  if (notificationPromptShown || pageNotificationsUnsupported) return;
   if (typeof Notification === 'undefined') return;
   if (Notification.permission !== 'default') return;
   notificationPromptShown = true;

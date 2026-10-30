@@ -131,9 +131,20 @@ describe('wsManager', () => {
     expect(connected).toHaveBeenLastCalledWith({ reconnect: true });
   });
 
+  test('a quick tab switch keeps a quiet socket', () => {
+    manager.connect();
+    latest().open();
+    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS * 2);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(1000);
+    setVisibility('visible');
+    expect(sockets()).toHaveLength(1);
+  });
+
   test('back in the foreground, a socket that heard from the server recently is kept', () => {
     manager.connect();
     latest().open();
+    setVisibility('hidden');
     vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS - 1000);
     latest().receive({ type: 'billing_update' });
     vi.advanceTimersByTime(1000);
@@ -164,6 +175,19 @@ describe('wsManager', () => {
     vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
     window.dispatchEvent(firstLoad);
     expect(sockets()).toHaveLength(2);
+  });
+
+  test('resume events arriving together open one socket, not one each', () => {
+    manager.connect();
+    latest().open();
+    vi.advanceTimersByTime(ws.WS_FOREGROUND_STALE_MS);
+    const restored = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(restored, 'persisted', { value: true });
+    window.dispatchEvent(restored);
+    window.dispatchEvent(new Event('online'));
+    setVisibility('visible');
+    expect(sockets()).toHaveLength(2);
+    expect(latest().closeCalls).toBe(0);
   });
 
   test('stays down after disconnect() even when the page returns', () => {
