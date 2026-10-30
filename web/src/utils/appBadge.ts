@@ -5,9 +5,9 @@
  * where the API is missing this does nothing; the page title still carries
  * the count.
  *
- * The count is the page title's: replies that arrived in other conversations
- * while this window was open. It is held in memory, not fetched from the
- * server, so a reopened app starts from zero.
+ * The count is the page title's: new replies this window received while it
+ * was open, in another conversation or while hidden. It lives in memory, not
+ * on the server, so a reopened app starts from zero.
  */
 interface BadgeNavigator {
   setAppBadge?: (contents?: number) => Promise<void>;
