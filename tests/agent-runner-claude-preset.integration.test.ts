@@ -1,4 +1,6 @@
-// The Claude Code preset as the bundled CLI sends it upstream, pinned so a
+// The Claude Code preset as the bundled CLI sends it upstream under the
+// Runner's session settings and built-in tool policy (no MCP, Skills or
+// plugins, a fixed model), pinned so a
 // `make update-sdk` that changes it fails here and gets reviewed. The CLI's
 // getContextUsage() undercounts this text, so the request is the only
 // faithful view of it. Regenerate with `npx vitest run <this file> --update` and
@@ -12,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
+import { RUNNER_DISALLOWED_BUILTIN_TOOLS } from '../container/agent-runner/src/builtin-tool-policy.js';
 import { buildHappyClawSystemPrompt } from '../container/agent-runner/src/sdk-compat.js';
 
 const runnerRoot = path.resolve('container/agent-runner');
@@ -211,6 +214,7 @@ beforeAll(async () => {
       model: 'claude-sonnet-4-5-20250929',
       env: fakeProviderEnv(),
       systemPrompt: buildHappyClawSystemPrompt(APPEND_MARKER, true),
+      disallowedTools: [...RUNNER_DISALLOWED_BUILTIN_TOOLS],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: [],

@@ -32,7 +32,7 @@ describe('Agent Runner engine layer', () => {
     ]);
     expect(plan.blocks[0]).toMatchObject({
       owner: 'platform',
-      required: false,
+      required: true,
       condition: 'Claude Code preset is included',
     });
     expect(plan.text.startsWith('<runtime-adaptation>\nADAPT\n')).toBe(true);

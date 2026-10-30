@@ -154,6 +154,14 @@ export function hasBackgroundTaskTools(
   return allowedTools.includes('Task');
 }
 
+const ENGINE_CONDITIONS: Record<
+  NonNullable<HappyClawPromptSources['engine']>['id'],
+  string
+> = {
+  'runtime-adaptation': 'Claude Code preset is included',
+  'runtime-baseline': 'Claude Code preset is not included',
+};
+
 function wrap(tag: string, text: string): string {
   if (!text.trim()) return '';
   return `<${tag}>\n${text}\n</${tag}>`;
@@ -168,16 +176,13 @@ export function buildHappyClawPromptPlan(
   // Directly after the Claude Code preset (or in its place), ahead of the
   // identity it defers to.
   if (sources.engine) {
-    const withPreset = sources.engine.id === 'runtime-adaptation';
     inputs.push({
       id: sources.engine.id,
       version: 1,
       scope: 'main',
       owner: 'platform',
-      required: false,
-      condition: withPreset
-        ? 'Claude Code preset is included'
-        : 'Claude Code preset is not included',
+      required: true,
+      condition: ENGINE_CONDITIONS[sources.engine.id],
       text: wrap(sources.engine.id, sources.engine.text),
     });
   }
