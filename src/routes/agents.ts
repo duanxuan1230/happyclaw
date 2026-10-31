@@ -1103,6 +1103,8 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
     /** A direct-chat session binding the owner may trust as a delegate. */
     delegate_capable: boolean;
     delegate_enabled: boolean;
+    /** The bound workspace runs on the host: delegates are refused there. */
+    delegate_host_workspace: boolean;
     added_at: string;
   }
 
@@ -1174,6 +1176,9 @@ router.get('/:jid/im-groups', authMiddleware, async (c) => {
         mount?.routing_mode === 'single_session' &&
         isDelegateCapableConversation(j),
       delegate_enabled: mount?.delegate_enabled === true,
+      delegate_host_workspace: mount
+        ? getRegisteredGroup(mount.workspace_jid)?.executionMode === 'host'
+        : false,
       added_at: g.added_at,
     });
   }

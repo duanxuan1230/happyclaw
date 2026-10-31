@@ -497,6 +497,8 @@ export interface AvailableImGroup {
   /** Direct-chat session binding whose counterpart may become a delegate. */
   delegate_capable?: boolean;
   delegate_enabled?: boolean;
+  /** The bound workspace runs on the host, where delegates are refused. */
+  delegate_host_workspace?: boolean;
 }
 
 export interface WorkspaceDeleteBindingGroup {

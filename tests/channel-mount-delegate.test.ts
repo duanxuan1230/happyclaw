@@ -221,6 +221,84 @@ describe('workspace delegate switch', () => {
     expect(db.getChannelMount(DM)?.delegate_enabled).toBe(false);
   });
 
+  test('a Host workspace refuses enabling (400), and switching a workspace to host clears its grants', async () => {
+    bindToSession(DM, SESSION);
+    expect((await put(DM, { enabled: true })).status).toBe(200);
+    const workspace = db.getRegisteredGroup(WORKSPACE)!;
+    db.setRegisteredGroup(WORKSPACE, { ...workspace, executionMode: 'host' });
+    // Host workspaces are visible to admins only; the owner is one here.
+    currentUser = { id: OWNER, role: 'admin' };
+    try {
+      expect(db.getChannelMount(DM)?.delegate_enabled).toBe(false);
+      expect(db.getAgentChannelMount(DM)?.delegate_enabled).toBe(false);
+      const response = await put(DM, { enabled: true });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain('宿主机工作区');
+      expect(db.getChannelMount(DM)?.delegate_enabled).toBe(false);
+      const listed = await routes.request(`/${WORKSPACE}/channel-mounts`);
+      expect((await listed.json()).channel_mounts).toContainEqual(
+        expect.objectContaining({
+          channel_jid: DM,
+          delegate_host_workspace: true,
+        }),
+      );
+    } finally {
+      db.setRegisteredGroup(WORKSPACE, {
+        ...db.getRegisteredGroup(WORKSPACE)!,
+        executionMode: 'container',
+      });
+    }
+  });
+
+  test('forcing admin runtimes to host also clears their grants', () => {
+    const now2 = now();
+    db.createUser({
+      id: 'admin-1',
+      username: 'admin-1',
+      password_hash: 'hash',
+      display_name: 'admin-1',
+      role: 'admin',
+      status: 'active',
+      must_change_password: false,
+      created_at: now2,
+      updated_at: now2,
+    });
+    db.setRegisteredGroup('web:flow-z', {
+      name: 'flow-z',
+      folder: 'flow-z',
+      created_by: 'admin-1',
+      added_at: now2,
+      executionMode: 'container',
+    });
+    db.createAgent({
+      id: 'session-z',
+      group_folder: 'flow-z',
+      chat_jid: 'web:flow-z',
+      name: 'session-z',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: 'admin-1',
+      created_at: now2,
+      completed_at: null,
+      result_summary: null,
+    } as never);
+    const dm = 'telegram:12345';
+    db.setRegisteredGroup(dm, {
+      name: dm,
+      folder: 'flow-z',
+      created_by: 'admin-1',
+      added_at: now2,
+      target_agent_id: 'session-z',
+    });
+    expect(
+      db.setChannelMountDelegateEnabled(dm, 'web:flow-z', 'session-z', true),
+    ).toBeDefined();
+    db.forceActiveAdminRuntimesToHost();
+    expect(db.getChannelMount(dm)?.delegate_enabled).toBe(false);
+    expect(db.getAgentChannelMount(dm)?.delegate_enabled).toBe(false);
+  });
+
   test.each([{}, { enabled: 'yes' }, { enabled: true, extra: 1 }])(
     'rejects invalid body %j',
     async (body) => {

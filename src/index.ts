@@ -13753,6 +13753,12 @@ function resolveIpcAutomationActor(
         delegate: {
           workspaceFolder: sourceGroup,
           runtimeAgentId: ipcAgentId,
+          // Fail closed: any host registration of the folder.
+          hostWorkspace: getJidsByFolder(sourceGroup).some(
+            (jid) =>
+              (registeredGroups[jid] ?? getRegisteredGroup(jid))
+                ?.executionMode === 'host',
+          ),
           getMount: getAgentChannelMount,
         },
         requireTurn: (predicate) =>
@@ -14225,6 +14231,12 @@ async function processTaskIpc(
                 delegate: {
                   workspaceFolder: sourceGroup,
                   runtimeAgentId: ipcAgentId,
+                  // Fail closed: any host registration of the folder.
+                  hostWorkspace: siblingJids.some(
+                    (jid) =>
+                      (registeredGroups[jid] ?? getRegisteredGroup(jid))
+                        ?.executionMode === 'host',
+                  ),
                   getMount: getAgentChannelMount,
                 },
                 requireTurn: (predicate) =>

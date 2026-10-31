@@ -102,6 +102,11 @@ function getAgentProfileSnapshot(
   };
 }
 
+function isHostWorkspaceJid(workspaceJid: string): boolean {
+  const workspace = getRegisteredGroup(workspaceJid);
+  return !!workspace && isHostExecutionGroup(workspace);
+}
+
 function serializeMount(mount: AgentChannelMountRecord) {
   return {
     channel_jid: mount.channel_jid,
@@ -122,6 +127,7 @@ function serializeMount(mount: AgentChannelMountRecord) {
       mount.routing_mode === 'single_session' &&
       isDelegateCapableConversation(mount.channel_jid),
     delegate_enabled: mount.delegate_enabled === true,
+    delegate_host_workspace: isHostWorkspaceJid(mount.workspace_jid),
     owner_user_id: mount.owner_user_id,
     agent_profile_id: mount.agent_profile_id,
     created_at: mount.created_at,
@@ -550,6 +556,15 @@ workspaceRoutes.put(
     ) {
       return c.json(
         { error: 'Only direct-chat session bindings can have a delegate' },
+        400,
+      );
+    }
+    if (parsed.data.enabled && isHostExecutionGroup(access.group)) {
+      return c.json(
+        {
+          error: '宿主机工作区不支持委托，只有 Docker 工作区可以允许对方管理',
+          code: 'DELEGATE_HOST_WORKSPACE',
+        },
         400,
       );
     }

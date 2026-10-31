@@ -233,6 +233,22 @@ describe('what a Workspace Memory write becomes on the host', () => {
     );
   });
 
+  test('on a Host workspace the delegate only proposes, even with the flag still on', async () => {
+    const { create, start } = host({
+      'qq-delegate': human('qq:AAAA', 'qq:c2c:AAAA'),
+    });
+    registrations['web:team'].executionMode = 'host';
+    try {
+      start('qq:c2c:AAAA', 'qq-delegate');
+      expect(await create('qq-delegate')).toMatchObject({
+        success: true,
+        proposal: true,
+      });
+    } finally {
+      delete registrations['web:team'].executionMode;
+    }
+  });
+
   test('an automation run proposes, and only with its signed capability', async () => {
     const { create, start, createWorkspaceMemory } = host({
       'automation-run-r1': automationInput('r1'),

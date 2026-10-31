@@ -101,6 +101,7 @@ export function ImBindingRow({
     group.delegate_capable === true &&
     !!group.mount_workspace_jid;
   const delegateSwitchId = `im-delegate-${group.jid}`;
+  const delegateHostWorkspace = group.delegate_host_workspace === true;
 
   const showAudience =
     group.channel_type === 'feishu' &&
@@ -305,7 +306,10 @@ export function ImBindingRow({
             className="mt-0.5"
             checked={group.delegate_enabled === true}
             onCheckedChange={(checked) => onDelegateChange?.(group, checked)}
-            disabled={isActioning}
+            disabled={
+              isActioning ||
+              (delegateHostWorkspace && group.delegate_enabled !== true)
+            }
           />
           <div className="min-w-0">
             <label
@@ -318,6 +322,11 @@ export function ImBindingRow({
               仅限私聊。开启后，对方在这个工作区的会话里可以创建和修改自动化（不含脚本与前置检查）、直接写入工作区记忆；不能安装
               Skill 或修改智能体。
             </p>
+            {delegateHostWorkspace && (
+              <p className="mt-0.5 text-caption text-warning">
+                宿主机工作区不支持委托，请改用 Docker 工作区。
+              </p>
+            )}
           </div>
         </div>
       )}

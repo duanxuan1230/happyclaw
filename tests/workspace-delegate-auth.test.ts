@@ -39,6 +39,7 @@ function context(
     ownerUserId: OWNER,
     workspaceFolder: FOLDER,
     runtimeAgentId: null,
+    hostWorkspace: false,
     getMount: (jid) => mounts[jid],
     ...overrides,
   };
@@ -146,6 +147,15 @@ describe('isWorkspaceDelegateInput', () => {
         ),
       ),
     ).toBe(true);
+  });
+
+  test('a Host workspace never has a delegate, even with the flag still on', () => {
+    expect(
+      isWorkspaceDelegateInput(
+        said('qq:AAAA', DM),
+        context(mounts, { hostWorkspace: true }),
+      ),
+    ).toBe(false);
   });
 
   test('Web inputs are never a delegate', () => {
@@ -275,6 +285,7 @@ describe('the delegate tier does not leak into owner-only capabilities', () => {
         delegate: {
           workspaceFolder: FOLDER,
           runtimeAgentId: null,
+          hostWorkspace: false,
           getMount: (jid) => (jid === DM ? trusted() : undefined),
         },
         requireTurn: (predicate) =>

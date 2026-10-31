@@ -212,7 +212,7 @@ owner 输入的判定在宿主：Web 输入的 sender 等于 owner 用户 id；I
 必须等于该工作区注册中由宿主记录的 owner（claim source 为 `configured`、
 `trusted_direct` 或 `auto_feishu`）。委托对象的输入：来源私聊的会话绑定打开了
 `delegate_enabled`、绑定指向本工作区与本会话且属于同一 owner，发送者等于从私聊 JID
-推出的对方 id（`src/workspace-delegate-auth.ts`）。写入一律要求 Runner 的 HMAC 写能力；proposed
+推出的对方 id，且工作区不是 Host 模式（`src/workspace-delegate-auth.ts`）。写入一律要求 Runner 的 HMAC 写能力；proposed
 只有 owner 在 Web 确认后才生效。Sub-Agent 的只读限制由 PreToolUse hook 与主进程
 IPC broker 共同执行，不能由模型参数扩大权限。
 
@@ -257,7 +257,8 @@ read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued
 - 账号编码在 JID 中时，必须与数据库记录一致。
 - 原生话题容器使用 `thread_map`，不能绑定到一个固定 Session 后吞并所有话题。
 - 「允许对方管理此工作区」（`PUT /api/workspaces/:jid/channel-mounts/:channelJid/delegate`）
-  只由工作区 owner 切换，只接受私聊的会话绑定；访客与其他用户一律 404，换绑清除。
+  只由工作区 owner 切换，只接受 Docker 工作区上私聊的会话绑定（飞书私聊不支持，Host
+  工作区 400）；访客与其他用户一律 404，换绑或切到 Host 时清除。
 - Unbind 必须原子恢复该 Bot 的默认工作区；无法解析默认目标时保留旧绑定并报错。
 
 ## 6. 系统和管理权限

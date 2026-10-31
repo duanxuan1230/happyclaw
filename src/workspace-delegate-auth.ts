@@ -48,6 +48,11 @@ export interface WorkspaceDelegateContext {
   workspaceFolder: string;
   /** Runtime Session id of the runner, or null for the Main Session. */
   runtimeAgentId: string | null;
+  /**
+   * The workspace runs on the host. Host workspaces never have delegates,
+   * even if a flag survived a switch to host mode.
+   */
+  hostWorkspace: boolean;
   /** agent_channel_mounts row by conversation JID. */
   getMount: (conversationJid: string) => WorkspaceDelegateMount | undefined;
 }
@@ -66,6 +71,7 @@ export function isWorkspaceDelegateInput(
   if (!sourceJid || sourceJid.startsWith('web:') || !input.sender) {
     return false;
   }
+  if (context.hostWorkspace) return false;
   const conversationJid = channelConversationJid(sourceJid);
   if (!isDelegateCapableConversation(conversationJid)) return false;
   const mount = context.getMount(conversationJid);

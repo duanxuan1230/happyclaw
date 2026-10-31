@@ -8729,6 +8729,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     syncWorkspaceFromRegisteredGroup(jid, group);
     syncChannelMountFromRegisteredGroup(jid, group);
     if (jid.startsWith('web:')) {
+      if (group.executionMode === 'host') clearWorkspaceDelegates(jid);
       if (existing?.folder && existing.folder !== group.folder) {
         syncWorkspaceRuntimeSessionsForFolder(existing.folder);
       }
@@ -8941,6 +8942,9 @@ function forceRuntimesToHostForFolderQuery(
      WHERE folder IN (${folderQuery})
        AND COALESCE(execution_mode, 'container') <> 'host'`,
   ).run(...params);
+  for (const group of affectedGroups) {
+    if (group.jid.startsWith('web:')) clearWorkspaceDelegates(group.jid);
+  }
 
   return { affectedGroups, affectedFolders };
 }
@@ -9348,6 +9352,19 @@ export function setChannelMountInteractionModeOverride(
     syncAgentChannelMountFromMount(saved);
     return saved;
   })();
+}
+
+/**
+ * Host workspaces never have delegates: a workspace switched to host drops
+ * every delegate grant on its bindings (both mount tables).
+ */
+function clearWorkspaceDelegates(workspaceJid: string): void {
+  for (const table of ['channel_mounts', 'agent_channel_mounts']) {
+    prepareCached(
+      `UPDATE ${table} SET delegate_enabled = 0
+       WHERE workspace_jid = ? AND delegate_enabled = 1`,
+    ).run(workspaceJid);
+  }
 }
 
 /**

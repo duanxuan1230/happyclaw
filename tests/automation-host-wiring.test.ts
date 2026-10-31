@@ -242,7 +242,7 @@ describe('automation tools over task IPC', () => {
     });
   });
 
-  test('owner plus delegate is a delegate turn; delegate plus member, or a delegate of another session, is not', async () => {
+  test('owner plus delegate in one batch is a delegate turn', async () => {
     const mixed = ipcHost({
       m1: humanInput('ou_owner'),
       d1: dmInput(DELEGATE_DM),
@@ -251,7 +251,9 @@ describe('automation tools over task IPC', () => {
     expect(mixed.handleIpc.mock.calls[0][0]).toMatchObject({
       kind: 'delegate_turn',
     });
+  });
 
+  test('delegate plus a group member is an other_turn', async () => {
     const withMember = ipcHost({
       d1: dmInput(DELEGATE_DM),
       m1: humanInput('ou_member'),
@@ -260,12 +262,27 @@ describe('automation tools over task IPC', () => {
     expect(withMember.handleIpc.mock.calls[0][0]).toMatchObject({
       kind: 'other_turn',
     });
+  });
 
+  test('a delegate trusted for another session is an other_turn here', async () => {
     const otherSession = ipcHost({ d1: dmInput(OTHER_DM) });
     await otherSession.send({ type: 'automation_list' });
     expect(otherSession.handleIpc.mock.calls[0][0]).toMatchObject({
       kind: 'other_turn',
     });
+  });
+
+  test('on a Host workspace a delegate is an ordinary other_turn', async () => {
+    registrations[WORKSPACE].executionMode = 'host';
+    try {
+      const host = ipcHost({ d1: dmInput(DELEGATE_DM) });
+      await host.send({ type: 'automation_list' });
+      expect(host.handleIpc.mock.calls[0][0]).toMatchObject({
+        kind: 'other_turn',
+      });
+    } finally {
+      delete registrations[WORKSPACE].executionMode;
+    }
   });
 
   test('an automation run turn acts as that run', async () => {
