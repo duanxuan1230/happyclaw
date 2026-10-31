@@ -695,7 +695,17 @@ Session 或 Memory，也不会绑定/复制 Home Workspace。用户必须在创�
 - `GET /api/workspaces/:jid/runtime-sessions`
 - `GET /api/workspaces/:jid/channel-mounts`
 
-这些接口是 `registered_groups` 兼容存储之上的只读产品投影。
+这些接口是 `registered_groups` 兼容存储之上的只读产品投影。mount 读模型带
+`delegate_capable`（结构上可识别对方的私聊、绑定到单个会话）和 `delegate_enabled`。
+
+- `PUT /api/workspaces/:jid/channel-mounts/:channelJid/delegate`，body
+  `{ "enabled": boolean }`
+
+工作区主人（对工作区和该聊天都 `canModifyGroup`）打开或关闭「允许对方管理此工作区」。
+只接受私聊的会话绑定，群聊、话题或无法从 JID 识别对方的会话（如飞书）开启时返回 400；
+其他用户、访客或路径不匹配返回 404；绑定已变化返回 409。换绑或解绑会清除该开关。
+`GET /api/groups/:jid/im-groups` 的条目同样返回 `mount_workspace_jid`、
+`delegate_capable` 和 `delegate_enabled`。
 
 ### HappyClaw Owner Profile
 
