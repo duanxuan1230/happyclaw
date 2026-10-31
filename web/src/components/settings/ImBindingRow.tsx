@@ -6,7 +6,9 @@ import {
   RotateCcw,
   AlertTriangle,
   Trash2,
+  Info,
 } from 'lucide-react';
+import { InfoTip } from '@/components/common/InfoTip';
 import { Button } from '@/components/ui/button';
 import {
   NativeSelect,
@@ -39,6 +41,8 @@ interface ImBindingRowProps {
   onDelete: (group: AvailableImGroup) => void;
 }
 
+const DELEGATE_HELP_TEXT =
+  '仅限私聊。开启后，对方在这个工作区的会话里可以创建和修改自动化（不含脚本与前置检查）、直接写入工作区记忆；不能安装 Skill 或修改智能体。';
 export function ImBindingRow({
   group,
   isActioning,
@@ -99,7 +103,10 @@ export function ImBindingRow({
     !policyMismatch &&
     group.conversation_kind === 'direct' &&
     group.delegate_capable === true &&
-    !!group.mount_workspace_jid;
+    !!group.mount_workspace_jid &&
+    // Host workspaces don't support delegates: hide the switch, except to let
+    // the owner turn off a grant left over from before the switch to Host.
+    (group.delegate_host_workspace !== true || group.delegate_enabled === true);
   const delegateSwitchId = `im-delegate-${group.jid}`;
   const delegateHostWorkspace = group.delegate_host_workspace === true;
 
@@ -300,10 +307,9 @@ export function ImBindingRow({
       )}
 
       {showDelegate && (
-        <div className="mt-2.5 flex items-start gap-3 sm:pl-11">
+        <div className="mt-2.5 flex items-center gap-2 sm:pl-11">
           <Switch
             id={delegateSwitchId}
-            className="mt-0.5"
             checked={group.delegate_enabled === true}
             onCheckedChange={(checked) => onDelegateChange?.(group, checked)}
             disabled={
@@ -311,23 +317,26 @@ export function ImBindingRow({
               (delegateHostWorkspace && group.delegate_enabled !== true)
             }
           />
-          <div className="min-w-0">
-            <label
-              htmlFor={delegateSwitchId}
-              className="text-label font-medium text-foreground"
+          <label
+            htmlFor={delegateSwitchId}
+            className="text-label font-medium text-foreground"
+          >
+            允许对方管理此工作区
+          </label>
+          <InfoTip content={DELEGATE_HELP_TEXT}>
+            <button
+              type="button"
+              aria-label="允许对方管理此工作区的说明"
+              className="inline-flex size-5 shrink-0 cursor-help items-center justify-center rounded-full text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
             >
-              允许对方管理此工作区
-            </label>
-            <p className="mt-0.5 text-caption text-muted-foreground">
-              仅限私聊。开启后，对方在这个工作区的会话里可以创建和修改自动化（不含脚本与前置检查）、直接写入工作区记忆；不能安装
-              Skill 或修改智能体。
-            </p>
-            {delegateHostWorkspace && (
-              <p className="mt-0.5 text-caption text-warning">
-                宿主机工作区不支持委托，请改用 Docker 工作区。
-              </p>
-            )}
-          </div>
+              <Info className="size-3.5" />
+            </button>
+          </InfoTip>
+          {delegateHostWorkspace && (
+            <span className="text-caption text-warning">
+              宿主机工作区不支持委托，请关闭
+            </span>
+          )}
         </div>
       )}
     </div>
