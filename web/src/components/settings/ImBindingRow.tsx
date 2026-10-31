@@ -13,6 +13,7 @@ import {
   NativeSelectOption,
 } from '@/components/ui/native-select';
 import { IconButton } from '@/components/common/IconButton';
+import { Switch } from '@/components/ui/switch';
 import type { AvailableImGroup } from '../../types';
 import { ChannelAccountBadge, ChannelBadge } from './channel-meta';
 import {
@@ -33,6 +34,8 @@ interface ImBindingRowProps {
   onResetAllowlist: (group: AvailableImGroup) => void;
   onActivationModeChange: (jid: string, mode: string) => void;
   onAudienceModeChange: (jid: string, mode: 'everyone' | 'owner_only') => void;
+  /** Owner trusts this direct chat's counterpart as a workspace delegate. */
+  onDelegateChange?: (group: AvailableImGroup, enabled: boolean) => void;
   onDelete: (group: AvailableImGroup) => void;
 }
 
@@ -44,6 +47,7 @@ export function ImBindingRow({
   onResetAllowlist,
   onActivationModeChange,
   onAudienceModeChange,
+  onDelegateChange,
   onDelete,
 }: ImBindingRowProps) {
   const boundSessionId = group.bound_session_id ?? group.bound_agent_id;
@@ -86,6 +90,17 @@ export function ImBindingRow({
     }
     return '未绑定';
   };
+
+  // Only a direct chat bound to a session can name its counterpart as a
+  // delegate; the server re-checks ownership and the conversation kind.
+  const showDelegate =
+    !!onDelegateChange &&
+    hasBound &&
+    !policyMismatch &&
+    group.conversation_kind === 'direct' &&
+    group.delegate_capable === true &&
+    !!group.mount_workspace_jid;
+  const delegateSwitchId = `im-delegate-${group.jid}`;
 
   const showAudience =
     group.channel_type === 'feishu' &&
@@ -280,6 +295,30 @@ export function ImBindingRow({
               ))}
             </NativeSelect>
           )}
+        </div>
+      )}
+
+      {showDelegate && (
+        <div className="mt-2.5 flex items-start gap-3 sm:pl-11">
+          <Switch
+            id={delegateSwitchId}
+            className="mt-0.5"
+            checked={group.delegate_enabled === true}
+            onCheckedChange={(checked) => onDelegateChange?.(group, checked)}
+            disabled={isActioning}
+          />
+          <div className="min-w-0">
+            <label
+              htmlFor={delegateSwitchId}
+              className="text-label font-medium text-foreground"
+            >
+              允许对方管理此工作区
+            </label>
+            <p className="mt-0.5 text-caption text-muted-foreground">
+              仅限私聊。开启后，对方在这个工作区的会话里可以创建和修改自动化（不含脚本与前置检查）、直接写入工作区记忆；不能安装
+              Skill 或修改智能体。
+            </p>
+          </div>
         </div>
       )}
     </div>
